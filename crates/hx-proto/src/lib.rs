@@ -89,13 +89,33 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     switches: 10,
     device_id: 0x0021_0001,
 };
+pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
+    product_id: 0x4245,
+    name: "HX Effects",
+    presets: 128,
+    switches: 6,
+    device_id: 0x0021_0005,
+};
 
 /// Every device profile we recognise.
 ///
-/// Product ids for HX Effects, POD Go, Helix LT and Helix Rack are not publicly
-/// known, so those devices are absent rather than guessed at.
-pub const PROFILES: &[DeviceProfile] = &[HX_STOMP, HX_STOMP_XL, HELIX_FLOOR];
+/// Product ids for POD Go, Helix LT and Helix Rack are not publicly known, so
+/// those devices are absent rather than guessed at.
+pub const PROFILES: &[DeviceProfile] = &[HX_STOMP, HX_STOMP_XL, HELIX_FLOOR, HX_EFFECTS];
 
 pub fn profile_for(product_id: u16) -> Option<&'static DeviceProfile> {
     PROFILES.iter().find(|p| p.product_id == product_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hx_effects_is_recognised_by_its_usb_product_id() {
+        assert_eq!(profile_for(0x4245), Some(&HX_EFFECTS));
+        assert_eq!(HX_EFFECTS.device_id, 0x0021_0005);
+        assert_eq!(HX_EFFECTS.presets, 128);
+        assert_eq!(HX_EFFECTS.switches, 6);
+    }
 }
