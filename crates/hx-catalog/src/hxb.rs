@@ -248,12 +248,13 @@ impl Container {
         let table_end = count
             .checked_mul(ENTRY_LEN)
             .and_then(|len| table_off.checked_add(len));
-        if table_end.is_none_or(|end| end > bytes.len()) {
+        if table_off < HEADER_LEN || table_end != Some(bytes.len()) {
             return Err(Error::Backup(
-                "backup block table runs past the file".into(),
+                "backup block table is outside the canonical file layout".into(),
             ));
         }
         let mut blocks = Vec::with_capacity(count);
+        let mut next_block = HEADER_LEN;
         for i in 0..count {
             let e = table_off + i * ENTRY_LEN;
             let tag = [bytes[e], bytes[e + 1], bytes[e + 2], bytes[e + 3]];
@@ -272,15 +273,23 @@ impl Container {
             let Some(end) = off.checked_add(stored_len) else {
                 return Err(Error::Backup("a backup block runs past the file".into()));
             };
-            if end > bytes.len() {
-                return Err(Error::Backup("a backup block runs past the file".into()));
+            if off != next_block || end > table_off {
+                return Err(Error::Backup(
+                    "backup blocks overlap, have gaps, or run into the table".into(),
+                ));
             }
+            next_block = end;
             blocks.push(Block {
                 tag,
                 compressed: flags == 1,
                 raw_len,
                 stored: bytes[off..end].to_vec(),
             });
+        }
+        if next_block != table_off {
+            return Err(Error::Backup(
+                "backup block data does not end at its table".into(),
+            ));
         }
         Ok(Container { version, blocks })
     }
@@ -479,6 +488,39 @@ mod tests {
         table[HEADER_LEN + 4..HEADER_LEN + 20].fill(0);
         table[HEADER_LEN + 20..HEADER_LEN + 24].copy_from_slice(&2u32.to_le_bytes());
         assert!(Container::parse(&table).is_err(), "unknown flags");
+    }
+
+    #[test]
+    fn overlapping_or_noncanonical_block_ranges_are_rejected() {
+        let canonical = Container {
+            version: 1,
+            blocks: vec![
+                Block {
+                    tag: *b"ONE!",
+                    compressed: false,
+                    raw_len: 2,
+                    stored: b"12".to_vec(),
+                },
+                Block {
+                    tag: *b"TWO!",
+                    compressed: false,
+                    raw_len: 2,
+                    stored: b"34".to_vec(),
+                },
+            ],
+        }
+        .encode();
+        assert!(Container::parse(&canonical).is_ok());
+
+        let table = canonical.len() - 2 * ENTRY_LEN;
+        let mut overlap = canonical.clone();
+        overlap[table + ENTRY_LEN + 4..table + ENTRY_LEN + 12]
+            .copy_from_slice(&(HEADER_LEN as u64).to_le_bytes());
+        assert!(Container::parse(&overlap).is_err());
+
+        let mut trailing = canonical;
+        trailing.push(0);
+        assert!(Container::parse(&trailing).is_err());
     }
 
     #[test]
