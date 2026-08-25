@@ -624,7 +624,8 @@ pub fn read_favourite_file(bytes: &[u8]) -> Result<Favourite, Error> {
     let name = file
         .pointer("/data/meta/name")
         .and_then(Value::as_str)
-        .unwrap_or("favourite")
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| Error::Backup("the favourite file has no readable name".into()))?
         .to_owned();
     let slots = file
         .pointer("/data/favorite")
@@ -632,11 +633,34 @@ pub fn read_favourite_file(bytes: &[u8]) -> Result<Favourite, Error> {
         .ok_or_else(|| Error::Backup("the favourite file holds no block".into()))?;
 
     // slot0, slot1, … in order, so an amp keeps its cab behind it.
-    let mut numbered: Vec<(u32, Value)> = slots
-        .iter()
-        .filter_map(|(k, v)| Some((k.strip_prefix("slot")?.parse().ok()?, v.clone())))
-        .collect();
+    let mut numbered = Vec::with_capacity(slots.len());
+    for (key, value) in slots {
+        let number = key
+            .strip_prefix("slot")
+            .and_then(|number| number.parse::<u32>().ok())
+            .ok_or_else(|| Error::Backup(format!("invalid favourite slot key {key:?}")))?;
+        if value
+            .get("@model")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(Error::Backup(format!(
+                "favourite slot {number} has no model"
+            )));
+        }
+        numbered.push((number, value.clone()));
+    }
     numbered.sort_by_key(|(n, _)| *n);
+    if numbered.is_empty()
+        || numbered
+            .iter()
+            .enumerate()
+            .any(|(expected, (found, _))| usize::try_from(*found) != Ok(expected))
+    {
+        return Err(Error::Backup(
+            "the favourite file's slots are empty or not contiguous from slot0".into(),
+        ));
+    }
 
     Ok(Favourite {
         name,
@@ -763,6 +787,33 @@ mod editor_file_tests {
             .as_str()
             .unwrap()
             .contains("Cab"));
+    }
+
+    #[test]
+    fn malformed_favourite_slots_are_not_silently_dropped_or_reordered() {
+        let favourite = |slots| {
+            serde_json::to_vec(&json!({
+                "data": {
+                    "meta": { "name": "test" },
+                    "favorite": slots,
+                }
+            }))
+            .unwrap()
+        };
+
+        let misspelled = favourite(json!({
+            "slot0": { "@model": "HD2_DistScream808" },
+            "slto1": { "@model": "HD2_Cab1x12USDeluxe" },
+        }));
+        assert!(read_favourite_file(&misspelled).is_err());
+
+        let gap = favourite(json!({
+            "slot1": { "@model": "HD2_Cab1x12USDeluxe" },
+        }));
+        assert!(read_favourite_file(&gap).is_err());
+
+        let missing_model = favourite(json!({ "slot0": {} }));
+        assert!(read_favourite_file(&missing_model).is_err());
     }
 
     #[test]
