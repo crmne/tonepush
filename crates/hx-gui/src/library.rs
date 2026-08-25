@@ -44,7 +44,7 @@ use sha2::{Digest, Sha256};
 /// Object bytes and the JSON files that point at them are the library's source
 /// of truth. Writing either in place would turn a full disk, process kill, or
 /// power loss into a valid path containing only part of its document.
-fn atomic_write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+pub(crate) fn atomic_write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
     let mut file = AtomicWriteFile::open(path)?;
     file.write_all(bytes.as_ref())?;
     file.commit()

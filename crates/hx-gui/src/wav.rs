@@ -141,7 +141,20 @@ impl Format {
 /// rather than as a blob only this program understands.
 pub fn write(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
     const HEADER: u32 = 36;
-    let data = (samples.len() * 4) as u32;
+    if samples.is_empty()
+        || samples.len() > 2048
+        || samples.iter().any(|sample| !sample.is_finite())
+    {
+        return Err(Error::Protocol(
+            "a device IR WAV needs 1 to 2048 finite samples".into(),
+        ));
+    }
+    let byte_rate = sample_rate
+        .checked_mul(4)
+        .filter(|_| sample_rate > 0)
+        .ok_or_else(|| Error::Protocol("the WAV sample rate is out of range".into()))?;
+    let data = u32::try_from(samples.len() * 4)
+        .map_err(|_| Error::Protocol("the WAV data is too large".into()))?;
 
     let mut out = Vec::with_capacity(HEADER as usize + 8 + data as usize);
     out.extend_from_slice(b"RIFF");
@@ -153,7 +166,7 @@ pub fn write(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
     out.extend_from_slice(&3u16.to_le_bytes()); // 3 is IEEE float
     out.extend_from_slice(&1u16.to_le_bytes()); // mono
     out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&(sample_rate * 4).to_le_bytes()); // bytes per second
+    out.extend_from_slice(&byte_rate.to_le_bytes()); // bytes per second
     out.extend_from_slice(&4u16.to_le_bytes()); // bytes per frame
     out.extend_from_slice(&32u16.to_le_bytes()); // bits per sample
 
@@ -163,7 +176,8 @@ pub fn write(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
         out.extend_from_slice(&s.to_le_bytes());
     }
 
-    std::fs::write(path, out).map_err(|e| Error::Protocol(format!("writing {path:?}: {e}")))
+    crate::library::atomic_write(path, out)
+        .map_err(|e| Error::Protocol(format!("writing {path:?}: {e}")))
 }
 
 #[cfg(test)]
@@ -203,6 +217,17 @@ mod tests {
         let back = read(&path).expect("reads");
         assert_eq!(back.sample_rate, 48_000);
         assert_eq!(back.samples, samples);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_device_ir_wavs_are_not_written() {
+        let path = write_temp(b"old", "invalid-output.wav");
+        assert!(write(&path, &[], 48_000).is_err());
+        assert!(write(&path, &[f32::NAN], 48_000).is_err());
+        assert!(write(&path, &[0.0], 0).is_err());
+        assert!(write(&path, &[0.0], u32::MAX).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
         let _ = std::fs::remove_file(path);
     }
 
