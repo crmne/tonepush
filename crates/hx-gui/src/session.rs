@@ -1710,10 +1710,10 @@ impl Worker {
         let Some(preset) = self.read_settled() else {
             return;
         };
-        if let Some(info) = self.device.as_mut().and_then(|d| d.preset_info().ok()) {
-            let (_, index, name) = info;
-            self.shown = (index, name);
-        }
+        let Some((_, index, name)) = self.try_on_device(|device| device.preset_info()) else {
+            return;
+        };
+        self.shown = (index, name);
         self.present(&preset);
     }
 
