@@ -11,7 +11,7 @@
 [package]
 name = "hx-ruby"
 description = "Read Line 6 Helix and HX guitar preset files from Ruby"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/crmne/tonepush"
@@ -35,7 +35,7 @@ crate-type = ["cdylib"]
 # no sibling crates. A path would point at nothing there. The workspace root
 # patches both back to the local sources, so building here still compiles what
 # is checked out rather than what was last published.
-hx-catalog = "0.5.4"
-hx-proto = "0.5.4"
+hx-catalog = "0.5.5"
+hx-proto = "0.5.5"
 magnus = "0.8"
 serde_json = "1"
