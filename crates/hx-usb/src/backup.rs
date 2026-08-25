@@ -24,7 +24,8 @@
 //! time without this program; and an incremental backup can rewrite one preset
 //! rather than the whole thing. The manifest is JSON for the same reason.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use hx_proto::msgpack::Value;
@@ -106,22 +107,30 @@ pub fn capture(
 ) -> Result<Manifest> {
     let (device, firmware) = identify(session)?;
     let setlists = session.setlists()?;
-    let names = session.presets(0)?;
+    let mut names = session.presets(0)?;
 
     std::fs::create_dir_all(dir.join("presets")).map_err(io("creating the bundle"))?;
 
     // Presets, byte for byte. An empty slot is recorded as an empty name and
     // no file, which is what tells a restore to blank it rather than skip it.
     let total = names.len();
-    for (index, name) in names.iter().enumerate() {
+    let mut preset_files = BTreeSet::new();
+    for (index, listed_name) in names.iter_mut().enumerate() {
+        let name = listed_name.clone();
         progress(Step::Presets {
             done: index,
             total,
-            name,
+            name: &name,
         });
         if let Some(preset) = session.read_preset_at(0, index as i64)? {
-            let path = dir.join("presets").join(preset_file(index, name));
+            let file = preset_file(index, &name);
+            let path = dir.join("presets").join(&file);
             std::fs::write(&path, preset.encode()).map_err(io("writing a preset"))?;
+            preset_files.insert(OsString::from(file));
+        } else {
+            // The document is the authority on whether the slot is occupied;
+            // list labels on some firmware use a default name for empty slots.
+            listed_name.clear();
         }
     }
 
@@ -130,10 +139,16 @@ pub fn capture(
     progress(Step::Globals);
     let mut globals = BTreeMap::new();
     for id in 0..GLOBAL_IDS {
-        if let Ok(value) = session.object(id) {
-            if let Some(json) = to_json(&value) {
-                globals.insert(id.to_string(), json);
-            }
+        let value = match session.object(id) {
+            Ok(value) => value,
+            // Unsupported ids are expected in this deliberately broad sweep.
+            Err(Error::Device(_)) => continue,
+            // Silence or malformed protocol is not evidence that a setting is
+            // absent; carrying on would bless a partial capture as complete.
+            Err(error) => return Err(error),
+        };
+        if let Some(json) = to_json(&value) {
+            globals.insert(id.to_string(), json);
         }
     }
     std::fs::write(
@@ -144,7 +159,10 @@ pub fn capture(
 
     // Impulse responses, samples and all - the pedal is the only place an IR
     // that was uploaded once and never kept still exists.
-    let slots = session.irs().unwrap_or_default();
+    // A failed list is not an empty pedal. Recording it as one would make a
+    // later restore erase every IR that the incomplete backup happened not to
+    // mention.
+    let slots = session.irs()?;
     let mut irs = BTreeMap::new();
     if !slots.is_empty() {
         std::fs::create_dir_all(dir.join("irs")).map_err(io("creating the IR folder"))?;
@@ -154,17 +172,20 @@ pub fn capture(
             done,
             total: slots.len(),
         });
-        if let Some((name, samples)) = session.read_ir(*slot)? {
-            let mut bytes = Vec::with_capacity(samples.len() * 4);
-            for s in &samples {
-                bytes.extend_from_slice(&s.to_le_bytes());
-            }
-            let path = dir
-                .join("irs")
-                .join(format!("{slot:02} {}.f32", sanitise(&name)));
-            std::fs::write(&path, bytes).map_err(io("writing an impulse response"))?;
-            irs.insert(slot.to_string(), name);
+        let (name, samples) = session.read_ir(*slot)?.ok_or_else(|| {
+            Error::Protocol(format!(
+                "impulse response slot {slot} disappeared during the backup"
+            ))
+        })?;
+        let mut bytes = Vec::with_capacity(samples.len() * 4);
+        for s in &samples {
+            bytes.extend_from_slice(&s.to_le_bytes());
         }
+        let path = dir
+            .join("irs")
+            .join(format!("{slot:02} {}.f32", sanitise(&name)));
+        std::fs::write(&path, bytes).map_err(io("writing an impulse response"))?;
+        irs.insert(slot.to_string(), name);
     }
 
     let manifest = Manifest {
@@ -177,6 +198,7 @@ pub fn capture(
         irs,
         globals: globals.len(),
     };
+    remove_stale_preset_files(&dir.join("presets"), &preset_files)?;
     std::fs::write(
         dir.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(json_err)?,
@@ -189,7 +211,14 @@ pub fn capture(
 /// Read a bundle's manifest, to show what it holds before putting it back.
 pub fn open(dir: &Path) -> Result<Manifest> {
     let bytes = std::fs::read(dir.join("manifest.json")).map_err(io("reading the manifest"))?;
-    serde_json::from_slice(&bytes).map_err(json_err)
+    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(json_err)?;
+    if manifest.version != 1 {
+        return Err(Error::Protocol(format!(
+            "unsupported backup version {}",
+            manifest.version
+        )));
+    }
+    Ok(manifest)
 }
 
 /// Write a bundle back onto the pedal.
@@ -205,72 +234,182 @@ pub fn restore(
     mut progress: impl FnMut(Step),
 ) -> Result<()> {
     let manifest = open(dir)?;
+    validate_device(&manifest, session.profile.name)?;
+    if parts.presets && manifest.presets.len() != usize::from(session.profile.presets) {
+        return Err(Error::Protocol(format!(
+            "the backup has {} preset slots, but {} has {}",
+            manifest.presets.len(),
+            session.profile.name,
+            session.profile.presets
+        )));
+    }
 
-    if parts.presets {
-        let total = manifest.presets.len();
-        for (index, name) in manifest.presets.iter().enumerate() {
+    // Preflight the complete local side before the first flash write. A full
+    // restore must not get halfway through its presets and only then discover
+    // that globals.json is broken or an IR file is missing.
+    let presets = parts
+        .presets
+        .then(|| restore_presets(dir, &manifest))
+        .transpose()?;
+    let globals = parts.globals.then(|| restore_globals(dir)).transpose()?;
+    let irs = parts.irs.then(|| restore_irs(dir, &manifest)).transpose()?;
+
+    if let Some(presets) = presets {
+        let total = presets.len();
+        for (index, name, preset) in presets {
             progress(Step::Presets {
                 done: index,
                 total,
-                name,
+                name: &name,
             });
-            let path = dir.join("presets").join(preset_file(index, name));
-            match std::fs::read(&path) {
-                Ok(bytes) => {
-                    let preset = Preset::parse(&bytes).ok_or_else(|| {
-                        Error::Protocol(format!("{} is not a preset document", path.display()))
-                    })?;
-                    session.write_preset_at(0, index as i64, name, &preset)?;
-                }
-                // No file means the slot was empty when the backup was taken,
-                // so it has to be emptied now: a restore puts the pedal back as
-                // it was, and leaving someone else's preset in place would not.
-                Err(_) => session.clear_preset_at(0, index as i64)?,
+            match preset {
+                Some(preset) => session.write_preset_at(0, index as i64, &name, &preset)?,
+                None => session.clear_preset_at(0, index as i64)?,
             }
         }
     }
 
-    if parts.globals {
+    if let Some(globals) = globals {
         progress(Step::Globals);
-        let bytes = std::fs::read(dir.join("globals.json")).map_err(io("reading the settings"))?;
-        let globals: BTreeMap<String, serde_json::Value> =
-            serde_json::from_slice(&bytes).map_err(json_err)?;
         for (id, want) in &globals {
-            let Ok(id) = id.parse::<i64>() else { continue };
             // The device refuses a value of the wrong type, so each one goes
             // back shaped like what the device currently holds.
-            let Ok(current) = session.object(id) else {
-                continue;
+            let current = match session.object(*id) {
+                Ok(current) => current,
+                // A firmware that does not have an older setting says so with
+                // a complete refusal. Transport/protocol errors instead mean
+                // the session is no longer safe to keep using.
+                Err(Error::Device(_)) => continue,
+                Err(error) => return Err(error),
             };
             if let Some(value) = from_json(want, &current) {
-                let _ = session.set_object(id, value);
+                match session.set_object(*id, value) {
+                    Ok(()) | Err(Error::Device(_)) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
     }
 
-    if parts.irs {
-        let total = manifest.irs.len();
-        for (done, (slot, name)) in manifest.irs.iter().enumerate() {
+    if let Some(irs) = irs {
+        // The manifest lists occupied slots; occupied device slots absent from
+        // that list were empty in the backup and are cleared afterwards.
+        let total = irs.len();
+        for (done, (slot, (name, samples))) in irs.iter().enumerate() {
             progress(Step::Irs { done, total });
-            let Ok(slot) = slot.parse::<i64>() else {
-                continue;
-            };
-            let path = dir
-                .join("irs")
-                .join(format!("{slot:02} {}.f32", sanitise(name)));
-            let Ok(bytes) = std::fs::read(&path) else {
-                continue;
-            };
-            let samples: Vec<f32> = bytes
-                .chunks_exact(4)
-                .map(|w| f32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-                .collect();
-            session.upload_ir(slot, name, &samples)?;
+            session.upload_ir(*slot, name, samples)?;
+        }
+        for (slot, _) in session.irs()? {
+            if !irs.contains_key(&slot) {
+                session.clear_ir(slot)?;
+            }
         }
     }
 
     progress(Step::Done);
     Ok(())
+}
+
+fn validate_device(manifest: &Manifest, device: &str) -> Result<()> {
+    if manifest.device != device {
+        return Err(Error::Protocol(format!(
+            "this is a {} backup, but the connected device is {}",
+            manifest.device, device
+        )));
+    }
+    Ok(())
+}
+
+type RestorePreset = (usize, String, Option<Preset>);
+
+fn restore_presets(dir: &Path, manifest: &Manifest) -> Result<Vec<RestorePreset>> {
+    manifest
+        .presets
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let path = dir.join("presets").join(preset_file(index, name));
+            let preset = match std::fs::read(&path) {
+                Ok(bytes) => Some(Preset::parse(&bytes).ok_or_else(|| {
+                    Error::Protocol(format!("{} is not a preset document", path.display()))
+                })?),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && name.is_empty() => {
+                    None
+                }
+                Err(error) => {
+                    return Err(Error::Protocol(format!(
+                        "reading saved preset {}: {error}",
+                        path.display()
+                    )))
+                }
+            };
+            Ok((index, name.clone(), preset))
+        })
+        .collect()
+}
+
+type RestoreGlobals = Vec<(i64, serde_json::Value)>;
+
+fn restore_globals(dir: &Path) -> Result<RestoreGlobals> {
+    let path = dir.join("globals.json");
+    let bytes = std::fs::read(&path).map_err(io("reading the settings"))?;
+    let saved: BTreeMap<String, serde_json::Value> =
+        serde_json::from_slice(&bytes).map_err(json_err)?;
+    let mut ids = BTreeSet::new();
+    saved
+        .into_iter()
+        .map(|(text, value)| {
+            let id: i64 = text.parse().map_err(|_| {
+                Error::Protocol(format!("the backup has an invalid setting id {text:?}"))
+            })?;
+            if id < 0 || !ids.insert(id) {
+                return Err(Error::Protocol(format!(
+                    "the backup has an invalid or duplicate setting id {id}"
+                )));
+            }
+            Ok((id, value))
+        })
+        .collect()
+}
+
+type RestoreIrs = BTreeMap<i64, (String, Vec<f32>)>;
+
+fn restore_irs(dir: &Path, manifest: &Manifest) -> Result<RestoreIrs> {
+    let mut restored = BTreeMap::new();
+    for (slot, name) in &manifest.irs {
+        let slot: i64 = slot
+            .parse()
+            .map_err(|_| Error::Protocol(format!("the backup has an invalid IR slot {slot:?}")))?;
+        if slot < 0 || restored.contains_key(&slot) {
+            return Err(Error::Protocol(format!(
+                "the backup has an invalid or duplicate IR slot {slot}"
+            )));
+        }
+        let path = dir
+            .join("irs")
+            .join(format!("{slot:02} {}.f32", sanitise(name)));
+        let bytes = std::fs::read(&path).map_err(|error| {
+            Error::Protocol(format!("reading saved IR {}: {error}", path.display()))
+        })?;
+        if !bytes.len().is_multiple_of(4) {
+            return Err(Error::Protocol(format!(
+                "{} ends partway through an f32 sample",
+                path.display()
+            )));
+        }
+        let samples: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect();
+        if samples.is_empty() || samples.len() > 2048 || samples.iter().any(|s| !s.is_finite()) {
+            return Err(Error::Protocol(format!(
+                "{} does not contain 1 to 2048 finite IR samples",
+                path.display()
+            )));
+        }
+        restored.insert(slot, (name.clone(), samples));
+    }
+    Ok(restored)
 }
 
 /// Back up a single preset into an existing bundle, replacing what was there.
@@ -281,30 +420,77 @@ pub fn restore(
 pub fn capture_one(session: &mut Session, dir: &Path, index: i64) -> Result<()> {
     let mut manifest = open(dir)?;
     let names = session.presets(0)?;
-    let name = names.get(index as usize).cloned().unwrap_or_default();
-    let slot = index as usize;
-
-    // The name may have changed since the bundle was written, so the old file
-    // goes before the new one arrives - otherwise a rename leaves two.
-    if let Some(old) = manifest.presets.get(slot) {
-        let _ = std::fs::remove_file(dir.join("presets").join(preset_file(slot, old)));
-    }
-    if let Some(preset) = session.read_preset_at(0, index)? {
-        std::fs::write(
-            dir.join("presets").join(preset_file(slot, &name)),
-            preset.encode(),
-        )
-        .map_err(io("writing a preset"))?;
+    let slot = usize::try_from(index)
+        .map_err(|_| Error::Protocol("preset index cannot be negative".into()))?;
+    let mut name = names
+        .get(slot)
+        .cloned()
+        .ok_or_else(|| Error::Protocol(format!("there is no preset slot {index}")))?;
+    if slot >= manifest.presets.len() {
+        return Err(Error::Protocol(
+            "the backup manifest has fewer preset slots than the device".into(),
+        ));
     }
 
-    if slot < manifest.presets.len() {
-        manifest.presets[slot] = name;
-    }
+    // Read first, so a failed device request leaves the existing backup whole.
+    // Write the replacement before removing renamed duplicates for the same
+    // reason: at every failure point at least one copy remains.
+    let preset = session.read_preset_at(0, index)?;
+    let keep = if let Some(preset) = preset {
+        let file = preset_file(slot, &name);
+        std::fs::write(dir.join("presets").join(&file), preset.encode())
+            .map_err(io("writing a preset"))?;
+        Some(OsString::from(file))
+    } else {
+        name.clear();
+        None
+    };
+    remove_other_slot_files(&dir.join("presets"), slot, keep.as_deref())?;
+
+    manifest.presets[slot] = name;
     std::fs::write(
         dir.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(json_err)?,
     )
     .map_err(io("writing the manifest"))
+}
+
+fn preset_slot(path: &Path) -> Option<usize> {
+    let name = path.file_name()?.to_str()?;
+    let (slot, _) = name.split_once(' ')?;
+    slot.parse().ok()
+}
+
+fn remove_stale_preset_files(dir: &Path, wanted: &BTreeSet<OsString>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).map_err(io("reading the preset backup"))? {
+        let entry = entry.map_err(io("reading the preset backup"))?;
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "hxpreset")
+            && !wanted.contains(&entry.file_name())
+        {
+            std::fs::remove_file(path).map_err(io("removing a stale preset backup"))?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_other_slot_files(dir: &Path, slot: usize, keep: Option<&OsStr>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).map_err(io("reading the preset backup"))? {
+        let entry = entry.map_err(io("reading the preset backup"))?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "hxpreset")
+            && preset_slot(&path) == Some(slot)
+            && keep != Some(file_name.as_os_str())
+        {
+            std::fs::remove_file(path).map_err(io("removing a renamed preset backup"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Every preset a bundle holds, by slot number.
@@ -321,11 +507,7 @@ pub fn slot_files(dir: &Path) -> BTreeMap<usize, PathBuf> {
     read.flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "hxpreset"))
-        .filter_map(|p| {
-            let name = p.file_name()?.to_str()?;
-            let (slot, _) = name.split_once(' ')?;
-            Some((slot.parse().ok()?, p))
-        })
+        .filter_map(|p| Some((preset_slot(&p)?, p)))
         .collect()
 }
 
@@ -342,21 +524,84 @@ pub type Exportable = (Manifest, Vec<(String, Option<Vec<u8>>)>, serde_json::Val
 /// this crate talks to devices. The caller that has a catalog does that half.
 pub fn for_export(dir: &Path) -> Result<Exportable> {
     let manifest = open(dir)?;
-    let files = slot_files(dir);
-    let presets = manifest
+    let presets: Result<Vec<_>> = manifest
         .presets
         .iter()
         .enumerate()
         .map(|(index, name)| {
-            let bytes = files.get(&index).and_then(|p| std::fs::read(p).ok());
-            (name.clone(), bytes)
+            let path = dir.join("presets").join(preset_file(index, name));
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => {
+                    if Preset::parse(&bytes).is_none() {
+                        return Err(Error::Protocol(format!(
+                            "{} is not a preset document",
+                            path.display()
+                        )));
+                    }
+                    Some(bytes)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && name.is_empty() => {
+                    None
+                }
+                Err(error) => {
+                    return Err(Error::Protocol(format!(
+                        "reading saved preset {}: {error}",
+                        path.display()
+                    )))
+                }
+            };
+            Ok((name.clone(), bytes))
         })
         .collect();
-    let globals = std::fs::read(dir.join("globals.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
+    let presets = presets?;
+    let globals_path = dir.join("globals.json");
+    let globals = serde_json::from_slice(
+        &std::fs::read(&globals_path).map_err(io("reading the saved settings"))?,
+    )
+    .map_err(json_err)?;
     Ok((manifest, presets, globals))
+}
+
+/// The device, firmware, and timestamp fields an HX Edit backup needs.
+///
+/// These are kept in a TonePush manifest as readable text and a wider
+/// timestamp. Converting them explicitly avoids silently labelling every
+/// exported bundle as an HX Stomp running whichever firmware the writer was
+/// compiled against.
+pub fn hxb_metadata(manifest: &Manifest) -> Result<(u32, u32, u32)> {
+    let profile = hx_proto::PROFILES
+        .iter()
+        .find(|profile| profile.name == manifest.device)
+        .ok_or_else(|| {
+            Error::Protocol(format!("{} is not a supported HX device", manifest.device))
+        })?;
+    let (major, minor) = manifest.firmware.split_once('.').ok_or_else(|| {
+        Error::Protocol(format!("{} is not a firmware version", manifest.firmware))
+    })?;
+    if major.is_empty()
+        || major.len() > 2
+        || minor.is_empty()
+        || minor.len() > 2
+        || !major.bytes().all(|byte| byte.is_ascii_digit())
+        || !minor.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(Error::Protocol(format!(
+            "{} is not a firmware version",
+            manifest.firmware
+        )));
+    }
+    let major = u8::from_str_radix(major, 16)
+        .map_err(|_| Error::Protocol(format!("{} is not a firmware version", manifest.firmware)))?;
+    let minor = u8::from_str_radix(minor, 16)
+        .map_err(|_| Error::Protocol(format!("{} is not a firmware version", manifest.firmware)))?;
+    let firmware = (u32::from(major) << 24) | (u32::from(minor) << 16);
+    let captured = u32::try_from(manifest.captured).map_err(|_| {
+        Error::Protocol(format!(
+            "backup timestamp {} does not fit the HX Edit format",
+            manifest.captured
+        ))
+    })?;
+    Ok((profile.device_id, firmware, captured))
 }
 
 /// How many object ids to sweep when capturing settings. 147 of the first 160
@@ -392,11 +637,7 @@ fn sanitise(name: &str) -> String {
 }
 
 fn identify(session: &mut Session) -> Result<(String, String)> {
-    let firmware = session
-        .read_preset()
-        .ok()
-        .and_then(|p| p.firmware())
-        .unwrap_or_default();
+    let firmware = session.read_preset()?.firmware().unwrap_or_default();
     Ok((session.profile.name.to_owned(), firmware))
 }
 
@@ -420,9 +661,15 @@ fn from_json(want: &serde_json::Value, current: &Value) -> Option<Value> {
     Some(match current {
         Value::Bool(_) => Value::Bool(want.as_bool()?),
         Value::Int(_) | Value::WideInt(..) => Value::Int(want.as_i64()?),
-        Value::UInt(_) | Value::Wide(..) => Value::Int(want.as_i64()?),
-        Value::F32(_) => Value::F32(want.as_f64()? as f32),
-        Value::F64(_) => Value::F64(want.as_f64()?),
+        Value::UInt(_) | Value::Wide(..) => Value::UInt(want.as_u64()?),
+        Value::F32(_) => {
+            let value = want.as_f64()? as f32;
+            Value::F32(value.is_finite().then_some(value)?)
+        }
+        Value::F64(_) => {
+            let value = want.as_f64()?;
+            Value::F64(value.is_finite().then_some(value)?)
+        }
         Value::Str(_) => Value::Str(want.as_str()?.to_owned()),
         _ => return None,
     })
@@ -529,6 +776,19 @@ fn prune(history: &Path, keep: usize) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn manifest() -> Manifest {
+        Manifest {
+            version: 1,
+            device: "HX Stomp".into(),
+            firmware: "3.80".into(),
+            captured: 0,
+            setlists: vec!["PRESETS".into()],
+            presets: Vec::new(),
+            irs: BTreeMap::new(),
+            globals: 0,
+        }
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("tonepush-snap-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -614,12 +874,102 @@ mod tests {
     }
 
     #[test]
+    fn refreshed_backups_drop_stale_and_renamed_preset_files() {
+        let root = scratch("stale-presets");
+        let dir = root.join("bundle.hxbundle/presets");
+        std::fs::write(dir.join("000 Old.hxpreset"), b"old").unwrap();
+        std::fs::write(dir.join("001 Keep.hxpreset"), b"keep").unwrap();
+        let wanted = BTreeSet::from([OsString::from("001 Keep.hxpreset")]);
+        remove_stale_preset_files(&dir, &wanted).unwrap();
+        assert!(!dir.join("000 One.hxpreset").exists());
+        assert!(!dir.join("000 Old.hxpreset").exists());
+        assert!(dir.join("001 Keep.hxpreset").exists());
+
+        std::fs::write(dir.join("001 New.hxpreset"), b"new").unwrap();
+        remove_other_slot_files(&dir, 1, Some(OsStr::new("001 New.hxpreset"))).unwrap();
+        assert!(!dir.join("001 Keep.hxpreset").exists());
+        assert!(dir.join("001 New.hxpreset").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn restore_validates_every_local_file_before_device_writes() {
+        const PRESET: &[u8] = include_bytes!("../../hx-proto/tests/preset.bin");
+        let root = scratch("restore-inputs");
+        let bundle = root.join("bundle.hxbundle");
+        let mut saved = manifest();
+        saved.presets = vec!["Named".into(), String::new()];
+
+        let error = restore_presets(&bundle, &saved)
+            .err()
+            .expect("missing named preset");
+        assert!(error.to_string().contains("Named"));
+
+        std::fs::write(bundle.join("presets/000 Named.hxpreset"), PRESET).unwrap();
+        let presets = restore_presets(&bundle, &saved).unwrap();
+        assert!(presets[0].2.is_some());
+        assert!(
+            presets[1].2.is_none(),
+            "an empty slot deliberately has no file"
+        );
+
+        saved.irs.insert("1".into(), "Cab".into());
+        std::fs::create_dir_all(bundle.join("irs")).unwrap();
+        let ir = bundle.join("irs/01 Cab.f32");
+        std::fs::write(&ir, [0, 1, 2]).unwrap();
+        assert!(restore_irs(&bundle, &saved)
+            .unwrap_err()
+            .to_string()
+            .contains("partway"));
+
+        std::fs::write(&ir, 0.5f32.to_le_bytes()).unwrap();
+        let irs = restore_irs(&bundle, &saved).unwrap();
+        assert_eq!(irs[&1].1, vec![0.5]);
+
+        std::fs::write(bundle.join("globals.json"), b"{\"not-an-id\": true}").unwrap();
+        assert!(restore_globals(&bundle)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid setting id"));
+        std::fs::write(bundle.join("globals.json"), b"{\"1\": true, \"01\": false}").unwrap();
+        assert!(restore_globals(&bundle)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate setting id"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unsupported_bundles_and_wrong_devices_are_rejected() {
+        let root = scratch("compatibility");
+        let bundle = root.join("bundle.hxbundle");
+        let mut saved = manifest();
+        saved.version = 2;
+        std::fs::write(
+            bundle.join("manifest.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+        assert!(open(&bundle)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported backup version 2"));
+
+        saved.version = 1;
+        let error = validate_device(&saved, "Helix Floor").unwrap_err();
+        assert!(error.to_string().contains("HX Stomp backup"));
+        assert!(error.to_string().contains("Helix Floor"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn settings_round_trip_through_json_in_the_shape_the_device_holds() {
         // A float that reads back as a float, a bool as a bool: the device
         // rejects the wrong type, so this is the part that has to be right.
         let cases = [
             (Value::Bool(true), Value::Bool(false)),
             (Value::Int(120), Value::Int(0)),
+            (Value::UInt(u64::MAX), Value::UInt(0)),
             (Value::F32(113.1), Value::F32(0.0)),
         ];
         for (value, shape) in cases {
@@ -630,5 +980,46 @@ mod tests {
 
         // A value of the wrong shape is refused rather than coerced.
         assert!(from_json(&serde_json::json!("text"), &Value::Bool(true)).is_none());
+        assert!(from_json(&serde_json::json!(1e300), &Value::F32(0.0)).is_none());
+    }
+
+    #[test]
+    fn export_uses_the_manifest_and_refuses_incomplete_bundles() {
+        const PRESET: &[u8] = include_bytes!("../../hx-proto/tests/preset.bin");
+        let root = scratch("export");
+        let bundle = root.join("bundle.hxbundle");
+        let mut saved = manifest();
+        saved.device = "Helix Floor".into();
+        saved.firmware = "3.71".into();
+        saved.captured = 123;
+        saved.presets = vec!["Named".into(), String::new()];
+        std::fs::write(
+            bundle.join("manifest.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(bundle.join("globals.json"), b"{\"1\":true}").unwrap();
+        std::fs::write(bundle.join("presets/000 Named.hxpreset"), PRESET).unwrap();
+        // A stale file for the same slot must not win according to filesystem
+        // enumeration order.
+        std::fs::write(bundle.join("presets/000 Stale.hxpreset"), b"broken").unwrap();
+
+        let (_, presets, globals) = for_export(&bundle).unwrap();
+        assert_eq!(presets[0].1.as_deref(), Some(PRESET));
+        assert!(presets[1].1.is_none());
+        assert_eq!(globals["1"], true);
+        assert_eq!(
+            hxb_metadata(&saved).unwrap(),
+            (0x0021_0001, 0x0371_0000, 123)
+        );
+
+        std::fs::remove_file(bundle.join("presets/000 Named.hxpreset")).unwrap();
+        assert!(for_export(&bundle)
+            .unwrap_err()
+            .to_string()
+            .contains("000 Named"));
+        saved.captured = u64::from(u32::MAX) + 1;
+        assert!(hxb_metadata(&saved).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

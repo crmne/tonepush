@@ -1545,30 +1545,21 @@ fn export_hlx(input: &std::path::Path, output: &std::path::Path) -> Result<()> {
 fn export_hxb(bundle: &std::path::Path, output: &std::path::Path) -> Result<()> {
     let catalog = hx_catalog::Catalog::load()
         .context("writing an .hxb needs HX Edit's catalog to name models")?;
-    let manifest: hx_usb::backup::Manifest = serde_json::from_slice(
-        &std::fs::read(bundle.join("manifest.json"))
-            .with_context(|| format!("reading {bundle:?}"))?,
-    )
-    .context("that directory is not a TonePush backup")?;
+    let (manifest, saved, globals) = hx_usb::backup::for_export(bundle)
+        .with_context(|| format!("reading the TonePush backup {bundle:?}"))?;
 
     // Each slot: its name, and its tone as the symbolic JSON HX Edit stores.
     let mut presets = Vec::with_capacity(manifest.presets.len());
-    for (index, name) in manifest.presets.iter().enumerate() {
-        let path = bundle
-            .join("presets")
-            .join(format!("{index:03} {}.hxpreset", sanitise_bundle(name)));
-        let tone = match std::fs::read(&path) {
-            Ok(bytes) => hx_proto::preset::Preset::parse(&bytes)
-                .map(|p| hx_catalog::to_hlx(&p, &catalog, name).document["data"]["tone"].clone()),
-            Err(_) => None,
-        };
-        presets.push((name.clone(), tone));
+    for (name, bytes) in saved {
+        let tone = bytes.map(|bytes| {
+            let preset = hx_proto::preset::Preset::parse(&bytes)
+                .expect("backup::for_export validates preset documents");
+            hx_catalog::to_hlx(&preset, &catalog, &name).document["data"]["tone"].clone()
+        });
+        presets.push((name, tone));
     }
 
-    let globals = std::fs::read(bundle.join("globals.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
+    let (device, device_version, captured) = hx_usb::backup::hxb_metadata(&manifest)?;
 
     let bytes = hx_catalog::write_backup(&hx_catalog::NewBackup {
         setlist: manifest
@@ -1578,9 +1569,9 @@ fn export_hxb(bundle: &std::path::Path, output: &std::path::Path) -> Result<()> 
             .unwrap_or("PRESETS"),
         presets: &presets,
         globals,
-        device: 0x0021_0006,
-        device_version: 0x0380_0000,
-        captured: manifest.captured as u32,
+        device,
+        device_version,
+        captured,
     });
     std::fs::write(output, &bytes).with_context(|| format!("writing {output:?}"))?;
 
@@ -1594,27 +1585,6 @@ fn export_hxb(bundle: &std::path::Path, output: &std::path::Path) -> Result<()> 
         "note: HX Edit reads this; name it \"HX Stomp Backup <YYYY-Mon-DD>.hxb\" or its\n      backup dialog will not list it"
     );
     Ok(())
-}
-
-/// The same file naming `hx_usb::backup` writes with.
-fn sanitise_bundle(name: &str) -> String {
-    let cleaned: String = name
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == ' ' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let cleaned = cleaned.trim().to_owned();
-    if cleaned.is_empty() {
-        "untitled".to_owned()
-    } else {
-        cleaned
-    }
 }
 
 /// Lift every occupied tone out of an HX Edit `.hxb` backup into `.hlx` files.

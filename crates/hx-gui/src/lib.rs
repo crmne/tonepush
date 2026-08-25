@@ -3108,8 +3108,21 @@ impl App {
         let Some(catalog) = self.catalog.as_ref() else {
             return;
         };
-        let Ok((manifest, presets, globals)) = hx_usb::backup::for_export(bundle) else {
-            return;
+        let (manifest, presets, globals) = match hx_usb::backup::for_export(bundle) {
+            Ok(export) => export,
+            Err(error) => {
+                self.log.push(format!("could not read the backup: {error}"));
+                return;
+            }
+        };
+        let (device, device_version, captured) = match hx_usb::backup::hxb_metadata(&manifest) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                self.log.push(format!(
+                    "could not describe the backup for HX Edit: {error}"
+                ));
+                return;
+            }
         };
         let tones: Vec<(String, Option<serde_json::Value>)> = presets
             .into_iter()
@@ -3130,9 +3143,9 @@ impl App {
                 .unwrap_or("PRESETS"),
             presets: &tones,
             globals,
-            device: 0x0021_0006,
-            device_version: 0x0380_0000,
-            captured: manifest.captured as u32,
+            device,
+            device_version,
+            captured,
         });
         let target = bundle.with_extension("hxb");
         match std::fs::write(&target, &bytes) {
