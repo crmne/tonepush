@@ -868,18 +868,14 @@ pub fn snapshot(dir: &Path, stamp: &str, keep: usize) -> Result<Option<PathBuf>>
 /// surprising.
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     std::fs::create_dir_all(to).map_err(io("making a snapshot"))?;
-    for entry in std::fs::read_dir(from)
-        .map_err(io("reading the bundle"))?
-        .flatten()
-    {
+    for entry in std::fs::read_dir(from).map_err(io("reading the bundle"))? {
+        let entry = entry.map_err(io("reading the bundle"))?;
         let source = entry.path();
         let target = to.join(entry.file_name());
         if source.is_dir() {
             std::fs::create_dir_all(&target).map_err(io("making a snapshot"))?;
-            for inner in std::fs::read_dir(&source)
-                .map_err(io("reading the bundle"))?
-                .flatten()
-            {
+            for inner in std::fs::read_dir(&source).map_err(io("reading the bundle"))? {
+                let inner = inner.map_err(io("reading the bundle"))?;
                 if inner.path().is_file() {
                     std::fs::copy(inner.path(), target.join(inner.file_name()))
                         .map_err(io("copying a snapshot"))?;
