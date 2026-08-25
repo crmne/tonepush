@@ -182,7 +182,7 @@ fn trim(v: f32) -> String {
     }
 }
 
-/// The sliver of printf the catalog actually uses: `%[+][.N]f`, `%d`, `%%`.
+/// The sliver of printf the catalog actually uses: `%[+][0N][.N]f`, `%d`, `%%`.
 ///
 /// Writing this out is less work than taking on a formatting dependency, and
 /// the catalog only ever needs one substitution per pattern.
@@ -202,25 +202,49 @@ fn printf(pattern: &str, value: f32) -> String {
         }
 
         let plus = chars.next_if_eq(&'+').is_some();
-        let precision = chars
-            .next_if_eq(&'.')
-            .and_then(|_| chars.next())
-            .and_then(|d| d.to_digit(10))
-            .unwrap_or(0) as usize;
+        let zero_pad = chars.peek() == Some(&'0');
+        let mut width = 0usize;
+        while let Some(digit) = chars.peek().and_then(|c| c.to_digit(10)) {
+            chars.next();
+            width = width.saturating_mul(10).saturating_add(digit as usize);
+        }
+        let precision = if chars.next_if_eq(&'.').is_some() {
+            let mut digits = 0usize;
+            let mut value = 0usize;
+            while let Some(digit) = chars.peek().and_then(|c| c.to_digit(10)) {
+                chars.next();
+                digits += 1;
+                value = value.saturating_mul(10).saturating_add(digit as usize);
+            }
+            (digits != 0).then_some(value)
+        } else {
+            None
+        };
 
         match chars.next() {
             Some('f') => {
-                let formatted = format!("{value:.precision$}");
-                if plus && value >= 0.0 {
-                    out.push('+');
-                }
-                out.push_str(&formatted);
+                let precision = precision.unwrap_or(0);
+                let formatted = format!("{:.precision$}", value.abs());
+                let sign = if value.is_sign_negative() {
+                    Some('-')
+                } else if plus {
+                    Some('+')
+                } else {
+                    None
+                };
+                push_padded(&mut out, &formatted, sign, width, zero_pad);
             }
             Some('d') => {
-                if plus && value >= 0.0 {
-                    out.push('+');
-                }
-                out.push_str(&format!("{}", value.round() as i64));
+                let rounded = value.round() as i64;
+                let digits = rounded.unsigned_abs().to_string();
+                let sign = if rounded < 0 {
+                    Some('-')
+                } else if plus {
+                    Some('+')
+                } else {
+                    None
+                };
+                push_padded(&mut out, &digits, sign, width, zero_pad);
             }
             // Anything else is a pattern we have not seen; show the number
             // rather than dropping it.
@@ -234,6 +258,23 @@ fn printf(pattern: &str, value: f32) -> String {
     out
 }
 
+fn push_padded(out: &mut String, value: &str, sign: Option<char>, width: usize, zero_pad: bool) {
+    if zero_pad {
+        if let Some(sign) = sign {
+            out.push(sign);
+        }
+    }
+    for _ in value.len() + usize::from(sign.is_some())..width {
+        out.push(if zero_pad { '0' } else { ' ' });
+    }
+    if !zero_pad {
+        if let Some(sign) = sign {
+            out.push(sign);
+        }
+    }
+    out.push_str(value);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +286,9 @@ mod tests {
         assert_eq!(printf("%+.1f dB", 3.0), "+3.0 dB");
         assert_eq!(printf("%.1f Hz", 4.25), "4.2 Hz");
         assert_eq!(printf("%.2f \"", 0.5), "0.50 \"");
+        assert_eq!(printf("%03d", 5.0), "005");
+        assert_eq!(printf("%03d", -5.0), "-05");
+        assert_eq!(printf("%+03d", 5.0), "+05");
     }
 
     #[test]
