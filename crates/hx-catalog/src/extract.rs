@@ -330,6 +330,8 @@ fn nested_archives(root: &Path) -> Vec<PathBuf> {
 
 /// Copy the wanted files into the destination.
 fn copy_from(src: &Path) -> Result<usize, String> {
+    validate_source(src)?;
+
     let dest = destination().ok_or_else(|| "no home directory to install into".to_string())?;
     std::fs::create_dir_all(&dest)
         .map_err(|e| format!("could not create {}: {e}", dest.display()))?;
@@ -360,6 +362,15 @@ fn copy_from(src: &Path) -> Result<usize, String> {
         return Err("found nothing to copy; is that an HX Edit installer?".into());
     }
     Ok(copied)
+}
+
+fn validate_source(src: &Path) -> Result<(), String> {
+    let catalog = crate::Catalog::load_from(src)
+        .map_err(|error| format!("the extracted HX Edit catalog is incomplete: {error}"))?;
+    if catalog.is_empty() {
+        return Err("the extracted HX Edit catalog contains no models".into());
+    }
+    Ok(())
 }
 
 fn copy_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -405,6 +416,16 @@ fn tempdir(prefix: &str) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tonepush-extract-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn the_registry_names_a_seven_zip_wherever_it_was_installed() {
         let output = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\7-Zip\r\n    Path    REG_SZ    D:\\Tools\\7-Zip\\\r\n";
@@ -432,5 +453,18 @@ mod tests {
             found.iter().any(|p| p.ends_with(r"7-Zip\7z.exe")),
             "nothing looked in 7-Zip's own install directory: {found:?}"
         );
+    }
+
+    #[test]
+    fn an_incomplete_resource_source_is_rejected_before_copying() {
+        let src = scratch("incomplete-source");
+        std::fs::write(src.join("HX_ModelCatalog.json"), r#"{"categories": []}"#).unwrap();
+        std::fs::write(src.join("HelixControls.json"), b"{}").unwrap();
+        std::fs::write(src.join("Helix.sym"), b"[]").unwrap();
+
+        let error = validate_source(&src).unwrap_err();
+        assert!(error.contains("contains no models"));
+
+        let _ = std::fs::remove_dir_all(src);
     }
 }
