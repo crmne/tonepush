@@ -265,15 +265,22 @@ fn rename_object(hash: &str, name: &str) {
     if new == old {
         return;
     }
-    if std::fs::rename(&old, &new).is_ok() {
-        remember_place(hash, &new);
-        // The portable copy travels with it, or the pair stops looking like a
-        // pair the moment a tone is renamed.
-        let companion = old.with_extension("hlx");
-        if companion.is_file() {
-            let _ = std::fs::rename(&companion, new.with_extension("hlx"));
-        }
+    // Move the portable half first. If it cannot move, the native half stays
+    // where it is too; otherwise a failed second rename would split the pair
+    // and the orphaned `.hlx` would look like a separate tone on the next scan.
+    let companion = old.with_extension("hlx");
+    let new_companion = new.with_extension("hlx");
+    let moved_companion = companion != old && companion.is_file();
+    if moved_companion && std::fs::rename(&companion, &new_companion).is_err() {
+        return;
     }
+    if std::fs::rename(&old, &new).is_err() {
+        if moved_companion {
+            let _ = std::fs::rename(new_companion, companion);
+        }
+        return;
+    }
+    remember_place(hash, &new);
 }
 
 /// Write the portable form of a tone beside the object.
@@ -2078,6 +2085,26 @@ mod tests {
             .map(|r| r.flatten().count())
             .unwrap_or(0);
         assert_eq!(objects, 0, "no orphan left behind");
+    }
+
+    #[test]
+    fn a_failed_rename_does_not_split_a_tones_two_files() {
+        let _scratch = Scratch::new("rename-pair");
+        let (hash, _) = keep("Blackened", "hxpreset", b"one").unwrap();
+        attach_portable(&hash, "{\"tone\": true}").unwrap();
+        let old = object_path(&hash).unwrap();
+        let blocked = old
+            .parent()
+            .unwrap()
+            .join(file_name("Renamed", &hash, "hlx"));
+        std::fs::create_dir(&blocked).unwrap();
+
+        adopt(&hash, "Renamed").unwrap();
+
+        assert_eq!(object_path(&hash).unwrap(), old);
+        assert!(old.is_file(), "the native file stayed put");
+        assert!(old.with_extension("hlx").is_file(), "so did its companion");
+        assert!(blocked.is_dir(), "the failed destination was not disturbed");
     }
 
     /// Song and Tone facts stay separate in the exported manifest, and local
