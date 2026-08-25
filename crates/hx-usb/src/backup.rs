@@ -807,8 +807,15 @@ fn sanitise(name: &str) -> String {
 }
 
 fn identify(session: &mut Session) -> Result<(String, String)> {
-    let firmware = session.read_preset()?.firmware().unwrap_or_default();
+    let preset = session.read_preset()?;
+    let firmware = backup_firmware(&preset)?;
     Ok((session.profile.name.to_owned(), firmware))
+}
+
+fn backup_firmware(preset: &Preset) -> Result<String> {
+    preset.firmware().ok_or_else(|| {
+        Error::Protocol("the loaded preset has no valid firmware version".to_owned())
+    })
 }
 
 /// A device setting as JSON, so the file is readable and editable.
@@ -957,6 +964,19 @@ mod tests {
             irs: BTreeMap::new(),
             globals: 0,
         }
+    }
+
+    #[test]
+    fn a_backup_requires_valid_firmware_metadata() {
+        let mut preset = Preset::parse(include_bytes!("../../hx-proto/tests/preset.bin")).unwrap();
+        assert_eq!(backup_firmware(&preset).unwrap(), "3.80");
+
+        *preset
+            .tone
+            .get_mut(7)
+            .and_then(|meta| meta.get_mut(35))
+            .expect("firmware field") = Value::UInt(0x03fa_0000);
+        assert!(backup_firmware(&preset).is_err());
     }
 
     fn scratch(name: &str) -> PathBuf {
