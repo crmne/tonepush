@@ -15,8 +15,8 @@ use crate::msgpack::{Decoder, Encoder, Value};
 /// A parsed preset.
 pub struct Preset {
     /// Section offset table: a directory of the tone's top-level sections,
-    /// decoded in [`computed_sections`](Self::computed_sections). Carried
-    /// through verbatim on encode, because byte-exact is byte-exact.
+    /// decoded in [`computed_sections`](Self::computed_sections). Verified
+    /// against the tone on parse and retained for byte-exact round trips.
     pub sections: Vec<u8>,
     /// Header width the section table arrived with, so it goes back unchanged.
     sections_width: u8,
@@ -407,12 +407,14 @@ impl Preset {
             .map(collect_slots)
             .unwrap_or_default();
 
-        Some(Preset {
+        let preset = Preset {
             sections,
             sections_width,
             slots,
             tone,
-        })
+        };
+        (preset.computed_sections().as_deref() == Some(preset.sections.as_slice()))
+            .then_some(preset)
     }
 
     /// Firmware version, from the BCD-packed field: `0x03800000` is 3.80.
@@ -1608,12 +1610,21 @@ mod tests {
             key::PATH => crate::msgmap! {
                 key::SLOTS => Value::Array(vec![slot, empty]),
             },
+            1 => Value::Nil,
+            3 => Value::Nil,
+            key::ASSIGNMENTS => Value::Nil,
+            2 => Value::Nil,
+            key::SETTINGS => Value::Nil,
+            6 => Value::Nil,
+            key::SNAPSHOT_SECTION => Value::Nil,
         };
-
-        let mut blob = Encoder::encode(&Value::Str(Preset::MAGIC.into()));
-        blob.extend(Encoder::encode(&Value::Bin(vec![0x3d, 0, 0, 0], 0)));
-        blob.extend(Encoder::encode(&tone));
-        blob
+        Preset {
+            sections: Vec::new(),
+            sections_width: 0,
+            slots: Vec::new(),
+            tone,
+        }
+        .encode()
     }
 
     #[test]
@@ -1852,9 +1863,8 @@ mod tests {
         );
 
         // With a settings section present it takes, and comes back out again.
-        preset.tone = crate::msgmap! {
-            key::SETTINGS => crate::msgmap! { key::TEMPO => Value::F32(120.0) },
-        };
+        *preset.tone.get_mut(key::SETTINGS).unwrap() =
+            crate::msgmap! { key::TEMPO => Value::F32(120.0) };
         assert!(preset.set_tempo(96.0));
         assert_eq!(preset.tempo(), Some(96.0));
         assert_eq!(Preset::parse(&preset.encode()).unwrap().tempo(), Some(96.0));
@@ -1918,13 +1928,25 @@ mod tests {
             Value::Map(fields)
         };
         let tone = crate::msgmap! {
+            key::META => Value::Nil,
             key::PATH => crate::msgmap! {
                 key::SLOTS => Value::Array(kinds.iter().map(|k| slot(*k)).collect()),
             },
+            1 => Value::Nil,
+            3 => Value::Nil,
+            key::ASSIGNMENTS => Value::Nil,
+            2 => Value::Nil,
+            key::SETTINGS => Value::Nil,
+            6 => Value::Nil,
+            key::SNAPSHOT_SECTION => Value::Nil,
         };
-        let mut blob = Encoder::encode(&Value::Str(Preset::MAGIC.into()));
-        blob.extend(Encoder::encode(&Value::Bin(vec![0x3d], 0)));
-        blob.extend(Encoder::encode(&tone));
+        let blob = Preset {
+            sections: Vec::new(),
+            sections_width: 0,
+            slots: Vec::new(),
+            tone,
+        }
+        .encode();
         Preset::parse(&blob).unwrap()
     }
 
@@ -2201,6 +2223,14 @@ mod tests {
         assert!(Preset::parse(&envelope(
             Value::Bin(preset.sections.clone(), preset.sections_width),
             Value::Nil,
+        ))
+        .is_none());
+
+        let mut corrupt_sections = preset.sections.clone();
+        corrupt_sections[0] ^= 1;
+        assert!(Preset::parse(&envelope(
+            Value::Bin(corrupt_sections, preset.sections_width),
+            preset.tone.clone(),
         ))
         .is_none());
 

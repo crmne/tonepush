@@ -423,7 +423,7 @@ mod tests {
     use super::*;
     use crate::tests::catalog;
     use crate::{inspect, Category, ChainContent};
-    use hx_proto::msgpack::{Encoder, Key};
+    use hx_proto::msgpack::Key;
     // The synthetic-preset helpers build MessagePack values; this explicit
     // import shadows the `serde_json::Value` the glob above brings in.
     use hx_proto::{msgmap, Preset, Value};
@@ -481,13 +481,16 @@ mod tests {
         msgmap! { KIND => Value::Int(BLOCK), BODY => body }
     }
 
-    /// Wrap a list of slots in the smallest blob `Preset::parse` accepts.
+    /// Put synthetic slots into a complete captured envelope, so section
+    /// offsets and every required top-level section remain realistic.
     fn preset(slots: Vec<Value>) -> Preset {
-        let tone = msgmap! { PATH => msgmap! { SLOTS => Value::Array(slots) } };
-        let mut blob = Encoder::encode(&Value::Str(Preset::MAGIC.into()));
-        blob.extend(Encoder::encode(&Value::Bin(vec![0x3d], 0)));
-        blob.extend(Encoder::encode(&tone));
-        Preset::parse(&blob).expect("the synthetic blob parses")
+        let mut template = Preset::parse(include_bytes!("../../hx-proto/tests/preset.bin"))
+            .expect("the captured template parses");
+        *template
+            .tone
+            .get_mut(PATH)
+            .expect("the template has a path") = msgmap! { SLOTS => Value::Array(slots) };
+        Preset::parse(&template.encode()).expect("the synthetic blob parses")
     }
 
     /// The blocks a preset should read back as, derived straight from it through
