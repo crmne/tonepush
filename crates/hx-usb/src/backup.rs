@@ -26,8 +26,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use atomic_write_file::AtomicWriteFile;
 use hx_proto::msgpack::Value;
 use hx_proto::Preset;
 
@@ -94,6 +97,126 @@ impl Default for Parts {
     }
 }
 
+/// A complete bundle built beside the live one.
+///
+/// Its directory is removed on every ordinary failure. At commit time the old
+/// bundle briefly moves to a deterministic `.previous` sibling, so even a
+/// process kill between the two renames is recoverable on the next open.
+struct StagingBundle {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl StagingBundle {
+    fn new(target: &Path) -> Result<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+
+        let parent = bundle_parent(target);
+        std::fs::create_dir_all(parent).map_err(io("creating the bundle's parent"))?;
+        let target_name = target
+            .file_name()
+            .ok_or_else(|| Error::Protocol("a backup bundle needs a directory name".into()))?;
+        for _ in 0..100 {
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            let mut name = OsString::from(".");
+            name.push(target_name);
+            name.push(format!(".{}-{id}.incomplete", std::process::id()));
+            let path = parent.join(name);
+            match std::fs::create_dir(&path) {
+                Ok(()) => {
+                    return Ok(Self {
+                        path,
+                        committed: false,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(io("creating a staging bundle")(error)),
+            }
+        }
+        Err(Error::Protocol(
+            "could not choose a unique staging directory for the backup".into(),
+        ))
+    }
+
+    fn commit(mut self, target: &Path) -> Result<()> {
+        let previous = previous_bundle(target)?;
+        let had_previous = target.exists();
+        if had_previous {
+            std::fs::rename(target, &previous).map_err(io("putting the old bundle aside"))?;
+        }
+        if let Err(error) = std::fs::rename(&self.path, target) {
+            let rollback = had_previous.then(|| std::fs::rename(&previous, target));
+            let detail = match rollback {
+                Some(Err(rollback)) => {
+                    format!("; restoring the old bundle also failed: {rollback}")
+                }
+                _ => String::new(),
+            };
+            return Err(Error::Protocol(format!(
+                "publishing the completed backup: {error}{detail}"
+            )));
+        }
+        self.committed = true;
+        // The new target is complete. Failure to reclaim the old directory is
+        // harmless; recovery removes it on the next bundle operation.
+        if had_previous {
+            let _ = std::fs::remove_dir_all(previous);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StagingBundle {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn bundle_parent(target: &Path) -> &Path {
+    target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn previous_bundle(target: &Path) -> Result<PathBuf> {
+    let mut name = target
+        .file_name()
+        .ok_or_else(|| Error::Protocol("a backup bundle needs a directory name".into()))?
+        .to_os_string();
+    name.push(".previous");
+    Ok(bundle_parent(target).join(name))
+}
+
+/// Finish or clean up a swap interrupted by abrupt process termination.
+fn recover_bundle(target: &Path) -> Result<()> {
+    let previous = previous_bundle(target)?;
+    match (target.exists(), previous.exists()) {
+        (false, true) => {
+            std::fs::rename(previous, target).map_err(io("recovering the previous backup"))?;
+        }
+        (true, true) => {
+            std::fs::remove_dir_all(previous).map_err(io("cleaning up the previous backup"))?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Whether a complete bundle exists, recovering an interrupted directory swap
+/// before answering.
+pub fn exists(dir: &Path) -> bool {
+    recover_bundle(dir).is_ok() && dir.join("manifest.json").is_file()
+}
+
+fn atomic_write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let mut file = AtomicWriteFile::open(path)?;
+    file.write_all(bytes.as_ref())?;
+    file.commit()
+}
+
 /// Read the whole pedal into a bundle directory.
 ///
 /// Fast, because it reads each slot where it lies rather than loading it: a
@@ -104,6 +227,20 @@ pub fn capture(
     dir: &Path,
     captured: u64,
     mut progress: impl FnMut(Step),
+) -> Result<Manifest> {
+    recover_bundle(dir)?;
+    let staging = StagingBundle::new(dir)?;
+    let manifest = capture_into(session, &staging.path, captured, &mut progress)?;
+    staging.commit(dir)?;
+    progress(Step::Done);
+    Ok(manifest)
+}
+
+fn capture_into(
+    session: &mut Session,
+    dir: &Path,
+    captured: u64,
+    progress: &mut impl FnMut(Step),
 ) -> Result<Manifest> {
     let (device, firmware) = identify(session)?;
     let setlists = session.setlists()?;
@@ -125,7 +262,7 @@ pub fn capture(
         if let Some(preset) = session.read_preset_at(0, index as i64)? {
             let file = preset_file(index, &name);
             let path = dir.join("presets").join(&file);
-            std::fs::write(&path, preset.encode()).map_err(io("writing a preset"))?;
+            atomic_write(&path, preset.encode()).map_err(io("writing a preset"))?;
             preset_files.insert(OsString::from(file));
         } else {
             // The document is the authority on whether the slot is occupied;
@@ -151,7 +288,7 @@ pub fn capture(
             globals.insert(id.to_string(), json);
         }
     }
-    std::fs::write(
+    atomic_write(
         dir.join("globals.json"),
         serde_json::to_vec_pretty(&globals).map_err(json_err)?,
     )
@@ -184,7 +321,7 @@ pub fn capture(
         let path = dir
             .join("irs")
             .join(format!("{slot:02} {}.f32", sanitise(&name)));
-        std::fs::write(&path, bytes).map_err(io("writing an impulse response"))?;
+        atomic_write(&path, bytes).map_err(io("writing an impulse response"))?;
         irs.insert(slot.to_string(), name);
     }
 
@@ -199,17 +336,17 @@ pub fn capture(
         globals: globals.len(),
     };
     remove_stale_preset_files(&dir.join("presets"), &preset_files)?;
-    std::fs::write(
+    atomic_write(
         dir.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(json_err)?,
     )
     .map_err(io("writing the manifest"))?;
-    progress(Step::Done);
     Ok(manifest)
 }
 
 /// Read a bundle's manifest, to show what it holds before putting it back.
 pub fn open(dir: &Path) -> Result<Manifest> {
+    recover_bundle(dir)?;
     let bytes = std::fs::read(dir.join("manifest.json")).map_err(io("reading the manifest"))?;
     let manifest: Manifest = serde_json::from_slice(&bytes).map_err(json_err)?;
     if manifest.version != 1 {
@@ -438,21 +575,25 @@ pub fn capture_one(session: &mut Session, dir: &Path, index: i64) -> Result<()> 
     let preset = session.read_preset_at(0, index)?;
     let keep = if let Some(preset) = preset {
         let file = preset_file(slot, &name);
-        std::fs::write(dir.join("presets").join(&file), preset.encode())
+        atomic_write(dir.join("presets").join(&file), preset.encode())
             .map_err(io("writing a preset"))?;
         Some(OsString::from(file))
     } else {
         name.clear();
         None
     };
-    remove_other_slot_files(&dir.join("presets"), slot, keep.as_deref())?;
 
+    // Publish the pointer only after the new document is complete, and remove
+    // obsolete names only after the pointer is durable. At every interruption
+    // point the manifest still names a file that exists; an extra old or new
+    // file is ignored by readers and can be cleaned on the next update.
     manifest.presets[slot] = name;
-    std::fs::write(
+    atomic_write(
         dir.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(json_err)?,
     )
-    .map_err(io("writing the manifest"))
+    .map_err(io("writing the manifest"))?;
+    remove_other_slot_files(&dir.join("presets"), slot, keep.as_deref())
 }
 
 fn preset_slot(path: &Path) -> Option<usize> {
@@ -697,6 +838,7 @@ fn json_err(e: serde_json::Error) -> Error {
 /// Snapshots are cheap: a whole pedal is a few megabytes, and `keep` of them is
 /// a bounded cost rather than a directory that grows for ever.
 pub fn snapshot(dir: &Path, stamp: &str, keep: usize) -> Result<Option<PathBuf>> {
+    recover_bundle(dir)?;
     // Nothing to snapshot before the first backup has been taken.
     if !dir.join("manifest.json").exists() {
         return Ok(None);
@@ -709,9 +851,12 @@ pub fn snapshot(dir: &Path, stamp: &str, keep: usize) -> Result<Option<PathBuf>>
 
     let name = dir.file_stem().and_then(|s| s.to_str()).unwrap_or("backup");
     let target = history.join(format!("{name} {stamp}.hxbundle"));
+    recover_bundle(&target)?;
     // A second snapshot in the same second is the same snapshot.
     if !target.exists() {
-        copy_tree(dir, &target)?;
+        let staging = StagingBundle::new(&target)?;
+        copy_tree(dir, &staging.path)?;
+        staging.commit(&target)?;
     }
     prune(&history, keep)?;
     Ok(Some(target))
@@ -861,6 +1006,39 @@ mod tests {
                 .is_none()
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn publishing_a_bundle_replaces_the_whole_directory() {
+        let root = scratch("atomic-publish");
+        let bundle = root.join("bundle.hxbundle");
+        let staging = StagingBundle::new(&bundle).unwrap();
+        std::fs::create_dir_all(staging.path.join("presets")).unwrap();
+        std::fs::write(staging.path.join("manifest.json"), b"new").unwrap();
+        std::fs::write(staging.path.join("presets/001 New.hxpreset"), b"new").unwrap();
+        staging.commit(&bundle).unwrap();
+
+        assert_eq!(std::fs::read(bundle.join("manifest.json")).unwrap(), b"new");
+        assert!(bundle.join("presets/001 New.hxpreset").is_file());
+        assert!(!bundle.join("presets/000 One.hxpreset").exists());
+        assert!(!previous_bundle(&bundle).unwrap().exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_interrupted_bundle_swap_recovers_the_previous_generation() {
+        let root = scratch("recover-publish");
+        let bundle = root.join("bundle.hxbundle");
+        let previous = previous_bundle(&bundle).unwrap();
+        std::fs::rename(&bundle, &previous).unwrap();
+
+        assert!(exists(&bundle));
+        assert_eq!(
+            std::fs::read(bundle.join("presets/000 One.hxpreset")).unwrap(),
+            b"one"
+        );
+        assert!(!previous.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -1612,7 +1612,7 @@ impl Worker {
     /// Bring the automatic backup back in step with the pedal, if there is one.
     fn refresh_automatic(&mut self) {
         let Some(dir) = automatic_dir() else { return };
-        if dir.join("manifest.json").exists() {
+        if hx_usb::backup::exists(&dir) {
             self.back_up(&dir);
         }
     }
@@ -1695,7 +1695,7 @@ impl Worker {
     /// backups are not set up yet, which is not an error worth reporting.
     fn back_up_one(&mut self, index: i64) {
         let Some(dir) = automatic_dir() else { return };
-        if !dir.join("manifest.json").exists() {
+        if !hx_usb::backup::exists(&dir) {
             return;
         }
         let _ = self.try_on_device(|d| hx_usb::backup::capture_one(d, &dir, index));

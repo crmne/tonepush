@@ -1386,6 +1386,7 @@ dependencies = [
 name = "hx-usb"
 version = "0.5.5"
 dependencies = [
+ "atomic-write-file",
  "hx-proto",
  "nusb",
  "serde",
