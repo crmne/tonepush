@@ -212,11 +212,7 @@ impl Block {
                 self.raw_len
             )));
         }
-        let mut out = Vec::new();
-        flate2::read::ZlibDecoder::new(&self.stored[..])
-            .take(self.raw_len.saturating_add(1))
-            .read_to_end(&mut out)
-            .map_err(|e| Error::Backup(format!("a backup block would not inflate: {e}")))?;
+        let out = inflate_exact(&self.stored, self.raw_len, "a backup block")?;
         if out.len() as u64 != self.raw_len {
             return Err(Error::Backup(format!(
                 "a backup block inflated to {} bytes where its table says {}",
@@ -226,6 +222,22 @@ impl Block {
         }
         Ok(out)
     }
+}
+
+fn inflate_exact(compressed: &[u8], limit: u64, what: &str) -> Result<Vec<u8>, Error> {
+    let mut decoder = flate2::bufread::ZlibDecoder::new(compressed);
+    let mut out = Vec::new();
+    decoder
+        .by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut out)
+        .map_err(|error| Error::Backup(format!("{what} would not inflate: {error}")))?;
+    if decoder.total_in() != compressed.len() as u64 {
+        return Err(Error::Backup(format!(
+            "{what} has trailing data after its zlib stream"
+        )));
+    }
+    Ok(out)
 }
 
 /// The raw `AF6L` container beneath [`read_backup`]: its header and blocks kept
@@ -575,6 +587,21 @@ mod tests {
         assert!(plain.decompress().is_err());
     }
 
+    #[test]
+    fn trailing_data_after_a_compressed_block_is_rejected() {
+        let (mut stored, raw_len) = deflate(&json!({ "tone": "clean" }));
+        stored.extend_from_slice(b"hidden trailing bytes");
+        let block = Block {
+            tag: *b"TEST",
+            compressed: true,
+            raw_len,
+            stored,
+        };
+
+        let error = block.decompress().unwrap_err().to_string();
+        assert!(error.contains("trailing data"), "{error}");
+    }
+
     /// Byte-exact round trip against real HX Stomp backups, when they are on
     /// this machine. Ignored by default - it needs Carmine's backup folder - and
     /// run with `--ignored` to prove the writer against genuine `.hxb` files.
@@ -641,11 +668,7 @@ pub fn read_setlist_file(bytes: &[u8]) -> Result<Backup, Error> {
             "the setlist file declares {limit} decompressed bytes, above the {MAX_SETLIST_LEN}-byte safety limit"
         )));
     }
-    let mut raw = Vec::new();
-    flate2::read::ZlibDecoder::new(&compressed[..])
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut raw)
-        .map_err(|e| Error::Backup(format!("the setlist file would not inflate: {e}")))?;
+    let raw = inflate_exact(&compressed, limit, "the setlist file")?;
     if raw.len() as u64 > limit {
         return Err(Error::Backup(
             "the setlist file expands beyond its safe declared size".into(),
