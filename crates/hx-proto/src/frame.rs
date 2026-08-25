@@ -49,6 +49,8 @@ pub enum FrameError {
     LengthMismatch { declared: usize, available: usize },
     /// The transfer has bytes beyond the one padded frame it declares.
     TransferLength { expected: usize, actual: usize },
+    /// The on-wire length field has only 24 bits.
+    PayloadTooLarge(usize),
 }
 
 impl fmt::Display for FrameError {
@@ -66,6 +68,12 @@ impl fmt::Display for FrameError {
                 f,
                 "one padded frame should occupy {expected} bytes, but the transfer has {actual}"
             ),
+            FrameError::PayloadTooLarge(size) => {
+                write!(
+                    f,
+                    "frame payload of {size} bytes does not fit its 24-bit length"
+                )
+            }
         }
     }
 }
@@ -116,10 +124,14 @@ impl Frame {
         })
     }
 
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
         let len = self.payload.len();
+        let len_u32 = u32::try_from(len)
+            .ok()
+            .filter(|len| *len <= 0x00ff_ffff)
+            .ok_or(FrameError::PayloadTooLarge(len))?;
         let mut out = Vec::with_capacity(pad4(8 + len));
-        out.extend_from_slice(&(len as u32).to_le_bytes()[..3]);
+        out.extend_from_slice(&len_u32.to_le_bytes()[..3]);
         out.push(self.flags);
         out.extend_from_slice(&self.dst.to_le_bytes());
         out.extend_from_slice(&self.src.to_le_bytes());
@@ -130,7 +142,7 @@ impl Frame {
         } else {
             out.resize(out.len() + padding, 0);
         }
-        out
+        Ok(out)
     }
 
     /// Total on-wire size including padding.
@@ -252,7 +264,7 @@ mod tests {
         // it occupies 28 on the wire, so a naive encoder would corrupt it.
         for raw in [HELLO, PADDED] {
             let f = Frame::decode(raw).unwrap();
-            assert_eq!(f.encode(), raw, "round trip failed");
+            assert_eq!(f.encode().unwrap(), raw, "round trip failed");
             assert_eq!(f.wire_len(), raw.len());
         }
     }
@@ -315,6 +327,15 @@ mod tests {
 
         let mut padded = PADDED.to_vec();
         *padded.last_mut().unwrap() = 1;
-        assert_eq!(Frame::decode(&padded).unwrap().encode(), padded);
+        assert_eq!(Frame::decode(&padded).unwrap().encode().unwrap(), padded);
+    }
+
+    #[test]
+    fn refuses_a_payload_that_does_not_fit_the_length_field() {
+        let frame = Frame::new(1, 2, vec![0; 0x0100_0000]);
+        assert_eq!(
+            frame.encode(),
+            Err(FrameError::PayloadTooLarge(0x0100_0000))
+        );
     }
 }

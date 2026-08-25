@@ -477,7 +477,9 @@ impl Session {
     }
 
     fn write(&mut self, f: &Frame) -> Result<()> {
-        let bytes = f.encode();
+        let bytes = f
+            .encode()
+            .map_err(|error| Error::Protocol(error.to_string()))?;
         if debug() {
             eprintln!("TX {:#06x}->{:#06x} {}", f.src, f.dst, hex(&bytes));
         }

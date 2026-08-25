@@ -28,7 +28,7 @@
 //!     args: msgmap! { key::SETLIST => Value::Int(0), key::PRESET_INDEX => Value::Int(12) },
 //! };
 //! let frame = Frame::new(0x1001, 0x03ef, request.encode());
-//! assert_eq!(frame.encode().len() % 4, 0);
+//! assert_eq!(frame.encode().unwrap().len() % 4, 0);
 //! ```
 
 pub mod frame;
