@@ -1730,8 +1730,8 @@ fn apply_import(session: &mut hx_usb::Session, file: &std::path::Path) -> Result
     use hx_proto::msgpack::Value;
     // Read the chain first: a `.hlx` gives a block's place along its branch's
     // row, and only the target's own layout says which slot that is.
-    let layout = session.read_preset().ok().map(|p| p.layout());
-    let plan = load_plan_for(file, layout.as_ref())?;
+    let layout = session.read_preset()?.layout();
+    let plan = load_plan_for(file, Some(&layout))?;
 
     for step in &plan.steps {
         match step {
