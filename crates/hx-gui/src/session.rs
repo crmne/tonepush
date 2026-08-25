@@ -848,13 +848,11 @@ impl Worker {
                 let Some(current) = self.try_on_device(|d| d.object(id)) else {
                     return;
                 };
-                let shaped = match current {
-                    hx_proto::msgpack::Value::Bool(_) => {
-                        hx_proto::msgpack::Value::Bool(value >= 0.5)
-                    }
-                    hx_proto::msgpack::Value::F32(_) => hx_proto::msgpack::Value::F32(value),
-                    hx_proto::msgpack::Value::F64(_) => hx_proto::msgpack::Value::F64(value as f64),
-                    _ => hx_proto::msgpack::Value::Int(value.round() as i64),
+                let Some(shaped) = shape_setting_value(&current, value) else {
+                    self.send(Evt::Failed(format!(
+                        "setting {id} has a value type that cannot be edited"
+                    )));
+                    return;
                 };
                 if self.run_on_device(|d| d.set_object(id, shaped)) {
                     let name = hx_proto::settings::setting(id)
@@ -1966,6 +1964,28 @@ fn as_number(value: &hx_proto::msgpack::Value) -> Option<f32> {
     })
 }
 
+/// Put an edited setting back into the exact scalar shape the device supplied.
+fn shape_setting_value(
+    current: &hx_proto::msgpack::Value,
+    value: f32,
+) -> Option<hx_proto::msgpack::Value> {
+    use hx_proto::msgpack::Value;
+
+    if !value.is_finite() {
+        return None;
+    }
+    Some(match current {
+        Value::Bool(_) => Value::Bool(value >= 0.5),
+        Value::Int(_) => Value::Int(value.round() as i64),
+        Value::UInt(_) => Value::UInt((value >= 0.0).then(|| value.round() as u64)?),
+        Value::Wide(_, width) => Value::Wide((value >= 0.0).then(|| value.round() as u64)?, *width),
+        Value::WideInt(_, width) => Value::WideInt(value.round() as i64, *width),
+        Value::F32(_) => Value::F32(value),
+        Value::F64(_) => Value::F64(f64::from(value)),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1992,5 +2012,27 @@ mod tests {
         names.sort();
         assert_eq!(names[0], stamp_of(0));
         assert_eq!(names[2], stamp_of(1_786_060_800));
+    }
+
+    #[test]
+    fn setting_edits_preserve_the_device_wire_type() {
+        use hx_proto::msgpack::Value;
+
+        let cases = [
+            (Value::Bool(false), Value::Bool(true)),
+            (Value::Int(0), Value::Int(2)),
+            (Value::UInt(0), Value::UInt(2)),
+            (Value::Wide(0, 4), Value::Wide(2, 4)),
+            (Value::WideInt(0, 2), Value::WideInt(2, 2)),
+            (Value::F32(0.0), Value::F32(1.5)),
+            (Value::F64(0.0), Value::F64(1.5)),
+        ];
+        for (current, expected) in cases {
+            assert_eq!(shape_setting_value(&current, 1.5), Some(expected));
+        }
+
+        assert!(shape_setting_value(&Value::UInt(0), -1.0).is_none());
+        assert!(shape_setting_value(&Value::Str("old".into()), 1.0).is_none());
+        assert!(shape_setting_value(&Value::F32(0.0), f32::NAN).is_none());
     }
 }
