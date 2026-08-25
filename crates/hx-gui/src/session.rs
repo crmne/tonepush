@@ -1538,13 +1538,18 @@ impl Worker {
                 what: "reading the setlist".into(),
                 progress: index as f32 / total.max(1) as f32,
             });
-            // A slot that will not read is empty as far as a setlist is
-            // concerned; the alternative is abandoning 125 good presets over
-            // one bad one.
-            let bytes = self
-                .try_on_device(|d| d.read_preset_at(setlist, index as i64))
-                .flatten()
-                .map(|preset| preset.encode());
+            // `Ok(None)` is a genuinely empty slot. An outer `None` means the
+            // request itself failed; flattening the two would turn an
+            // unreadable occupied slot into an empty one in the export.
+            let Some(preset) = self.try_on_device(|d| d.read_preset_at(setlist, index as i64))
+            else {
+                self.send(Evt::Working {
+                    what: String::new(),
+                    progress: 1.0,
+                });
+                return;
+            };
+            let bytes = preset.map(|preset| preset.encode());
             slots.push((name, bytes));
         }
         self.send(Evt::Working {
