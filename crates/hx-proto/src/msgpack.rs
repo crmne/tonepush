@@ -163,6 +163,8 @@ pub enum Error {
     BadTag(u8),
     /// A map key that was neither an integer nor a string.
     BadKey,
+    /// More nesting than a preset can legitimately contain.
+    NestingTooDeep,
 }
 
 impl fmt::Display for Error {
@@ -171,6 +173,7 @@ impl fmt::Display for Error {
             Error::Eof => write!(f, "unexpected end of buffer"),
             Error::BadTag(t) => write!(f, "unknown MessagePack tag {t:#04x}"),
             Error::BadKey => write!(f, "map key was neither integer nor string"),
+            Error::NestingTooDeep => write!(f, "MessagePack values are nested too deeply"),
         }
     }
 }
@@ -184,11 +187,16 @@ type Result<T> = std::result::Result<T, Error>;
 pub struct Decoder<'a> {
     buf: &'a [u8],
     pos: usize,
+    depth: usize,
 }
 
 impl<'a> Decoder<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
-        Decoder { buf, pos: 0 }
+        Decoder {
+            buf,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     pub fn remaining(&self) -> usize {
@@ -227,6 +235,20 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn value(&mut self) -> Result<Value> {
+        // Imported preset documents are untrusted. Recursive arrays and maps
+        // otherwise let a tiny input exhaust the process stack before the
+        // decoder gets a chance to return an error.
+        const MAX_DEPTH: usize = 128;
+        if self.depth >= MAX_DEPTH {
+            return Err(Error::NestingTooDeep);
+        }
+        self.depth += 1;
+        let result = self.value_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn value_inner(&mut self) -> Result<Value> {
         let tag = self.u8()?;
         Ok(match tag {
             0x00..=0x7f => Value::UInt(tag as u64),
@@ -303,7 +325,9 @@ impl<'a> Decoder<'a> {
         let mut m = Vec::with_capacity(n.min(1024));
         for _ in 0..n {
             let k = match self.value()? {
-                Value::UInt(u) | Value::Wide(u, _) => Key::Int(u as i64),
+                Value::UInt(u) | Value::Wide(u, _) => {
+                    Key::Int(i64::try_from(u).map_err(|_| Error::BadKey)?)
+                }
                 Value::WideInt(i, _) => Key::Int(i),
                 Value::Int(i) => Key::Int(i),
                 Value::Str(s) => Key::Str(s),
@@ -320,10 +344,14 @@ impl<'a> Decoder<'a> {
     fn string(&mut self, n: usize, width: u8) -> Result<Value> {
         let raw = self.take(n)?;
         let trimmed = raw.split(|&b| b == 0).next().unwrap_or(raw);
-        // Only treat it as text if the whole field is the string plus NUL
-        // padding; embedded data after a NUL means it is a blob.
-        let is_text = trimmed.iter().all(|&b| b >= 0x20 || b == b'\t')
-            && raw[trimmed.len()..].iter().all(|&b| b == 0);
+        // Only the protocol's canonical spelling - printable text followed by
+        // exactly one NUL - can become `Str`. A standard MessagePack string
+        // with no NUL, an empty field, or extra padding has to stay raw bytes;
+        // otherwise encoding it again would add or remove bytes and invalidate
+        // a preset's offset table.
+        let is_text = raw.last() == Some(&0)
+            && trimmed.len() + 1 == raw.len()
+            && trimmed.iter().all(|&b| b >= 0x20 || b == b'\t');
         match (is_text, std::str::from_utf8(trimmed)) {
             (true, Ok(s)) => Ok(Value::Str(s.to_owned())),
             _ => Ok(Value::Bin(raw.to_vec(), width)),
@@ -407,9 +435,12 @@ impl Encoder {
             Value::Array(a) => {
                 if a.len() < 16 {
                     self.buf.push(0x90 | a.len() as u8);
-                } else {
+                } else if u16::try_from(a.len()).is_ok() {
                     self.buf.push(0xdc);
                     self.buf.extend_from_slice(&(a.len() as u16).to_be_bytes());
+                } else {
+                    self.buf.push(0xdd);
+                    self.buf.extend_from_slice(&(a.len() as u32).to_be_bytes());
                 }
                 for x in a {
                     self.value(x);
@@ -418,9 +449,12 @@ impl Encoder {
             Value::Map(m) => {
                 if m.len() < 16 {
                     self.buf.push(0x80 | m.len() as u8);
-                } else {
+                } else if u16::try_from(m.len()).is_ok() {
                     self.buf.push(0xde);
                     self.buf.extend_from_slice(&(m.len() as u16).to_be_bytes());
+                } else {
+                    self.buf.push(0xdf);
+                    self.buf.extend_from_slice(&(m.len() as u32).to_be_bytes());
                 }
                 for (k, val) in m {
                     match k {
@@ -437,15 +471,15 @@ impl Encoder {
     fn str_header_of_width(&mut self, n: usize, width: u8) {
         match width {
             0 if n < 32 => self.buf.push(0xa0 | n as u8),
-            1 => {
+            1 if u8::try_from(n).is_ok() => {
                 self.buf.push(0xd9);
                 self.buf.push(n as u8);
             }
-            2 => {
+            2 if u16::try_from(n).is_ok() => {
                 self.buf.push(0xda);
                 self.buf.extend_from_slice(&(n as u16).to_be_bytes());
             }
-            4 => {
+            4 if u32::try_from(n).is_ok() => {
                 self.buf.push(0xdb);
                 self.buf.extend_from_slice(&(n as u32).to_be_bytes());
             }
@@ -457,12 +491,15 @@ impl Encoder {
     fn str_header(&mut self, n: usize) {
         if n < 32 {
             self.buf.push(0xa0 | n as u8);
-        } else if n < 256 {
+        } else if u8::try_from(n).is_ok() {
             self.buf.push(0xd9);
             self.buf.push(n as u8);
-        } else {
+        } else if u16::try_from(n).is_ok() {
             self.buf.push(0xda);
             self.buf.extend_from_slice(&(n as u16).to_be_bytes());
+        } else {
+            self.buf.push(0xdb);
+            self.buf.extend_from_slice(&(n as u32).to_be_bytes());
         }
     }
 
@@ -530,6 +567,22 @@ mod tests {
         assert_eq!(Encoder::encode(&v), raw);
     }
 
+    #[test]
+    fn fields_that_are_not_canonical_c_strings_stay_byte_exact() {
+        // None of these is the one-NUL spelling the Line 6 protocol uses for
+        // text. Calling them strings would make the encoder add or remove a
+        // byte, which is corruption for a document with an offset table.
+        for raw in [
+            &[0xa0][..],
+            &[0xa3, b'f', b'o', b'o'][..],
+            &[0xa2, 0, 0][..],
+        ] {
+            let value = Decoder::new(raw).value().unwrap();
+            assert!(matches!(value, Value::Bin(..)));
+            assert_eq!(Encoder::encode(&value), raw);
+        }
+    }
+
     /// A document written back must be byte-identical, or the preset's own
     /// offset table stops matching its contents.
     #[test]
@@ -575,10 +628,59 @@ mod tests {
     }
 
     #[test]
+    fn values_larger_than_u16_keep_their_full_declared_length() {
+        const N: usize = u16::MAX as usize + 1;
+
+        let array = Value::Array(vec![Value::Nil; N]);
+        let encoded = Encoder::encode(&array);
+        assert_eq!(&encoded[..5], &[0xdd, 0, 1, 0, 0], "array32");
+        let Value::Array(decoded) = Decoder::new(&encoded).value().unwrap() else {
+            panic!("expected an array");
+        };
+        assert_eq!(decoded.len(), N);
+
+        let map = Value::Map(
+            (0..N)
+                .map(|key| (Key::Int(key as i64), Value::Nil))
+                .collect(),
+        );
+        assert_eq!(&Encoder::encode(&map)[..5], &[0xdf, 0, 1, 0, 0]);
+
+        // Strings count their trailing NUL, so 65,535 characters are already
+        // one byte too large for str16. A blob that grew beyond the width it
+        // arrived with must be promoted in the same way.
+        let text = "x".repeat(u16::MAX as usize);
+        let encoded = Encoder::encode(&Value::Str(text.clone()));
+        assert_eq!(&encoded[..5], &[0xdb, 0, 1, 0, 0], "str32");
+        assert_eq!(
+            Decoder::new(&encoded).value().unwrap().as_str(),
+            Some(text.as_str())
+        );
+
+        let encoded = Encoder::encode(&Value::Bin(vec![0; N], 2));
+        assert_eq!(&encoded[..5], &[0xdb, 0, 1, 0, 0], "grown str16");
+    }
+
+    #[test]
+    fn excessive_nesting_and_unrepresentable_map_keys_are_rejected() {
+        let mut nested = vec![0x91; 129]; // array containing array containing ...
+        nested.push(0xc0);
+        assert_eq!(Decoder::new(&nested).value(), Err(Error::NestingTooDeep));
+
+        // Key stores signed protocol keys. Wrapping u64::MAX into -1 would
+        // make two distinct wire maps indistinguishable.
+        let huge_key = [
+            0x81, 0xcf, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xc0,
+        ];
+        assert_eq!(Decoder::new(&huge_key).value(), Err(Error::BadKey));
+    }
+
+    #[test]
     fn an_overflowing_declared_length_is_an_incomplete_value_not_a_panic() {
         let mut decoder = Decoder {
             buf: &[],
             pos: usize::MAX,
+            depth: 0,
         };
         assert_eq!(decoder.take(1), Err(Error::Eof));
     }
