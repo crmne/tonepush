@@ -1156,7 +1156,7 @@ impl Worker {
     /// Push the preset as it stands onto the undo stack, unconditionally.
     /// Returns whether there was a preset to record.
     fn record_history(&mut self) -> bool {
-        let Some(document) = self.device.as_mut().and_then(|d| d.read_preset().ok()) else {
+        let Some(document) = self.try_on_device(|device| device.read_preset()) else {
             return false;
         };
         self.history.push(document.encode());
