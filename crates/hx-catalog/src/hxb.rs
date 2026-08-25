@@ -85,11 +85,18 @@ pub fn read_backup(bytes: &[u8]) -> Result<Backup, Error> {
             container.version
         )));
     }
-    let block = container
+    let mut setlists = container
         .blocks
         .iter()
-        .find(|block| is_setlist_tag(&block.tag))
+        .filter(|block| is_setlist_tag(&block.tag));
+    let block = setlists
+        .next()
         .ok_or_else(|| Error::Backup("no setlist block found in this .hxb".into()))?;
+    if setlists.next().is_some() {
+        return Err(Error::Backup(
+            "more than one setlist block found in this .hxb".into(),
+        ));
+    }
     let raw = block.decompress()?;
     let setlist: Value = serde_json::from_slice(&raw)
         .map_err(|error| Error::Backup(format!("the backup's setlist is not JSON: {error}")))?;
@@ -466,6 +473,31 @@ mod tests {
             .expect("future version")
             .to_string()
             .contains("unsupported"));
+    }
+
+    #[test]
+    fn ambiguous_duplicate_setlist_blocks_are_rejected() {
+        let setlist = json!({ "data": { "presets": [] } });
+        let (stored, raw_len) = deflate(&setlist);
+        let duplicate = Container {
+            version: 1,
+            blocks: [*b"SL00", *b"01LS"]
+                .into_iter()
+                .map(|tag| Block {
+                    tag,
+                    compressed: true,
+                    raw_len,
+                    stored: stored.clone(),
+                })
+                .collect(),
+        }
+        .encode();
+
+        let error = read_backup(&duplicate)
+            .err()
+            .expect("duplicate setlist")
+            .to_string();
+        assert!(error.contains("more than one setlist"), "{error}");
     }
 
     #[test]
