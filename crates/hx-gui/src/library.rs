@@ -484,11 +484,31 @@ fn normalise_series(index: &mut Index) -> bool {
 }
 
 fn read_index() -> Index {
-    let mut index = load_index().unwrap_or_default();
+    // A broken index must stay broken until it can be recovered by the person
+    // who owns it. Treating a read failure as an empty index is useful for the
+    // UI (it can still open), but writing that default back would erase the
+    // only copy of the metadata and make a later garbage-collection pass
+    // believe none of the objects are referenced.
+    let Ok(mut index) = load_index() else {
+        return Index::default();
+    };
     if normalise_series(&mut index) {
         let _ = write_index(&index);
     }
     index
+}
+
+/// Read the index for an operation that will change it.
+///
+/// Mutations may not use the UI's empty fallback: overwriting an unreadable
+/// index with one new entry would silently discard every tone that was already
+/// recorded there.
+fn index_for_update() -> Result<Index, String> {
+    let mut index = load_index()?;
+    if normalise_series(&mut index) {
+        write_index(&index)?;
+    }
+    Ok(index)
 }
 
 fn write_index(index: &Index) -> Result<(), String> {
@@ -584,7 +604,7 @@ pub fn versions_of(hash: &str) -> Vec<Entry> {
 /// Make an existing revision the one shown by the library. No history is
 /// removed; saving another edit continues after the highest revision number.
 pub fn make_current(hash: &str) -> Result<(), String> {
-    let mut index = read_index();
+    let mut index = index_for_update()?;
     let Some(series) = index
         .series
         .values_mut()
@@ -637,7 +657,7 @@ pub enum Keeping {
 /// already in use is not resolved here: the answer belongs to whoever can ask.
 pub fn keep(name: &str, ext: &str, bytes: &[u8]) -> Result<(String, Keeping), String> {
     let hash = store(name, bytes, ext)?;
-    let mut index = read_index();
+    let mut index = index_for_update()?;
     index.version = VERSION;
     if let Some(known) = index.tones.get(&hash).map(|meta| meta.name.clone()) {
         if let Some(series) = index
@@ -707,7 +727,7 @@ pub fn keep_beside(name: &str, ext: &str, bytes: &[u8]) -> Result<(String, Keepi
 /// Claim a stored object under a name, keeping any metadata already recorded
 /// for it. This is what *Save as* does once a free name has been typed.
 pub fn adopt(hash: &str, name: &str) -> Result<(), String> {
-    let mut index = read_index();
+    let mut index = index_for_update()?;
     index.version = VERSION;
     let mut meta = index.tones.get(hash).cloned().unwrap_or_default();
     meta.name = name.trim().to_owned();
@@ -737,7 +757,7 @@ pub fn adopt(hash: &str, name: &str) -> Result<(), String> {
 /// The old revision remains indexed and can be restored later. Its notes come
 /// across to the new revision because this is the same musical tone, edited.
 pub fn override_with(old: &str, hash: &str, name: &str) -> Result<(), String> {
-    let mut index = read_index();
+    let mut index = index_for_update()?;
     index.version = VERSION;
     let mut meta = index.tones.get(old).cloned().unwrap_or_default();
     meta.name = name.trim().to_owned();
@@ -765,7 +785,7 @@ pub fn override_with(old: &str, hash: &str, name: &str) -> Result<(), String> {
 
 /// Save one tone's metadata, leaving the rest of the index untouched.
 pub fn save_meta(hash: &str, meta: &Meta) -> Result<Meta, String> {
-    let mut index = read_index();
+    let mut index = index_for_update()?;
     index.version = VERSION;
     let old = index.tones.get(hash).cloned();
     let mut meta = meta.clone();
@@ -835,7 +855,7 @@ pub fn name_is_free(name: &str, except: &str) -> bool {
 /// store; if nothing plays it, [`collect_garbage`] moves it to the trash on the
 /// way out. Either way the library no longer claims it.
 pub fn forget(hash: &str) -> Result<(), String> {
-    let mut index = read_index();
+    let mut index = index_for_update()?;
     index.version = VERSION;
     let series_id = index
         .series
@@ -1228,7 +1248,10 @@ pub fn save_setlist_version(setlist: &Setlist) -> Result<(PathBuf, Setlist), Str
     saved.name = wanted.to_owned();
     if let Some(previous) = existing {
         saved.series = setlist_series(&previous);
-        saved.version = previous.revision() + 1;
+        saved.version = previous
+            .revision()
+            .checked_add(1)
+            .ok_or("that setlist has no revision numbers left")?;
         saved.added_at = if previous.added_at.is_empty() {
             previous.modified_at.clone()
         } else {
@@ -1377,7 +1400,9 @@ pub fn migrate() -> usize {
         return 0;
     }
 
-    let old = read_index();
+    let Ok(old) = index_for_update() else {
+        return 0;
+    };
     let mut index = Index {
         version: VERSION,
         tones: old.tones,
@@ -1576,6 +1601,33 @@ mod tests {
         assert_eq!(objects(), 1);
     }
 
+    #[test]
+    fn a_broken_index_is_never_replaced_or_used_to_collect_tones() {
+        let scratch = Scratch::new("broken-index");
+        let (hash, _) = keep("Blackened", "hxpreset", b"one").unwrap();
+        let index = scratch.dir.join("index.json");
+        let broken = b"{ this was truncated";
+        std::fs::write(&index, broken).unwrap();
+
+        // Read-only callers may show an empty library, but they must leave the
+        // evidence in place for recovery and must not turn it into an empty,
+        // valid index that makes every object collectible.
+        assert!(entries().is_empty());
+        assert_eq!(collect_garbage(), 0);
+        assert!(holds(&hash));
+        assert_eq!(std::fs::read(&index).unwrap(), broken);
+
+        // Anything that would rewrite the index stops instead. Migration is a
+        // startup mutation too, and must leave old-layout files untouched.
+        assert!(save_meta(&hash, &Meta::default()).is_err());
+        assert!(forget(&hash).is_err());
+        let legacy = scratch.dir.join("Legacy.hxpreset");
+        std::fs::write(&legacy, b"legacy").unwrap();
+        assert_eq!(migrate(), 0);
+        assert!(legacy.is_file());
+        assert_eq!(std::fs::read(&index).unwrap(), broken);
+    }
+
     /// Different bytes under a name already in use are the whole reason for
     /// Override / Save as: the library does not decide this on its own.
     #[test]
@@ -1767,6 +1819,20 @@ mod tests {
         assert_eq!(setlists().len(), 2);
         assert_eq!(setlists()[0].1.slots[0].hash, "aaa");
         assert_eq!(setlists()[1].1.slots[0].hash, "bbb");
+    }
+
+    #[test]
+    fn an_exhausted_setlist_revision_is_reported_without_overflowing() {
+        let _scratch = Scratch::new("setlist-version-overflow");
+        let setlist = Setlist {
+            series: "series".into(),
+            version: u32::MAX,
+            name: "Very Old Tour".into(),
+            ..Default::default()
+        };
+        save_setlist(&setlist).unwrap();
+        let error = save_setlist_version(&setlist).unwrap_err();
+        assert!(error.contains("revision numbers"), "{error}");
     }
 
     /// A library from before the object store has to come across whole: the
