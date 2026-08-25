@@ -6,6 +6,7 @@
 //! and mixing the two made one file read as a protocol engine with a service
 //! catalogue stapled on.
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use hx_proto::msgpack::Value;
@@ -139,18 +140,25 @@ impl Session {
         };
         // Each entry is a single-key map from preset index to its details, so
         // the name is one level in regardless of what the index is.
-        Ok(entries
-            .iter()
-            .map(|entry| match entry {
+        entries
+            .into_iter()
+            .enumerate()
+            .map(|(position, entry)| match entry {
                 Value::Map(fields) => fields
                     .first()
                     .and_then(|(_, v)| v.get(rpc::key::NAME))
                     .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
-                _ => String::new(),
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        Error::Protocol(format!(
+                            "preset list entry {position} has no readable name"
+                        ))
+                    }),
+                _ => Err(Error::Protocol(format!(
+                    "preset list entry {position} is not a map"
+                ))),
             })
-            .collect())
+            .collect()
     }
 
     /// Set one parameter on one block.
@@ -183,18 +191,42 @@ impl Session {
             rpc::op::LIST_IRS,
             hx_proto::msgmap! { rpc::key::ARGS => Value::Int(2) },
         )?;
-        let Value::Array(entries) = result else {
-            return Ok(Vec::new());
-        };
-        Ok(entries
-            .iter()
-            .filter_map(|e| {
-                Some((
-                    e.get(rpc::key::IR_SLOT)?.as_i64()?,
-                    e.get(rpc::key::NAME)?.as_str()?.to_owned(),
+        let entries = match result {
+            Value::Array(entries) => entries,
+            // The captured device response for no occupied slots is nil rather
+            // than an empty array.
+            Value::Nil => return Ok(Vec::new()),
+            _ => {
+                return Err(Error::Protocol(
+                    "the device returned an invalid impulse response list".into(),
                 ))
+            }
+        };
+        let mut seen = BTreeSet::new();
+        entries
+            .into_iter()
+            .enumerate()
+            .map(|(position, entry)| {
+                let slot = entry
+                    .get(rpc::key::IR_SLOT)
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| {
+                        Error::Protocol(format!("IR list entry {position} has no slot"))
+                    })?;
+                let name = entry
+                    .get(rpc::key::NAME)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        Error::Protocol(format!("IR list entry {position} has no name"))
+                    })?;
+                if slot < 0 || !seen.insert(slot) {
+                    return Err(Error::Protocol(format!(
+                        "IR list entry {position} has an invalid or duplicate slot {slot}"
+                    )));
+                }
+                Ok((slot, name.to_owned()))
             })
-            .collect())
+            .collect()
     }
 
     /// Read an impulse response back off the device.
@@ -204,10 +236,10 @@ impl Session {
     /// saved anywhere. Two opcodes, the way the editor's own export does it -
     /// op12 for the descriptor and op11 for the samples.
     ///
-    /// What comes back is what the device stores rather than what was uploaded:
-    /// 48 kHz mono `f32`, as many samples as the upload declared - the size code
-    /// rounds up to 1024 or 2048 - with anything longer or at a higher rate
-    /// resampled on the way in. `None` is an empty slot.
+    /// What comes back is what the device stores: 48 kHz mono `f32`, as many
+    /// samples as the upload declared. Rate conversion is a host-side concern;
+    /// [`crate::ir::prepare`] performs it before an ordinary WAV is uploaded.
+    /// `None` is an empty slot.
     pub fn read_ir(&mut self, slot: i64) -> Result<Option<(String, Vec<f32>)>> {
         self.bootstrap()?;
         let descriptor = self.request(
@@ -229,15 +261,11 @@ impl Session {
             },
         )?;
         let Some(bytes) = samples.as_raw() else {
-            return Ok(None);
+            return Err(Error::Protocol(
+                "the device returned invalid impulse response samples".into(),
+            ));
         };
-        Ok(Some((
-            name,
-            bytes
-                .chunks_exact(4)
-                .map(|w| f32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-                .collect(),
-        )))
+        Ok(Some((name, decode_ir_samples(bytes)?)))
     }
 
     /// Rename an impulse response slot, leaving its samples alone.
@@ -575,7 +603,9 @@ impl Session {
             rpc::op::FETCH_OBJECT,
             hx_proto::msgmap! { rpc::key::OBJECT_ID => Value::Int(id) },
         )?;
-        Ok(v.get(rpc::key::VALUE).cloned().unwrap_or(Value::Nil))
+        v.get(rpc::key::VALUE)
+            .cloned()
+            .ok_or_else(|| Error::Protocol(format!("object {id} answered without a value")))
     }
 
     /// Write one device object.
@@ -1064,21 +1094,27 @@ impl Session {
     pub fn setlists(&mut self) -> Result<Vec<String>> {
         let result = self.request(ChannelId::CONTROL, rpc::op::LIST_SETLISTS, Value::Nil)?;
         let Value::Array(entries) = result else {
-            return Ok(Vec::new());
+            return Err(Error::Protocol("setlist list was not an array".into()));
         };
         // A setlist entry is a single-pair map from index to name - `{0:
         // 'PRESETS'}` - rather than the keyed record the preset list uses.
-        Ok(entries
-            .iter()
-            .map(|e| match e {
+        entries
+            .into_iter()
+            .enumerate()
+            .map(|(position, entry)| match entry {
                 Value::Map(fields) => fields
                     .first()
                     .and_then(|(_, v)| v.as_str())
-                    .unwrap_or("")
-                    .to_owned(),
-                other => other.as_str().unwrap_or("").to_owned(),
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        Error::Protocol(format!("setlist entry {position} has no readable name"))
+                    }),
+                Value::Str(name) => Ok(name),
+                _ => Err(Error::Protocol(format!(
+                    "setlist entry {position} has no readable name"
+                ))),
             })
-            .collect())
+            .collect()
     }
 
     /// Switch a block in or out of the signal path.
@@ -1100,18 +1136,21 @@ impl Session {
     /// this separate metadata call rather than from `read_preset`.
     pub fn preset_info(&mut self) -> Result<(i64, i64, String)> {
         let v = self.request(ChannelId::DATA, rpc::op::PRESET_INFO, Value::Nil)?;
-        Ok((
-            v.get(rpc::key::SETLIST)
-                .and_then(|x| x.as_i64())
-                .unwrap_or(-1),
-            v.get(rpc::key::PRESET_INDEX)
-                .and_then(|x| x.as_i64())
-                .unwrap_or(-1),
-            v.get(rpc::key::NAME)
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_owned(),
-        ))
+        let setlist = v
+            .get(rpc::key::SETLIST)
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0)
+            .ok_or_else(|| Error::Protocol("preset info has no valid setlist".into()))?;
+        let index = v
+            .get(rpc::key::PRESET_INDEX)
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0)
+            .ok_or_else(|| Error::Protocol("preset info has no valid slot".into()))?;
+        let name = v
+            .get(rpc::key::NAME)
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Protocol("preset info has no name".into()))?;
+        Ok((setlist, index, name.to_owned()))
     }
 
     /// Fetch an object by id.
@@ -1136,6 +1175,27 @@ impl Session {
         }
         out
     }
+}
+
+fn decode_ir_samples(bytes: &[u8]) -> Result<Vec<f32>> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err(Error::Protocol(
+            "the device's impulse response ends partway through an f32 sample".into(),
+        ));
+    }
+    let samples: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        .collect();
+    if samples.is_empty()
+        || samples.len() > 2048
+        || samples.iter().any(|sample| !sample.is_finite())
+    {
+        return Err(Error::Protocol(
+            "the device returned an invalid impulse response".into(),
+        ));
+    }
+    Ok(samples)
 }
 
 #[cfg(test)]
@@ -1163,5 +1223,13 @@ mod validation_tests {
         assert!(block_param(0, 0).is_ok());
         assert!(block_param(-1, 0).is_err());
         assert!(block_param(0, -1).is_err());
+    }
+
+    #[test]
+    fn malformed_device_ir_samples_are_not_silently_shortened() {
+        assert_eq!(decode_ir_samples(&0.5f32.to_le_bytes()).unwrap(), vec![0.5]);
+        assert!(decode_ir_samples(&[0, 1, 2]).is_err());
+        assert!(decode_ir_samples(&f32::NAN.to_le_bytes()).is_err());
+        assert!(decode_ir_samples(&[]).is_err());
     }
 }
