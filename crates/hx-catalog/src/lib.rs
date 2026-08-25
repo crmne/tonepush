@@ -567,7 +567,12 @@ pub fn resources_dir() -> Option<PathBuf> {
     // HX Edit ships for macOS and Windows only, so on Linux there is nowhere
     // standard to look. Copying the Resources folder across from a machine that
     // has it is the practical route, and this is where we expect it.
-    let shared = home::resources();
+    let shared = home::resources().inspect(|path| {
+        // Extraction publishes by swapping whole directories. If the process
+        // stopped in the one rename-wide gap, put the prior generation back
+        // before deciding whether resources are installed.
+        let _ = extract::recover_install(path);
+    });
 
     [
         Some(default_resources()),

@@ -5,8 +5,10 @@
 //! redistributable, which is exactly why the user supplies their own
 //! installer and everything stays on their machine.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The files worth taking: names, parameter ranges, display formatting, the
 /// number-to-model table, and the artwork.
@@ -330,10 +332,54 @@ fn nested_archives(root: &Path) -> Vec<PathBuf> {
 
 /// Copy the wanted files into the destination.
 fn copy_from(src: &Path) -> Result<usize, String> {
-    validate_source(src)?;
-
     let dest = destination().ok_or_else(|| "no home directory to install into".to_string())?;
-    std::fs::create_dir_all(&dest)
+    install_from_to(src, &dest)
+}
+
+/// Build a complete resource generation beside the live one, then publish it.
+fn install_from_to(src: &Path, dest: &Path) -> Result<usize, String> {
+    validate_source(src)?;
+    recover_install(dest)?;
+    let staging = staging_dir(dest)?;
+
+    let copied = match copy_contents(src, &staging).and_then(|copied| {
+        // Check what was actually copied, not only the source. A future change
+        // to the wanted-file list must not be able to publish an unusable tree.
+        validate_source(&staging)?;
+        Ok(copied)
+    }) {
+        Ok(copied) => copied,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+
+    let previous = previous_install(dest)?;
+    let had_previous = dest.exists();
+    if had_previous {
+        std::fs::rename(dest, &previous)
+            .map_err(|error| format!("putting the old resources aside: {error}"))?;
+    }
+    if let Err(error) = std::fs::rename(&staging, dest) {
+        let rollback = had_previous.then(|| std::fs::rename(&previous, dest));
+        let detail = match rollback {
+            Some(Err(rollback)) => format!("; restoring the old resources also failed: {rollback}"),
+            _ => String::new(),
+        };
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!(
+            "publishing the extracted resources: {error}{detail}"
+        ));
+    }
+    if had_previous {
+        let _ = remove_path(&previous);
+    }
+    Ok(copied)
+}
+
+fn copy_contents(src: &Path, dest: &Path) -> Result<usize, String> {
+    std::fs::create_dir_all(dest)
         .map_err(|e| format!("could not create {}: {e}", dest.display()))?;
 
     let mut copied = 0;
@@ -362,6 +408,71 @@ fn copy_from(src: &Path) -> Result<usize, String> {
         return Err("found nothing to copy; is that an HX Edit installer?".into());
     }
     Ok(copied)
+}
+
+fn staging_dir(dest: &Path) -> Result<PathBuf, String> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let parent = dest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("could not create the resource directory: {error}"))?;
+    let name = dest
+        .file_name()
+        .ok_or_else(|| "the resource destination needs a directory name".to_owned())?;
+    for _ in 0..100 {
+        let mut staged = OsString::from(".");
+        staged.push(name);
+        staged.push(format!(
+            ".{}-{}.incomplete",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = parent.join(staged);
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("creating staged resources: {error}")),
+        }
+    }
+    Err("could not choose a unique staging directory for the resources".into())
+}
+
+fn previous_install(dest: &Path) -> Result<PathBuf, String> {
+    let parent = dest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut name = OsString::from(".");
+    name.push(
+        dest.file_name()
+            .ok_or_else(|| "the resource destination needs a directory name".to_owned())?,
+    );
+    name.push(".previous");
+    Ok(parent.join(name))
+}
+
+fn remove_path(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+/// Finish a directory swap interrupted after the old generation moved aside.
+pub(crate) fn recover_install(dest: &Path) -> Result<(), String> {
+    let previous = previous_install(dest)?;
+    match (dest.exists(), previous.exists()) {
+        (false, true) => std::fs::rename(previous, dest)
+            .map_err(|error| format!("recovering the previous resources: {error}"))?,
+        (true, true) => remove_path(&previous)
+            .map_err(|error| format!("cleaning up the previous resources: {error}"))?,
+        _ => {}
+    }
+    Ok(())
 }
 
 fn validate_source(src: &Path) -> Result<(), String> {
@@ -426,6 +537,17 @@ mod tests {
         dir
     }
 
+    fn valid_source(dir: &Path) {
+        std::fs::write(dir.join("HX_ModelCatalog.json"), r#"{"categories": []}"#).unwrap();
+        std::fs::write(dir.join("HelixControls.json"), b"{}").unwrap();
+        std::fs::write(dir.join("Helix.sym"), b"[]").unwrap();
+        std::fs::write(
+            dir.join("amp.models"),
+            r#"[{"symbolicID":"TestAmp","name":"Test Amp"}]"#,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn the_registry_names_a_seven_zip_wherever_it_was_installed() {
         let output = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\7-Zip\r\n    Path    REG_SZ    D:\\Tools\\7-Zip\\\r\n";
@@ -466,5 +588,49 @@ mod tests {
         assert!(error.contains("contains no models"));
 
         let _ = std::fs::remove_dir_all(src);
+    }
+
+    #[test]
+    fn a_complete_resource_generation_replaces_the_old_one_at_once() {
+        let root = scratch("atomic-success");
+        let src = root.join("source");
+        let dest = root.join("installed");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        valid_source(&src);
+        std::fs::write(dest.join("old-only"), b"old").unwrap();
+
+        assert_eq!(install_from_to(&src, &dest).unwrap(), 4);
+        assert!(!dest.join("old-only").exists());
+        assert!(dest.join("amp.models").is_file());
+        assert_eq!(crate::Catalog::load_from(&dest).unwrap().len(), 1);
+        assert!(!previous_install(&dest).unwrap().exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_staged_copy_leaves_the_live_resources_untouched() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch("atomic-failure");
+        let src = root.join("source");
+        let dest = root.join("installed");
+        std::fs::create_dir_all(src.join("icons_models")).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        valid_source(&src);
+        symlink(
+            src.join("does-not-exist"),
+            src.join("icons_models/broken.png"),
+        )
+        .unwrap();
+        std::fs::write(dest.join("working"), b"old catalog").unwrap();
+
+        assert!(install_from_to(&src, &dest).is_err());
+        assert_eq!(std::fs::read(dest.join("working")).unwrap(), b"old catalog");
+        assert!(!dest.join("HX_ModelCatalog.json").exists());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
