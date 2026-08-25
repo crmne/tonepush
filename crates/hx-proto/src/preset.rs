@@ -124,7 +124,10 @@ impl Layout {
     /// A junction's own number means "before this cell", which is the same
     /// arithmetic: the split of that preset reads 1 and attaches before slot 2.
     pub fn slot_of(&self, path: usize, branch: usize, position: usize) -> Option<usize> {
-        Some(self.paths.get(path)?.row_base(branch)? + position)
+        self.paths
+            .get(path)?
+            .row_base(branch)?
+            .checked_add(position)
     }
 
     /// The other direction: which branch a slot is on, and its place in that
@@ -413,7 +416,7 @@ impl Preset {
 
     /// Firmware version, from the BCD-packed field: `0x03800000` is 3.80.
     pub fn firmware(&self) -> Option<String> {
-        let raw = self.tone.get(key::META)?.get(key::FIRMWARE)?.as_i64()? as u32;
+        let raw = u32::try_from(self.tone.get(key::META)?.get(key::FIRMWARE)?.as_i64()?).ok()?;
         Some(format!("{}.{:02x}", raw >> 24, (raw >> 16) & 0xff))
     }
 
@@ -821,7 +824,7 @@ impl Preset {
             .get(body_key)?
             .get(key::ATTACH)
             .and_then(Value::as_i64)
-            .map(|n| n as usize)
+            .and_then(|n| usize::try_from(n).ok())
     }
 
     /// Where the split or join at `position` attaches: the slot it sits just
@@ -848,7 +851,7 @@ impl Preset {
             .get(body_key)?
             .get(key::JUNCTION_MODEL)
             .and_then(Value::as_i64)
-            .map(|n| n as u32)
+            .and_then(|n| u32::try_from(n).ok())
     }
 
     /// Whether a snapshot can switch the split or join at `position`.
@@ -1048,11 +1051,12 @@ impl Preset {
 
         // Walk the tone's top-level map recording where each key begins.
         let mut key_at = std::collections::HashMap::new();
-        let count = match tone.first()? {
-            b @ 0x80..=0x8f => (b & 0x0f) as usize,
+        let (count, mut at) = match tone.as_slice() {
+            [b @ 0x80..=0x8f, ..] => ((b & 0x0f) as usize, 1),
+            [0xde, high, low, ..] => (u16::from_be_bytes([*high, *low]) as usize, 3),
+            [0xdf, a, b, c, d, ..] => (u32::from_be_bytes([*a, *b, *c, *d]) as usize, 5),
             _ => return None,
         };
-        let mut at = 1usize;
         for _ in 0..count {
             let here = at;
             let mut d = Decoder::new(&tone[at..]);
@@ -1242,15 +1246,14 @@ fn read_slot(raw: &Value) -> Slot {
         .and_then(|r| r.get(key::MODEL))
         .or_else(|| body.get(key::INLINE_MODEL))
         .and_then(Value::as_i64)
-        .map(|n| n as u32);
+        .and_then(|n| u32::try_from(n).ok());
 
     // A paired model is written as -1 when absent, so a plain "is it there"
     // check would report every block as having a cab.
     let paired = reference
         .and_then(|r| r.get(key::PAIRED_MODEL))
         .and_then(Value::as_i64)
-        .filter(|n| *n >= 0)
-        .map(|n| n as u32);
+        .and_then(|n| u32::try_from(n).ok());
 
     let values = body
         .get(key::VALUES)
@@ -1356,6 +1359,11 @@ mod tests {
         assert_eq!(layout.slot_of(0, 0, 1), Some(2), "where the split attaches");
         assert_eq!(layout.slot_of(0, 0, 6), Some(7), "where the join attaches");
         assert_eq!(layout.slot_of(1, 0, 0), None, "there is no second path");
+        assert_eq!(
+            layout.slot_of(0, 0, usize::MAX),
+            None,
+            "an imported row index must not overflow"
+        );
     }
 
     #[test]
@@ -1628,6 +1636,29 @@ mod tests {
     fn a_paired_model_of_minus_one_means_none() {
         let preset = Preset::parse(&sample()).unwrap();
         assert_eq!(preset.slots[0].paired, None);
+    }
+
+    #[test]
+    fn negative_or_oversized_identifiers_do_not_wrap() {
+        let raw = crate::msgmap! {
+            key::KIND => Value::Int(6),
+            key::BODY => crate::msgmap! {
+                key::MODEL_REF => crate::msgmap! {
+                    key::MODEL => Value::Int(-1),
+                    key::PAIRED_MODEL => Value::Int(i64::MAX),
+                },
+            },
+        };
+        let slot = read_slot(&raw);
+        assert_eq!(slot.model, None);
+        assert_eq!(slot.paired, None);
+
+        let mut preset = Preset::parse(&sample()).unwrap();
+        *preset
+            .tone
+            .at_mut(&[key::META, key::FIRMWARE])
+            .expect("firmware") = Value::Int(-1);
+        assert_eq!(preset.firmware(), None);
     }
 
     #[test]
@@ -2017,6 +2048,24 @@ mod tests {
             preset.sections,
             "the recomputed section table does not match the device's own"
         );
+    }
+
+    #[test]
+    fn the_section_table_survives_additional_top_level_fields() {
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+        let Value::Map(fields) = &mut preset.tone else {
+            panic!("the tone is a map");
+        };
+        let mut key = 10_000;
+        while fields.len() < 16 {
+            fields.push((crate::msgpack::Key::Int(key), Value::Nil));
+            key += 1;
+        }
+        assert_eq!(Encoder::encode(&preset.tone)[0], 0xde, "map16");
+
+        let sections = preset.computed_sections().expect("still computable");
+        let reparsed = Preset::parse(&preset.encode()).expect("re-parses");
+        assert_eq!(reparsed.sections, sections);
     }
 
     #[test]
