@@ -343,15 +343,16 @@ fn copy_from(src: &Path) -> Result<usize, String> {
         copy_recursive(&from, &dest.join(item)).map_err(|e| format!("copying {item}: {e}"))?;
         copied += 1;
     }
-    if let Ok(entries) = std::fs::read_dir(src) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "models") {
-                if let Some(name) = path.file_name() {
-                    std::fs::copy(&path, dest.join(name))
-                        .map_err(|e| format!("copying models: {e}"))?;
-                    copied += 1;
-                }
+    for entry in
+        std::fs::read_dir(src).map_err(|error| format!("reading extracted resources: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("reading extracted resources: {error}"))?;
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "models") {
+            if let Some(name) = path.file_name() {
+                std::fs::copy(&path, dest.join(name))
+                    .map_err(|e| format!("copying models: {e}"))?;
+                copied += 1;
             }
         }
     }
@@ -364,7 +365,8 @@ fn copy_from(src: &Path) -> Result<usize, String> {
 fn copy_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
     if from.is_dir() {
         std::fs::create_dir_all(to)?;
-        for entry in std::fs::read_dir(from)?.flatten() {
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
             copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
         }
         Ok(())
