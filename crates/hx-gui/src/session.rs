@@ -866,10 +866,11 @@ impl Worker {
             Cmd::BackUp(dir) => self.back_up(&dir),
             Cmd::RestoreAll(dir) => self.restore_all(&dir),
             Cmd::SavePreset => {
-                let Some((setlist, index, name)) =
-                    self.device.as_mut().and_then(|d| d.preset_info().ok())
-                else {
-                    return self.send(Evt::Failed("no preset loaded".into()));
+                let Some((setlist, index, name)) = self.try_on_device(|d| d.preset_info()) else {
+                    if self.device.is_some() {
+                        self.send(Evt::Failed("no preset loaded".into()));
+                    }
+                    return;
                 };
                 if self.run_on_device(|d| d.save_preset(setlist, index, &name)) {
                     self.dirty = false;
@@ -1265,9 +1266,7 @@ impl Worker {
 
     /// The loaded preset's name, or an empty string if the device will not say.
     fn preset_name(&mut self) -> String {
-        self.device
-            .as_mut()
-            .and_then(|d| d.preset_info().ok())
+        self.try_on_device(|device| device.preset_info())
             .map(|(_, _, name)| name)
             .unwrap_or_default()
     }
@@ -1288,10 +1287,11 @@ impl Worker {
     /// preset. A no-op when it is already the one loaded.
     fn go_to(&mut self, dest: i64) -> bool {
         let current = self
-            .device
-            .as_mut()
-            .and_then(|d| d.preset_info().ok())
+            .try_on_device(|device| device.preset_info())
             .map(|(_, index, _)| index);
+        if self.device.is_none() {
+            return false;
+        }
         if current == Some(dest) {
             return true;
         }
