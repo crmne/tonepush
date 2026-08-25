@@ -40,6 +40,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 ureq = { version = "3.4.0", default-features = false, features = ["rustls", "platform-verifier"] }
 sha2 = "0.11"
+# Library metadata is replaced only after its complete new contents have been
+# flushed, so a crash cannot turn the last good index into half a JSON file.
+atomic-write-file = "0.3.1"
 # Human-readable, sortable timestamps in the local library index.
 jiff = "0.2"
 

@@ -33,9 +33,22 @@
 //! everything else that might want to read it.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use atomic_write_file::AtomicWriteFile;
 use sha2::{Digest, Sha256};
+
+/// Replace one file only after all of its new contents are safely written.
+///
+/// Object bytes and the JSON files that point at them are the library's source
+/// of truth. Writing either in place would turn a full disk, process kill, or
+/// power loss into a valid path containing only part of its document.
+fn atomic_write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let mut file = AtomicWriteFile::open(path)?;
+    file.write_all(bytes.as_ref())?;
+    file.commit()
+}
 
 /// Where kept tones live: `~/.local/share/tonepush/library`, beside the
 /// extracted resources. `None` only when there is no home to write into.
@@ -228,7 +241,7 @@ pub fn store(name: &str, bytes: &[u8], ext: &str) -> Result<String, String> {
         return Ok(hash);
     }
     let target = dir.join(file_name(name, &hash, ext));
-    std::fs::write(&target, bytes).map_err(|e| format!("could not keep the tone: {e}"))?;
+    atomic_write(&target, bytes).map_err(|e| format!("could not keep the tone: {e}"))?;
     remember_place(&hash, &target);
     Ok(hash)
 }
@@ -278,7 +291,7 @@ pub fn attach_portable(hash: &str, hlx: &str) -> Result<(), String> {
         // It arrived as one; there is nothing to write beside it.
         return Ok(());
     }
-    std::fs::write(path.with_extension("hlx"), hlx)
+    atomic_write(path.with_extension("hlx"), hlx)
         .map_err(|e| format!("could not write the portable copy: {e}"))
 }
 
@@ -515,7 +528,7 @@ fn write_index(index: &Index) -> Result<(), String> {
     let dir = dir().ok_or("no library to save into")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not create the library: {e}"))?;
     let json = serde_json::to_vec_pretty(index).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("index.json"), json).map_err(|e| e.to_string())
+    atomic_write(dir.join("index.json"), json).map_err(|e| e.to_string())
 }
 
 /// One tone in the library: what it is, and what it is called.
@@ -1227,7 +1240,7 @@ pub fn save_setlist(setlist: &Setlist) -> Result<PathBuf, String> {
         versioned_setlist_path(&dir, setlist)
     };
     let json = serde_json::to_vec_pretty(setlist).map_err(|e| e.to_string())?;
-    std::fs::write(&target, json).map_err(|e| format!("could not save the setlist: {e}"))?;
+    atomic_write(&target, json).map_err(|e| format!("could not save the setlist: {e}"))?;
     Ok(target)
 }
 
@@ -1484,7 +1497,7 @@ pub fn migrate() -> usize {
         }
         if touched {
             let json = serde_json::to_vec_pretty(&setlist).unwrap_or_default();
-            let _ = std::fs::write(&path, json);
+            let _ = atomic_write(&path, json);
         }
     }
 
