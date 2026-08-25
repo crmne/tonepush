@@ -19,6 +19,7 @@ use crate::update::VERSION;
 
 const SITE: &str = "https://tonepush.rocks";
 const PAGES: u32 = 100;
+const MAX_FEED_PAGES: usize = 1_000;
 
 /// Where the web application lives. `TONEPUSH_SITE` is useful when exercising
 /// the editor against a local Rails server.
@@ -391,17 +392,24 @@ impl CloudClient {
         let mut pages = vec![(1_u32, first.tones)];
 
         if let Some(total) = reported_total {
-            let last = total.div_ceil(PAGE_SIZE) as u32;
+            let last = total.div_ceil(PAGE_SIZE);
+            if last > MAX_FEED_PAGES {
+                return Err(format!(
+                    "the Tone catalog reported {total} matches, more than can be fetched safely"
+                ));
+            }
+            let last = last as u32;
             let remaining: Vec<u32> = (2..=last).collect();
             pages.extend(self.tone_pages(search, &remaining)?);
         } else {
             let mut page = 2_u32;
-            while page <= 1_000
+            while page <= MAX_FEED_PAGES as u32
                 && pages
                     .last()
                     .is_some_and(|(_, tones)| tones.len() == PAGE_SIZE)
             {
-                let batch: Vec<u32> = (page..(page + LANES as u32).min(1_001)).collect();
+                let batch: Vec<u32> =
+                    (page..(page + LANES as u32).min(MAX_FEED_PAGES as u32 + 1)).collect();
                 let fetched = self.tone_pages(search, &batch)?;
                 let end = fetched
                     .iter()
@@ -466,7 +474,9 @@ impl CloudClient {
         Ok(DiscoveryPage {
             entries,
             total,
-            next_page: ((page as usize) * PAGE_SIZE < total).then_some(page + 1),
+            next_page: ((u128::from(page) * PAGE_SIZE as u128) < total as u128)
+                .then(|| page.checked_add(1))
+                .flatten(),
         })
     }
 
@@ -623,7 +633,7 @@ impl CloudClient {
         let url = if path.starts_with("http://") || path.starts_with("https://") {
             path.clone()
         } else {
-            format!("{}{}", self.base, path)
+            format!("{}/{}", self.base, path.trim_start_matches('/'))
         };
         let mut response = self
             .http
@@ -1564,6 +1574,32 @@ mod tests {
     }
 
     #[test]
+    fn impossible_catalog_pagination_is_bounded_without_integer_wrap() {
+        let server = StubServer::start(vec![(
+            200,
+            serde_json::json!({"tones": [], "total": MAX_FEED_PAGES * 50 + 1}),
+        )]);
+        let client = CloudClient::new(&server.base);
+        let search = SongSearch {
+            page: 1,
+            ..Default::default()
+        };
+        assert!(client.all_tones(&search).unwrap_err().contains("safely"));
+        assert_eq!(server.finish().len(), 1, "no huge page fan-out");
+
+        let server = StubServer::start(vec![(
+            200,
+            serde_json::json!({"tones": [], "total": usize::MAX}),
+        )]);
+        let client = CloudClient::new(&server.base);
+        let page = client
+            .discover_page("", DiscoveryOrder::Popular, None, u32::MAX)
+            .unwrap();
+        assert_eq!(page.next_page, None, "u32::MAX must not wrap to page zero");
+        assert_eq!(server.finish().len(), 1);
+    }
+
+    #[test]
     fn discovery_falls_back_to_song_expansion_on_an_older_server() {
         let songs: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/cloud/songs-index.json")).unwrap();
@@ -1746,7 +1782,7 @@ mod tests {
         let mut json: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/cloud/tone-details.json"))
                 .unwrap();
-        json["download"] = serde_json::json!({"artifact": "/tones/456/artifact"});
+        json["download"] = serde_json::json!({"artifact": "tones/456/artifact"});
         let tone: ToneDetails = serde_json::from_value(json).unwrap();
         let client = CloudClient::new(&server.base);
         assert_eq!(
