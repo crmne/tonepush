@@ -2,9 +2,35 @@
 //! preferences next. One small JSON file the user could open and read, loaded
 //! leniently so a hand-edit or an older version never loses the app.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+fn write_config(path: &Path, json: &[u8]) -> std::io::Result<()> {
+    // Loading remains lenient so a hand-edited file cannot prevent startup,
+    // but a later click must not replace an unreadable file with the empty
+    // fallback and silently erase credentials or settings that may be
+    // recoverable. Mutations resume once the file is repaired or removed.
+    if path.exists() {
+        let existing = std::fs::read(path)?;
+        serde_json::from_slice::<Config>(&existing)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    }
+    let mut options = atomic_write_file::OpenOptions::new();
+    // The file can contain a publishing session token. Do not preserve an old
+    // overly broad mode when replacing it, and do not let the process umask
+    // make a newly created one readable by another local account.
+    #[cfg(unix)]
+    {
+        use atomic_write_file::unix::OpenOptionsExt as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).preserve_mode(false);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(json)?;
+    file.commit()
+}
 
 /// A favorited preset location. A preset lives at a (setlist, slot); the star
 /// follows the slot, so re-saving a different preset there keeps the star. An
@@ -55,8 +81,9 @@ fn config_path() -> Option<PathBuf> {
 }
 
 impl Config {
-    /// Read the file, or start empty. A missing or unreadable file is not worth
-    /// bothering anyone with: the app simply has no favorites yet.
+    /// Read the file, or start empty. A missing or unreadable file does not
+    /// prevent startup; [`Self::save`] still refuses to overwrite a broken
+    /// existing file.
     pub fn load() -> Self {
         config_path()
             .and_then(|p| std::fs::read(p).ok())
@@ -72,7 +99,7 @@ impl Config {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(json) = serde_json::to_vec_pretty(self) {
-            let _ = std::fs::write(path, json);
+            let _ = write_config(&path, &json);
         }
     }
 
@@ -158,5 +185,49 @@ mod tests {
     fn an_empty_or_broken_file_is_just_no_favorites() {
         let back: Config = serde_json::from_str("{}").unwrap();
         assert!(back.favorites.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn persisted_credentials_are_private_and_replaced_whole() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!("tonepush-config-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o644)
+            .open(&path)
+            .unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+
+        write_config(&path, br#"{"token":"secret"}"#).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), br#"{"token":"secret"}"#);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_broken_existing_config_is_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!(
+            "tonepush-broken-config-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let broken = b"{ this may still be recoverable";
+        std::fs::write(&path, broken).unwrap();
+
+        assert!(write_config(&path, br#"{"favorites":[]}"#).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), broken);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
