@@ -1266,27 +1266,36 @@ fn validate_setting_value(id: i64, value: &hx_proto::msgpack::Value) -> Result<(
     let Some(setting) = hx_proto::settings::setting(id) else {
         return Ok(());
     };
-    match (&setting.kind, value) {
-        (hx_proto::settings::Kind::Number { min, max, .. }, Value::F32(number))
-            if !(*min..=*max).contains(number) =>
-        {
+    match &setting.kind {
+        hx_proto::settings::Kind::Number { min, max, .. } => {
+            let number = match value {
+                Value::F32(number) => f64::from(*number),
+                Value::F64(number) => *number,
+                _ => return Ok(()),
+            };
+            if (f64::from(*min)..=f64::from(*max)).contains(&number) {
+                return Ok(());
+            }
             bail!(
                 "{} must be between {min} and {max}; got {number}",
                 setting.name
             );
         }
-        (hx_proto::settings::Kind::Choice(choices), Value::Int(index))
-            if !usize::try_from(*index).is_ok_and(|i| i < choices.len()) =>
-        {
+        hx_proto::settings::Kind::Choice(choices) => {
+            let Some(index) = value.as_i64() else {
+                return Ok(());
+            };
+            if usize::try_from(index).is_ok_and(|i| i < choices.len()) {
+                return Ok(());
+            }
             bail!(
                 "{} is choice 0 to {}; got {index}",
                 setting.name,
                 choices.len().saturating_sub(1)
             );
         }
-        _ => {}
+        hx_proto::settings::Kind::Switch(_, _) => Ok(()),
     }
-    Ok(())
 }
 
 fn parse_setting_value(
@@ -2039,9 +2048,13 @@ mod tests {
         assert!(validate_setting_value(16, &Value::F32(240.0)).is_ok());
         assert!(validate_setting_value(16, &Value::F32(39.9)).is_err());
         assert!(validate_setting_value(16, &Value::F32(240.1)).is_err());
+        assert!(validate_setting_value(16, &Value::F64(40.0)).is_ok());
+        assert!(validate_setting_value(16, &Value::F64(240.1)).is_err());
         assert!(validate_setting_value(97, &Value::Int(0)).is_ok());
         assert!(validate_setting_value(97, &Value::Int(11)).is_ok());
         assert!(validate_setting_value(97, &Value::Int(12)).is_err());
+        assert!(validate_setting_value(97, &Value::UInt(12)).is_err());
+        assert!(validate_setting_value(97, &Value::WideInt(-1, 1)).is_err());
     }
 
     #[test]
