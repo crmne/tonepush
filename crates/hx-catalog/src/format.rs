@@ -5,6 +5,8 @@
 //! small formatting language: an optional scale, then either a printf pattern,
 //! a list of labels for a menu, or a set of ranges each with its own pattern.
 
+use std::collections::HashSet;
+
 use serde::Deserialize;
 
 use crate::{Catalog, Kind, Param};
@@ -50,14 +52,33 @@ struct Range {
 }
 
 impl Display {
-    pub(crate) fn render(&self, value: f32, catalog: &Catalog) -> String {
-        if let Some(target) = self.alias.as_deref().and_then(|a| catalog.display(a)) {
-            return target.render(value, catalog);
+    /// Follow aliases without trusting the external catalog to be acyclic.
+    ///
+    /// A missing target keeps the last usable entry, matching the old
+    /// graceful fallback. A cycle keeps the entry that would traverse the
+    /// repeated edge, so its own format remains usable instead of recursing
+    /// until the process exhausts its stack.
+    fn resolved<'a>(&'a self, catalog: &'a Catalog) -> &'a Display {
+        let mut display = self;
+        let mut followed = HashSet::new();
+        while let Some(alias) = display.alias.as_deref() {
+            if !followed.insert(alias) {
+                break;
+            }
+            let Some(target) = catalog.display(alias) else {
+                break;
+            };
+            display = target;
         }
+        display
+    }
 
-        let scaled = value * self.scale.unwrap_or(1.0) + self.offset.unwrap_or(0.0);
+    pub(crate) fn render(&self, value: f32, catalog: &Catalog) -> String {
+        let display = self.resolved(catalog);
 
-        match &self.format {
+        let scaled = value * display.scale.unwrap_or(1.0) + display.offset.unwrap_or(0.0);
+
+        match &display.format {
             Some(Pattern::Labels(labels)) => labels
                 .get(scaled.round().max(0.0) as usize)
                 .cloned()
@@ -71,8 +92,8 @@ impl Display {
                     pattern.map_or_else(|| trim(v), |p| printf(p, v))
                 })
                 .unwrap_or_else(|| trim(scaled)),
-            Some(Pattern::Printf(p)) => printf(self.format_units.as_ref().unwrap_or(p), scaled),
-            None => self
+            Some(Pattern::Printf(p)) => printf(display.format_units.as_ref().unwrap_or(p), scaled),
+            None => display
                 .format_units
                 .as_ref()
                 .map_or_else(|| trim(scaled), |p| printf(p, scaled)),
@@ -88,13 +109,11 @@ impl Display {
     /// identifies its multiplier: `1.2 kHz`, for example, reverses the
     /// frequency range's `0.001` multiplier and becomes `1200`.
     pub(crate) fn to_native(&self, shown: f32, unit: &str, catalog: &Catalog) -> f32 {
-        if let Some(target) = self.alias.as_deref().and_then(|a| catalog.display(a)) {
-            return target.to_native(shown, unit, catalog);
-        }
+        let display = self.resolved(catalog);
         let scaled = if unit.is_empty() {
             shown
         } else {
-            match &self.format {
+            match &display.format {
                 Some(Pattern::Ranges(ranges)) => ranges
                     .iter()
                     .find(|range| range.has_unit(unit))
@@ -104,15 +123,12 @@ impl Display {
                 _ => shown,
             }
         };
-        (scaled - self.offset.unwrap_or(0.0)) / self.scale.unwrap_or(1.0)
+        (scaled - display.offset.unwrap_or(0.0)) / display.scale.unwrap_or(1.0)
     }
 
     /// The index of a menu label, for parameters displayed as a word.
     pub(crate) fn label_index(&self, text: &str, catalog: &Catalog) -> Option<f32> {
-        if let Some(target) = self.alias.as_deref().and_then(|a| catalog.display(a)) {
-            return target.label_index(text, catalog);
-        }
-        match &self.format {
+        match &self.resolved(catalog).format {
             Some(Pattern::Labels(labels)) => labels
                 .iter()
                 .position(|l| l.eq_ignore_ascii_case(text))
@@ -140,10 +156,7 @@ impl Range {
 impl Display {
     /// The menu this parameter offers, if it is one you pick from a list.
     pub(crate) fn choices<'a>(&'a self, catalog: &'a Catalog) -> Option<&'a [String]> {
-        if let Some(target) = self.alias.as_deref().and_then(|a| catalog.display(a)) {
-            return target.choices(catalog);
-        }
-        match &self.format {
+        match &self.resolved(catalog).format {
             Some(Pattern::Labels(labels)) => Some(labels),
             _ => None,
         }

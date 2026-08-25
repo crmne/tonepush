@@ -690,6 +690,52 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn cyclic_display_aliases_do_not_recurse_forever() {
+        let displays = serde_json::from_str(
+            r#"{
+                "first": {
+                    "alias": "second",
+                    "dspToDisplayScale": 10,
+                    "format": "%.1f first"
+                },
+                "second": {
+                    "alias": "first",
+                    "dspToDisplayScale": 100,
+                    "format": ["Zero", "One"]
+                }
+            }"#,
+        )
+        .unwrap();
+        let catalog = Catalog {
+            models: HashMap::new(),
+            categories: Vec::new(),
+            displays,
+            symbols: Vec::new(),
+            resources: PathBuf::new(),
+        };
+        let continuous = Param {
+            id: "Cycle".to_owned(),
+            name: "Cycle".to_owned(),
+            kind: Kind::Continuous,
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            display: Some("first".to_owned()),
+        };
+        let menu = Param {
+            display: Some("second".to_owned()),
+            kind: Kind::Enum,
+            max: 1.0,
+            ..continuous.clone()
+        };
+
+        assert_eq!(catalog.format(&continuous, 0.5), "5.0 first");
+        assert_eq!(catalog.parse(&continuous, "5.0"), Some(0.5));
+        assert_eq!(catalog.choices(&menu).unwrap(), ["Zero", "One"]);
+        assert_eq!(catalog.parse(&menu, "One"), Some(1.0));
+    }
+
+    #[test]
     fn wire_numbers_resolve_to_models() {
         let Some(c) = catalog() else { return };
         // These three were read straight out of a captured preset.
