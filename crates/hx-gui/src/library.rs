@@ -894,13 +894,7 @@ pub fn forget(hash: &str) -> Result<(), String> {
 /// the only safe answer to give something that deletes.
 fn referenced() -> Option<BTreeSet<String>> {
     let mut live: BTreeSet<String> = load_index().ok()?.tones.into_keys().collect();
-    let (found, readable) = setlist_files();
-    if found != readable.len() {
-        // A setlist that will not parse still holds tones, and they are not
-        // ours to throw away because we cannot read the file naming them.
-        return None;
-    }
-    for setlist in readable {
+    for (_, setlist) in setlist_files()? {
         for slot in setlist.slots {
             if !slot.hash.is_empty() {
                 live.insert(slot.hash);
@@ -908,26 +902,6 @@ fn referenced() -> Option<BTreeSet<String>> {
         }
     }
     Some(live)
-}
-
-/// How many setlist files are on disk, and the ones that could be read.
-fn setlist_files() -> (usize, Vec<Setlist>) {
-    let Some(dir) = setlists_dir() else {
-        return (0, Vec::new());
-    };
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return (0, Vec::new());
-    };
-    let paths: Vec<PathBuf> = read
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .collect();
-    let parsed = paths
-        .iter()
-        .filter_map(|p| serde_json::from_slice(&std::fs::read(p).ok()?).ok())
-        .collect();
-    (paths.len(), parsed)
 }
 
 /// Move objects nothing points at into the trash, and answer with how many.
@@ -1195,38 +1169,54 @@ fn versioned_setlist_path(dir: &Path, setlist: &Setlist) -> PathBuf {
 
 /// Every setlist in the library, with the file each came from, by name.
 pub fn setlists() -> Vec<(PathBuf, Setlist)> {
-    let Some(dir) = setlists_dir() else {
-        return Vec::new();
-    };
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<(PathBuf, Setlist)> = read
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .filter_map(|p| {
-            let bytes = std::fs::read(&p).ok()?;
-            let mut setlist: Setlist = serde_json::from_slice(&bytes).ok()?;
-            if setlist.added_at.is_empty() || setlist.modified_at.is_empty() {
-                let timestamp = std::fs::metadata(&p)
-                    .ok()
-                    .and_then(|metadata| metadata.modified().ok())
-                    .and_then(|modified| jiff::Timestamp::try_from(modified).ok())
-                    .map(|timestamp| timestamp.to_string())
-                    .unwrap_or_default();
-                if setlist.added_at.is_empty() {
-                    setlist.added_at = timestamp.clone();
-                }
-                if setlist.modified_at.is_empty() {
-                    setlist.modified_at = timestamp;
-                }
-            }
-            Some((p, setlist))
-        })
-        .collect();
+    let mut found = setlist_files().unwrap_or_default();
     found.sort_by_key(|(_, s)| (s.name.to_lowercase(), s.revision()));
     found
+}
+
+/// Read every setlist or answer that the directory cannot safely be used.
+///
+/// The public list view may show an empty result on an error. Destructive
+/// callers use this distinction: an unreadable setlist can still point at the
+/// last copy of a tone, so it must never be silently omitted from migration or
+/// garbage collection.
+fn setlist_files() -> Option<Vec<(PathBuf, Setlist)>> {
+    let Some(dir) = setlists_dir() else {
+        return Some(Vec::new());
+    };
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut found = Vec::new();
+    for entry in read {
+        let path = entry.ok()?.path();
+        if !path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            continue;
+        }
+        let bytes = std::fs::read(&path).ok()?;
+        let mut setlist: Setlist = serde_json::from_slice(&bytes).ok()?;
+        if setlist.added_at.is_empty() || setlist.modified_at.is_empty() {
+            let timestamp = std::fs::metadata(&path)
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| jiff::Timestamp::try_from(modified).ok())
+                .map(|timestamp| timestamp.to_string())
+                .unwrap_or_default();
+            if setlist.added_at.is_empty() {
+                setlist.added_at = timestamp.clone();
+            }
+            if setlist.modified_at.is_empty() {
+                setlist.modified_at = timestamp;
+            }
+        }
+        found.push((path, setlist));
+    }
+    Some(found)
 }
 
 /// Write a setlist out. An existing file for the same name is replaced, which
@@ -1400,13 +1390,16 @@ pub fn awaiting_portable() -> Vec<(String, String)> {
 /// library already moved is a directory listing and nothing else.
 pub fn migrate() -> usize {
     let Some(dir) = dir() else { return 0 };
+    let Some(setlists) = setlist_files() else {
+        return 0;
+    };
     let loose = loose_tones(&dir);
     let retired = loose_tones(&dir.join(RETIRED));
     // A setlist still naming files is the other thing that needs moving, and it
     // can outlast the files themselves: the old library let a tone be deleted
     // straight out from under a setlist that played it. Those are recoverable
     // from the trash, which is exactly why deletion put them there.
-    let stale = setlists()
+    let stale = setlists
         .iter()
         .any(|(_, s)| s.slots.iter().any(|slot| !slot.file.is_empty()));
     if loose.is_empty() && retired.is_empty() && !stale {
@@ -1472,7 +1465,7 @@ pub fn migrate() -> usize {
 
     // Repoint the setlists before the index is written, so an interruption
     // leaves a library that still migrates cleanly next time.
-    for (path, mut setlist) in setlists() {
+    for (path, mut setlist) in setlists {
         let mut touched = false;
         for slot in setlist.slots.iter_mut() {
             if slot.file.is_empty() {
@@ -1846,6 +1839,23 @@ mod tests {
         save_setlist(&setlist).unwrap();
         let error = save_setlist_version(&setlist).unwrap_err();
         assert!(error.contains("revision numbers"), "{error}");
+    }
+
+    #[test]
+    fn an_unreadable_setlist_stops_legacy_tones_from_being_retired() {
+        let scratch = Scratch::new("migration-broken-setlist");
+        let legacy = scratch.dir.join("Only Copy.hxpreset");
+        std::fs::write(&legacy, b"the only copy").unwrap();
+        std::fs::create_dir_all(scratch.dir.join("setlists")).unwrap();
+        let broken = scratch.dir.join("setlists/gig.json");
+        std::fs::write(&broken, b"{ this setlist was truncated").unwrap();
+
+        assert_eq!(migrate(), 0);
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"the only copy");
+        assert_eq!(
+            std::fs::read(&broken).unwrap(),
+            b"{ this setlist was truncated"
+        );
     }
 
     /// A library from before the object store has to come across whole: the
