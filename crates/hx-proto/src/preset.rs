@@ -392,13 +392,14 @@ impl Preset {
         if values.next()?.as_str()? != Self::MAGIC {
             return None;
         }
-        let table = values.next()?;
-        let sections_width = match &table {
-            Value::Bin(_, w) => *w,
-            _ => 0,
+        let (sections, sections_width) = match values.next()? {
+            Value::Bin(bytes, width) => (bytes, width),
+            _ => return None,
         };
-        let sections = table.as_raw()?.to_vec();
         let tone = values.next()?;
+        if !matches!(tone, Value::Map(_)) || values.next().is_some() {
+            return None;
+        }
 
         let slots = tone
             .get(key::PATH)
@@ -2180,6 +2181,32 @@ mod tests {
     #[test]
     fn rejects_a_blob_that_is_not_a_preset() {
         assert!(Preset::parse(b"\xa3abc").is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_preset_envelopes() {
+        let preset = Preset::parse(FIXTURE).unwrap();
+
+        let envelope = |table: Value, tone: Value| {
+            let mut bytes = Encoder::encode(&Value::Str(Preset::MAGIC.to_owned()));
+            bytes.extend(Encoder::encode(&table));
+            bytes.extend(Encoder::encode(&tone));
+            bytes
+        };
+        assert!(Preset::parse(&envelope(
+            Value::Str("not a section table".to_owned()),
+            preset.tone.clone(),
+        ))
+        .is_none());
+        assert!(Preset::parse(&envelope(
+            Value::Bin(preset.sections.clone(), preset.sections_width),
+            Value::Nil,
+        ))
+        .is_none());
+
+        let mut trailing = FIXTURE.to_vec();
+        trailing.push(0xc0);
+        assert!(Preset::parse(&trailing).is_none());
     }
 }
 
