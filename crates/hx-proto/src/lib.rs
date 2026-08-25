@@ -89,6 +89,20 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     switches: 10,
     device_id: 0x0021_0001,
 };
+pub const HELIX_RACK: DeviceProfile = DeviceProfile {
+    product_id: 0x4249,
+    name: "Helix Rack",
+    presets: 128,
+    switches: 10,
+    device_id: 0x0021_0002,
+};
+pub const HELIX_LT: DeviceProfile = DeviceProfile {
+    product_id: 0x424A,
+    name: "Helix LT",
+    presets: 128,
+    switches: 10,
+    device_id: 0x0021_0004,
+};
 pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     product_id: 0x4245,
     name: "HX Effects",
@@ -99,9 +113,17 @@ pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
 
 /// Every device profile we recognise.
 ///
-/// Product ids for POD Go, Helix LT and Helix Rack are not publicly known, so
-/// those devices are absent rather than guessed at.
-pub const PROFILES: &[DeviceProfile] = &[HX_STOMP, HX_STOMP_XL, HELIX_FLOOR, HX_EFFECTS];
+/// These are the six hardware families HX Edit 3.80 speaks this protocol to.
+/// POD Go and HX One use their own editors and are not presumed compatible
+/// merely because they share some models with the Helix/HX family.
+pub const PROFILES: &[DeviceProfile] = &[
+    HELIX_FLOOR,
+    HELIX_RACK,
+    HELIX_LT,
+    HX_EFFECTS,
+    HX_STOMP,
+    HX_STOMP_XL,
+];
 
 pub fn profile_for(product_id: u16) -> Option<&'static DeviceProfile> {
     PROFILES.iter().find(|p| p.product_id == product_id)
@@ -112,10 +134,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hx_effects_is_recognised_by_its_usb_product_id() {
-        assert_eq!(profile_for(0x4245), Some(&HX_EFFECTS));
-        assert_eq!(HX_EFFECTS.device_id, 0x0021_0005);
-        assert_eq!(HX_EFFECTS.presets, 128);
-        assert_eq!(HX_EFFECTS.switches, 6);
+    fn every_hx_edit_device_is_recognised_by_its_usb_product_id() {
+        let expected = [
+            (0x4248, HELIX_FLOOR),
+            (0x4249, HELIX_RACK),
+            (0x424A, HELIX_LT),
+            (0x4245, HX_EFFECTS),
+            (0x4246, HX_STOMP),
+            (0x4253, HX_STOMP_XL),
+        ];
+        for (product_id, profile) in expected {
+            assert_eq!(profile_for(product_id), Some(&profile));
+        }
     }
 }
