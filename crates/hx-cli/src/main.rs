@@ -954,7 +954,7 @@ fn show_preset(session: &mut hx_usb::Session, raw: bool) -> Result<()> {
 }
 
 fn list_presets(session: &mut hx_usb::Session, setlist: i64) -> Result<()> {
-    let current = session.preset_info().map(|(_, i, _)| i).unwrap_or(-1);
+    let (_, current, _) = session.preset_info()?;
     for (index, name) in session.presets(setlist)?.iter().enumerate() {
         let index = index as i64;
         println!(
