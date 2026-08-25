@@ -1153,7 +1153,7 @@ impl App {
                 Ok(Evt::Copied { name, blob }) => {
                     let size = blob.len();
                     match std::mem::replace(&mut self.pending_copy, CopyTarget::Clipboard) {
-                        CopyTarget::File(path) => match std::fs::write(&path, &blob) {
+                        CopyTarget::File(path) => match library::atomic_write(&path, &blob) {
                             Ok(()) => self.note(format!("exported {name} to {}", path.display())),
                             Err(e) => self.note(format!("could not write {}: {e}", path.display())),
                         },
@@ -3148,7 +3148,7 @@ impl App {
             captured,
         });
         let target = bundle.with_extension("hxb");
-        match std::fs::write(&target, &bytes) {
+        match library::atomic_write(&target, &bytes) {
             Ok(()) => self.log.push(format!("wrote {}", target.display())),
             Err(e) => self.log.push(format!("could not write the .hxb: {e}")),
         }
@@ -5634,14 +5634,16 @@ impl App {
             }
         };
 
+        let details = dir.join(format!("{stem}.json"));
+        let json = match serde_json::to_vec_pretty(&entry.meta.for_the_web(&entry.name)) {
+            Ok(json) => json,
+            Err(error) => return self.note(format!("could not encode the tone details: {error}")),
+        };
         let tone = dir.join(format!("{stem}.hlx"));
-        if let Err(e) = std::fs::write(&tone, hlx) {
+        if let Err(e) = library::atomic_write(&tone, hlx) {
             return self.note(format!("could not write {}: {e}", tone.display()));
         }
-        let details = dir.join(format!("{stem}.json"));
-        let json =
-            serde_json::to_vec_pretty(&entry.meta.for_the_web(&entry.name)).unwrap_or_default();
-        if let Err(e) = std::fs::write(&details, json) {
+        if let Err(e) = library::atomic_write(&details, json) {
             return self.note(format!("could not write {}: {e}", details.display()));
         }
         self.note(format!("exported {} to {}", entry.name, dir.display()));
