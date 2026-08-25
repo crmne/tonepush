@@ -1126,9 +1126,12 @@ impl Worker {
                 // which is the flakier of the two.
                 self.reload();
                 if let Some(hx_proto::msgpack::Value::Bool(on)) =
-                    self.device.as_mut().and_then(|d| d.object(203).ok())
+                    self.try_optional_on_device(|device| device.object(203))
                 {
                     self.send(Evt::Settings { global_eq: on });
+                }
+                if self.device.is_none() {
+                    return;
                 }
                 // The name list rides on the flakier control channel, so give
                 // it the same second chance the session itself gets.
@@ -1825,6 +1828,29 @@ impl Worker {
                     self.stumbles = 0;
                     self.events.send(Evt::Disconnected);
                 }
+                None
+            }
+        }
+    }
+
+    /// Probe an optional device capability quietly when the device explicitly
+    /// refuses it, while still treating transport loss as session loss.
+    fn try_optional_on_device<T>(
+        &mut self,
+        f: impl FnOnce(&mut hx_usb::Session) -> hx_usb::Result<T>,
+    ) -> Option<T> {
+        let result = {
+            let device = self.device.as_mut()?;
+            f(device)
+        };
+        match result {
+            Ok(value) => Some(value),
+            Err(hx_usb::Error::Device(_)) => None,
+            Err(error) => {
+                self.events.send(Evt::Failed(error.to_string()));
+                self.device = None;
+                self.stumbles = 0;
+                self.events.send(Evt::Disconnected);
                 None
             }
         }
