@@ -33,13 +33,14 @@ pub(crate) fn catalog(dir: &Path) -> Result<Catalog, Error> {
         }
     }
 
+    let displays = read::<HashMap<String, Display>>(&dir.join("HelixControls.json"))?;
+
     Ok(Catalog {
         resources: dir.to_owned(),
         symbols: symbols(dir, &models),
         categories: categories(dir, &models)?,
         models,
-        displays: read::<HashMap<String, Display>>(&dir.join("HelixControls.json"))
-            .unwrap_or_default(),
+        displays,
     })
 }
 
@@ -363,6 +364,16 @@ impl From<Fields> for Param {
 mod tests {
     use super::*;
 
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tonepush-catalog-load-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     fn model(json: &str) -> Model {
         serde_json::from_str::<RawModel>(json).unwrap().into()
     }
@@ -394,5 +405,21 @@ mod tests {
         );
 
         assert_eq!(simple_eq.load, 1.28);
+    }
+
+    #[test]
+    fn malformed_display_catalog_is_not_silently_replaced_with_an_empty_one() {
+        let dir = scratch("bad-displays");
+        std::fs::write(dir.join("HX_ModelCatalog.json"), r#"{"categories": []}"#).unwrap();
+        std::fs::write(dir.join("HelixControls.json"), b"{").unwrap();
+
+        match catalog(&dir) {
+            Err(Error::Parse { path, .. }) => {
+                assert_eq!(path, dir.join("HelixControls.json"));
+            }
+            _ => panic!("a malformed display catalog should be reported"),
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
