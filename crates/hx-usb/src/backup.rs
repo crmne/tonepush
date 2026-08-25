@@ -390,6 +390,12 @@ pub fn restore(
         .transpose()?;
     let globals = parts.globals.then(|| restore_globals(dir)).transpose()?;
     let irs = parts.irs.then(|| restore_irs(dir, &manifest)).transpose()?;
+    // Type-check every saved setting against this device before any preset or
+    // IR flash write. Discovering a corrupt value halfway through a restore
+    // would leave the pedal in a state the requested backup never represented.
+    let globals = globals
+        .map(|globals| prepare_globals(session, globals))
+        .transpose()?;
 
     if let Some(presets) = presets {
         let total = presets.len();
@@ -408,22 +414,10 @@ pub fn restore(
 
     if let Some(globals) = globals {
         progress(Step::Globals);
-        for (id, want) in &globals {
-            // The device refuses a value of the wrong type, so each one goes
-            // back shaped like what the device currently holds.
-            let current = match session.object(*id) {
-                Ok(current) => current,
-                // A firmware that does not have an older setting says so with
-                // a complete refusal. Transport/protocol errors instead mean
-                // the session is no longer safe to keep using.
-                Err(Error::Device(_)) => continue,
+        for (id, value) in globals {
+            match session.set_object(id, value) {
+                Ok(()) | Err(Error::Device(_)) => {}
                 Err(error) => return Err(error),
-            };
-            if let Some(value) = from_json(want, &current) {
-                match session.set_object(*id, value) {
-                    Ok(()) | Err(Error::Device(_)) => {}
-                    Err(error) => return Err(error),
-                }
             }
         }
     }
@@ -504,9 +498,44 @@ fn restore_globals(dir: &Path) -> Result<RestoreGlobals> {
                     "the backup has an invalid or duplicate setting id {id}"
                 )));
             }
+            if !matches!(
+                &value,
+                serde_json::Value::Bool(_)
+                    | serde_json::Value::Number(_)
+                    | serde_json::Value::String(_)
+            ) {
+                return Err(Error::Protocol(format!(
+                    "the backup has an invalid value for setting {id}"
+                )));
+            }
             Ok((id, value))
         })
         .collect()
+}
+
+type PreparedGlobals = Vec<(i64, Value)>;
+
+fn prepare_globals(session: &mut Session, globals: RestoreGlobals) -> Result<PreparedGlobals> {
+    let mut prepared = Vec::with_capacity(globals.len());
+    for (id, want) in globals {
+        // The device refuses a value of the wrong type, so each one goes back
+        // shaped like what the device currently holds.
+        let current = match session.object(id) {
+            Ok(current) => current,
+            // A firmware that does not have an older setting says so with a
+            // complete refusal. Transport/protocol errors instead mean the
+            // session is no longer safe to keep using.
+            Err(Error::Device(_)) => continue,
+            Err(error) => return Err(error),
+        };
+        let value = from_json(&want, &current).ok_or_else(|| {
+            Error::Protocol(format!(
+                "the backup's value for setting {id} has the wrong type"
+            ))
+        })?;
+        prepared.push((id, value));
+    }
+    Ok(prepared)
 }
 
 type RestoreIrs = BTreeMap<i64, (String, Vec<f32>)>;
@@ -1110,6 +1139,11 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("duplicate setting id"));
+        std::fs::write(bundle.join("globals.json"), b"{\"1\": [true]}").unwrap();
+        assert!(restore_globals(&bundle)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid value"));
         let _ = std::fs::remove_dir_all(root);
     }
 
