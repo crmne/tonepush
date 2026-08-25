@@ -417,7 +417,10 @@ impl Preset {
     /// Firmware version, from the BCD-packed field: `0x03800000` is 3.80.
     pub fn firmware(&self) -> Option<String> {
         let raw = u32::try_from(self.tone.get(key::META)?.get(key::FIRMWARE)?.as_i64()?).ok()?;
-        Some(format!("{}.{:02x}", raw >> 24, (raw >> 16) & 0xff))
+        let major = ((raw >> 24) & 0xff) as u8;
+        let minor = ((raw >> 16) & 0xff) as u8;
+        let valid_bcd = |byte: u8| byte >> 4 <= 9 && byte & 0x0f <= 9;
+        (valid_bcd(major) && valid_bcd(minor)).then(|| format!("{major:x}.{minor:02x}"))
     }
 
     pub fn build(&self) -> Option<&str> {
@@ -1658,6 +1661,18 @@ mod tests {
             .tone
             .at_mut(&[key::META, key::FIRMWARE])
             .expect("firmware") = Value::Int(-1);
+        assert_eq!(preset.firmware(), None);
+
+        *preset
+            .tone
+            .at_mut(&[key::META, key::FIRMWARE])
+            .expect("firmware") = Value::Int(0x1085_0000);
+        assert_eq!(preset.firmware().as_deref(), Some("10.85"));
+
+        *preset
+            .tone
+            .at_mut(&[key::META, key::FIRMWARE])
+            .expect("firmware") = Value::Int(0x03fa_0000);
         assert_eq!(preset.firmware(), None);
     }
 
