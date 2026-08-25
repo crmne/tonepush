@@ -1026,7 +1026,7 @@ fn restore(session: &mut hx_usb::Session, file: &std::path::Path) -> Result<()> 
 fn watch(session: &mut hx_usb::Session) -> Result<()> {
     println!("watching for device notifications; ctrl-c to stop");
     loop {
-        for (event, args) in session.poll_notifications() {
+        for (event, args) in session.poll_notifications()? {
             println!("event {event}: {args:?}");
         }
         // Polling returns after 20ms, so without this we would keep-alive all

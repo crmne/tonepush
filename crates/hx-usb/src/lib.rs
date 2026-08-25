@@ -117,7 +117,7 @@ impl Channel {
     }
 
     fn ack(&self) -> u32 {
-        Self::ACK_BASE + self.rx_bytes
+        Self::ACK_BASE.wrapping_add(self.rx_bytes)
     }
 
     fn next_txn(&mut self) -> i64 {
@@ -262,16 +262,8 @@ impl Found {
         // without it failed on exactly every other attempt: the device carries
         // channel sequence state across connections, and the release is what
         // clears it.
-        drop(
-            device
-                .claim_interface(INTERFACE)
-                .wait()
-                .map_err(|e| Error::Claim(e.to_string()))?,
-        );
-        let interface = device
-            .claim_interface(INTERFACE)
-            .wait()
-            .map_err(|e| Error::Claim(e.to_string()))?;
+        drop(claim_interface(&device)?);
+        let interface = claim_interface(&device)?;
 
         let mut ep_out = interface
             .endpoint::<Bulk, Out>(EP_OUT)
@@ -288,6 +280,32 @@ impl Found {
         let _ = ep_in.clear_halt().wait();
         Ok((interface, ep_out, ep_in))
     }
+}
+
+/// Claiming immediately after another session releases the interface can race
+/// Linux's asynchronous usbfs cleanup and briefly return `EBUSY`. It is not a
+/// wedged pedal (the next attempt succeeds), so absorb that short hand-off
+/// window here. A genuinely competing editor still produces the ordinary
+/// claim error after a bounded 300 ms.
+fn claim_interface(device: &nusb::Device) -> Result<nusb::Interface> {
+    const ATTEMPTS: usize = 7;
+    let mut last = String::from("interface remained busy");
+    for attempt in 0..ATTEMPTS {
+        match device.claim_interface(INTERFACE).wait() {
+            Ok(interface) => return Ok(interface),
+            Err(error) => {
+                let busy = error.kind() == nusb::ErrorKind::Busy;
+                last = error.to_string();
+                if !busy {
+                    break;
+                }
+            }
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    Err(Error::Claim(last))
 }
 
 impl Session {
@@ -367,7 +385,8 @@ impl Session {
         }
         .encode_into(&mut payload);
         self.write(&Frame::new(id.device, id.host, payload))?;
-        let _ = self.read_once(Self::REPLY);
+        self.mark_acknowledged(id);
+        self.read_available(Self::REPLY)?;
         Ok(())
     }
 
@@ -395,11 +414,13 @@ impl Session {
         let mut hello = Frame::new(id.device, id.host, payload);
         hello.flags = hx_proto::frame::FLAG_HANDSHAKE;
         self.write(&hello)?;
-        let _ = self.read_once(Self::REPLY);
+        self.read_available(Self::REPLY)?;
 
         // Byte accounting starts here; the handshake restarts the channel.
         if let Some(ch) = self.channels.get_mut(&id.device) {
-            ch.reader.take_messages();
+            ch.reader
+                .take_messages()
+                .map_err(|error| Error::Protocol(error.to_string()))?;
             ch.rx_bytes = carried;
             // HX Edit's counter jumps 0 -> 2 here. The device stops responding
             // if we send 1, so the observed numbering is reproduced.
@@ -407,9 +428,11 @@ impl Session {
         }
 
         self.send_stream(id, service, &Value::UInt(service as u64))?;
-        let _ = self.read_once(Self::REPLY);
+        self.read_available(Self::REPLY)?;
         if let Some(ch) = self.channels.get_mut(&id.device) {
-            ch.reader.take_messages();
+            ch.reader
+                .take_messages()
+                .map_err(|error| Error::Protocol(error.to_string()))?;
         }
         self.ack_channel(id)
     }
@@ -475,6 +498,15 @@ impl Session {
         Ok(Some(frame))
     }
 
+    /// Read when silence is expected, distinguishing an idle endpoint from an
+    /// actual USB or protocol failure.
+    fn read_available(&mut self, timeout: Duration) -> Result<Option<Frame>> {
+        match self.read_once(timeout) {
+            Err(Error::Usb(message)) if message == "read timed out" => Ok(None),
+            other => other,
+        }
+    }
+
     fn route(&mut self, f: &Frame) {
         let Some((hdr, rest)) = ChannelHeader::decode(&f.payload) else {
             return;
@@ -483,7 +515,7 @@ impl Session {
             return;
         };
         if hdr.has_data() && !rest.is_empty() {
-            ch.rx_bytes += rest.len() as u32;
+            ch.rx_bytes = ch.rx_bytes.wrapping_add(rest.len() as u32);
             ch.reader.push(rest);
         }
     }
@@ -536,13 +568,15 @@ impl Session {
             return Err(Error::Protocol(why.clone()));
         }
         let encoded = hx_proto::msgpack::Encoder::encode(body);
+        let encoded_len = u32::try_from(encoded.len())
+            .map_err(|_| Error::Protocol("an RPC message is larger than 4 GiB".into()))?;
 
         // The message header rides with the first chunk; the rest is a plain
         // byte stream that the peer reassembles.
         let mut stream = Vec::with_capacity(encoded.len() + 8);
         stream.extend_from_slice(&1u16.to_le_bytes());
         stream.extend_from_slice(&service.to_le_bytes());
-        stream.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+        stream.extend_from_slice(&encoded_len.to_le_bytes());
         stream.extend_from_slice(&encoded);
 
         let chunks: Vec<_> = stream.chunks(Self::CHUNK).collect();
@@ -567,6 +601,7 @@ impl Session {
                 }
                 return Err(e);
             }
+            self.mark_acknowledged(id);
 
             // Read between chunks on a long send. The device paces us with
             // acknowledgements, and writing a whole impulse response blind
@@ -574,7 +609,7 @@ impl Session {
             // then times out with nothing obviously wrong. HX Edit interleaves
             // the same way. One chunk needs none of this, so skip it there.
             if n + 1 < chunks.len() {
-                let _ = self.read_once(Self::BETWEEN_CHUNKS);
+                self.read_available(Self::BETWEEN_CHUNKS)?;
             }
         }
         Ok(())
@@ -583,8 +618,9 @@ impl Session {
     /// Send a deferred request and wait for the device to finish it.
     ///
     /// Select-preset, write-preset and IR upload answer status 1 - accepted -
-    /// and complete afterwards, announcing the completion as notification 20
-    /// carrying the same transaction. HX Edit will not start the next such
+    /// and complete afterwards, announcing the completion as a notification
+    /// carrying the same transaction. Its event id varies by operation; HX
+    /// Edit will not start the next such
     /// operation until that notification arrives; fourteen consecutive undo
     /// writes captured from it all follow the pattern. Not waiting is what our
     /// sustained document writes did, and the device tolerates roughly a dozen
@@ -597,27 +633,30 @@ impl Session {
         let deadline = Instant::now() + Self::COMPLETION_BUDGET;
         while Instant::now() < deadline {
             let before = self.rx_bytes(id);
-            let _ = self.read_once(Self::REPLY_READ);
-            let got = self.rx_bytes(id) > before;
+            self.read_available(Self::REPLY_READ)?;
+            let got = self.rx_bytes(id) != before;
             let done = self
                 .channels
                 .get_mut(&ChannelId::EVENTS.device)
                 .map(|ch| ch.reader.take_messages())
+                .transpose()
+                .map_err(|error| Error::Protocol(error.to_string()))?
                 .unwrap_or_default()
                 .into_iter()
                 .any(|sm| match Message::from_value(sm.body) {
-                    Message::Notification { event: 20, args } => {
-                        args.get(rpc::key::TXN).and_then(Value::as_i64) == Some(txn)
-                    }
+                    Message::Notification { args, .. } => completion_matches(&args, txn),
                     _ => false,
                 });
-            if done {
-                return Ok(());
-            }
             if got {
                 self.ack_channel(id)?;
             }
+            // The completion itself arrives on the events channel. Tell the
+            // pedal we consumed it before returning; otherwise a string of
+            // short-lived sessions accumulates unacknowledged completions.
             self.ack_idle_channels(id)?;
+            if done {
+                return Ok(());
+            }
         }
         // No announcement inside the budget. That does not mean the device is
         // stuck - not every deferred operation emits notification 20, and
@@ -709,7 +748,7 @@ impl Session {
         // incoming endpoint as well, and the next write simply times out with
         // nothing visibly wrong. That is the lock-up that needed the 9V adapter
         // pulled, and why it arrived sooner the more work had been done first.
-        self.drain_pending();
+        self.drain_pending(id)?;
 
         let msg = Message::Request { txn, opcode, args };
         self.send_stream(id, service(id), &msg.to_value())?;
@@ -721,13 +760,15 @@ impl Session {
             // acking those burns a sequence number, which desynchronises the
             // channel and stalls the transfer partway through.
             let before = self.rx_bytes(id);
-            let _ = self.read_once(Self::REPLY_READ);
-            let got = self.rx_bytes(id) > before;
+            self.read_available(Self::REPLY_READ)?;
+            let got = self.rx_bytes(id) != before;
 
             let ready: Vec<_> = self
                 .channels
                 .get_mut(&id.device)
                 .map(|ch| ch.reader.take_messages())
+                .transpose()
+                .map_err(|error| Error::Protocol(error.to_string()))?
                 .unwrap_or_default();
             for sm in ready {
                 if let Message::Response {
@@ -775,27 +816,24 @@ impl Session {
     /// Read whatever the device is holding, without waiting for more.
     ///
     /// Bounded: a device that never stops talking must not stop us working.
-    fn drain_pending(&mut self) {
+    fn drain_pending(&mut self, busy: ChannelId) -> Result<()> {
         const BUDGET: Duration = Duration::from_millis(60);
         let deadline = Instant::now() + BUDGET;
         while Instant::now() < deadline {
-            match self.read_once(Duration::from_millis(5)) {
+            match self.read_available(Duration::from_millis(5)) {
                 Ok(Some(_)) => {}
                 // Nothing there, or nothing more: either way we are current.
-                _ => break,
+                Ok(None) => break,
+                Err(error) => return Err(error),
             }
         }
         // Whatever arrived on a channel nobody is waiting on still has to be
         // acknowledged, or the device keeps counting it against us.
-        for id in ChannelId::ALL {
-            let behind = self
-                .channels
-                .get(&id.device)
-                .is_some_and(|c| c.rx_bytes > c.acked);
-            if behind {
-                let _ = self.ack_channel(id);
-            }
-        }
+        // The first frame of the request about to be sent carries the busy
+        // channel's acknowledgement. Sending a separate ACK immediately before
+        // it needlessly consumes a sequence number. Only idle channels need an
+        // explicit frame here.
+        self.ack_pending(Some(busy.device))
     }
 
     /// Per-channel counters, for diagnosing pacing problems.
@@ -826,14 +864,20 @@ impl Session {
     /// a sequence number mid-transaction and desynchronises the stream - which
     /// wedges the device faster than the problem being fixed.
     fn ack_idle_channels(&mut self, busy: ChannelId) -> Result<()> {
+        self.ack_pending(Some(busy.device))
+    }
+
+    /// Explicitly acknowledge channels that have no ordinary outgoing frame
+    /// available to carry their current byte count.
+    fn ack_pending(&mut self, except: Option<u16>) -> Result<()> {
         for id in ChannelId::ALL {
-            if id.device == busy.device {
+            if except == Some(id.device) {
                 continue;
             }
             let behind = self
                 .channels
                 .get(&id.device)
-                .is_some_and(|c| c.rx_bytes > c.acked);
+                .is_some_and(|c| c.rx_bytes != c.acked);
             if behind {
                 self.ack_channel(id)?;
             }
@@ -841,12 +885,17 @@ impl Session {
         Ok(())
     }
 
+    /// Record that a successfully written channel frame carried the current
+    /// cumulative acknowledgement in its header.
+    fn mark_acknowledged(&mut self, id: ChannelId) {
+        if let Some(channel) = self.channels.get_mut(&id.device) {
+            channel.acked = channel.rx_bytes;
+        }
+    }
+
     /// Acknowledge everything received so far on one channel.
     fn ack_channel(&mut self, id: ChannelId) -> Result<()> {
         let (seq, ack) = self.tick(id)?;
-        if let Some(ch) = self.channels.get_mut(&id.device) {
-            ch.acked = ch.rx_bytes;
-        }
         let mut payload = Vec::new();
         ChannelHeader {
             seq,
@@ -854,7 +903,9 @@ impl Session {
             ack,
         }
         .encode_into(&mut payload);
-        self.write(&Frame::new(id.device, id.host, payload))
+        self.write(&Frame::new(id.device, id.host, payload))?;
+        self.mark_acknowledged(id);
+        Ok(())
     }
 
     /// Keep every channel alive; the device drops idle sessions.
@@ -872,6 +923,7 @@ impl Session {
             }
             .encode_into(&mut payload);
             self.write(&Frame::new(id.device, id.host, payload))?;
+            self.mark_acknowledged(id);
         }
         Ok(())
     }
@@ -1046,13 +1098,28 @@ impl Drop for Session {
             return;
         }
         // Take and acknowledge anything still in flight.
-        let give_up = Instant::now() + Duration::from_millis(600);
-        while Instant::now() < give_up {
+        let give_up = Instant::now() + Duration::from_millis(900);
+        let mut quiet = 0;
+        while quiet < 3 && Instant::now() < give_up {
             match self.read_once(Duration::from_millis(100)) {
-                Ok(Some(_)) => continue,
-                _ => break,
+                Ok(Some(_)) => {
+                    quiet = 0;
+                    let _ = self.ack_pending(None);
+                }
+                Ok(None) => quiet = 0,
+                Err(Error::Usb(message)) if message == "read timed out" => quiet += 1,
+                Err(_) => break,
             }
         }
+        // Reading is not enough: the device paces all of its channels by the
+        // cumulative byte count we send back. In particular, edit and flash
+        // operations leave notifications on the events channel. Draining
+        // those bytes and then dropping the interface without acknowledging
+        // them carries an ever-growing debt into later short-lived sessions,
+        // until an otherwise innocent write stops the pedal. There is no
+        // transaction in flight at this boundary, so a final ACK is safe on
+        // every channel that advanced.
+        let _ = self.ack_pending(None);
         // No closing handshake. HX Edit sends a bare type-0x02 frame per
         // channel when it quits, and this used to imitate that - but the
         // capture behind it turned out to record HX Edit failing against an
@@ -1067,6 +1134,14 @@ impl Drop for Session {
 fn debug() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("HX_DEBUG").is_some())
+}
+
+/// A deferred completion is identified by the transaction embedded in its
+/// arguments, not by the outer notification id. Rename completes as event 1,
+/// preset selection as event 20, and other operations use still other ids.
+fn completion_matches(args: &Value, txn: i64) -> bool {
+    args.get(rpc::key::TXN).and_then(Value::as_i64) == Some(txn)
+        && args.get(rpc::key::STATUS).and_then(Value::as_i64) == Some(0)
 }
 
 fn hex(b: &[u8]) -> String {
@@ -1113,6 +1188,13 @@ mod tests {
         assert_eq!(channel.ack(), Channel::ACK_BASE + 0x100);
         channel.rx_bytes += 256;
         assert_eq!(channel.ack(), Channel::ACK_BASE + 0x200);
+
+        channel.rx_bytes = u32::MAX;
+        assert_eq!(
+            channel.ack(),
+            Channel::ACK_BASE.wrapping_sub(1),
+            "the protocol counter wraps instead of panicking after 4 GiB"
+        );
     }
 
     #[test]
@@ -1120,6 +1202,23 @@ mod tests {
         let mut channel = Channel::new();
         assert_eq!(channel.next_txn(), rpc::FIRST_TXN);
         assert_eq!(channel.next_txn(), rpc::FIRST_TXN + 1);
+    }
+
+    #[test]
+    fn deferred_completions_match_transaction_and_success_status() {
+        let completion = hx_proto::msgmap! {
+            rpc::key::TXN => Value::Int(1005),
+            rpc::key::STATUS => Value::Int(0),
+            rpc::key::RESULT => Value::Nil,
+        };
+        assert!(completion_matches(&completion, 1005));
+        assert!(!completion_matches(&completion, 1006));
+
+        let still_pending = hx_proto::msgmap! {
+            rpc::key::TXN => Value::Int(1005),
+            rpc::key::STATUS => Value::Int(1),
+        };
+        assert!(!completion_matches(&still_pending, 1005));
     }
 
     #[test]

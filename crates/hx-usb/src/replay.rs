@@ -9,9 +9,12 @@
 //! checks that each request still matches what was recorded, so a command whose
 //! encoding drifts fails offline, as a diff.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use hx_proto::frame::{ChannelHeader, MSG_ACK};
+use hx_proto::Frame;
 
 use crate::{Error, Result, Wire};
 
@@ -123,6 +126,7 @@ impl Wire for RecordingWire {
 pub struct ReplayWire {
     transfers: VecDeque<(Dir, Vec<u8>)>,
     drifted: Arc<Mutex<Vec<String>>>,
+    skipped_acks: BTreeMap<(u16, u16), u16>,
 }
 
 impl ReplayWire {
@@ -130,6 +134,7 @@ impl ReplayWire {
         ReplayWire {
             transfers: transcript.0.into(),
             drifted: Arc::new(Mutex::new(Vec::new())),
+            skipped_acks: BTreeMap::new(),
         }
     }
 
@@ -150,8 +155,28 @@ impl ReplayWire {
 
 impl Wire for ReplayWire {
     fn send(&mut self, bytes: &[u8]) -> Result<()> {
+        // Older transcripts were captured while the client emitted a bare ACK
+        // immediately before a request whose own header already carried the
+        // same cumulative acknowledgement. The live transport no longer burns
+        // that redundant sequence number. Skip only those legacy bare ACKs;
+        // request and payload frames remain byte-exact checks.
+        while !is_bare_ack(bytes) {
+            let route = match self.transfers.front() {
+                Some((Dir::Out, expected)) => legacy_ack_repeated_by(expected, bytes),
+                _ => None,
+            };
+            let Some(route) = route else { break };
+            self.transfers.pop_front();
+            let skipped = self.skipped_acks.entry(route).or_default();
+            *skipped = skipped.wrapping_add(1);
+        }
         match self.transfers.pop_front() {
-            Some((Dir::Out, expected)) if expected == bytes => Ok(()),
+            Some((Dir::Out, expected))
+                if expected == bytes
+                    || matches_after_legacy_acks(&expected, bytes, &self.skipped_acks) =>
+            {
+                Ok(())
+            }
             Some((Dir::Out, expected)) => {
                 // Recorded as well as returned, because the caller of a write
                 // command has no reason to look at its result and so never
@@ -183,7 +208,67 @@ impl Wire for ReplayWire {
             // an idle endpoint the way a real read times out. A drain loop
             // counts these as quiet and stops; a request loop would have found
             // its reply already.
-            _ => Err(Error::Usb("replay: no further recorded input".into())),
+            _ => Err(Error::Usb("read timed out".into())),
         }
     }
+}
+
+fn is_bare_ack(bytes: &[u8]) -> bool {
+    let Ok(frame) = Frame::decode(bytes) else {
+        return false;
+    };
+    let Some((header, rest)) = ChannelHeader::decode(&frame.payload) else {
+        return false;
+    };
+    header.msg_type == MSG_ACK && rest.is_empty()
+}
+
+/// Whether `expected` is the old standalone form of the acknowledgement that
+/// `actual` already carries. Requiring the same route and cumulative count
+/// keeps replay strict about every ACK that was not genuinely redundant.
+fn legacy_ack_repeated_by(expected: &[u8], actual: &[u8]) -> Option<(u16, u16)> {
+    let (Ok(expected), Ok(actual)) = (Frame::decode(expected), Frame::decode(actual)) else {
+        return None;
+    };
+    if (expected.src, expected.dst) != (actual.src, actual.dst) {
+        return None;
+    }
+    let (Some((expected_header, expected_body)), Some((actual_header, _))) = (
+        ChannelHeader::decode(&expected.payload),
+        ChannelHeader::decode(&actual.payload),
+    ) else {
+        return None;
+    };
+    (expected_header.msg_type == MSG_ACK
+        && expected_body.is_empty()
+        && actual_header.msg_type != MSG_ACK
+        && expected_header.ack == actual_header.ack)
+        .then_some((expected.src, expected.dst))
+}
+
+fn matches_after_legacy_acks(
+    expected: &[u8],
+    actual: &[u8],
+    skipped: &BTreeMap<(u16, u16), u16>,
+) -> bool {
+    let (Ok(expected), Ok(actual)) = (Frame::decode(expected), Frame::decode(actual)) else {
+        return false;
+    };
+    if (expected.flags, expected.src, expected.dst) != (actual.flags, actual.src, actual.dst) {
+        return false;
+    }
+    let (Some((expected_header, expected_body)), Some((actual_header, actual_body))) = (
+        ChannelHeader::decode(&expected.payload),
+        ChannelHeader::decode(&actual.payload),
+    ) else {
+        return false;
+    };
+    let offset = skipped
+        .get(&(expected.src, expected.dst))
+        .copied()
+        .unwrap_or(0);
+    expected_header.seq.wrapping_sub(offset) == actual_header.seq
+        && expected_header.msg_type == actual_header.msg_type
+        && expected_header.ack == actual_header.ack
+        && expected_body == actual_body
 }

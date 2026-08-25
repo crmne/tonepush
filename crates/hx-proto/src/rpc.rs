@@ -1,6 +1,7 @@
 //! Layer 3 and 4: the per-channel byte stream and the MessagePack RPC on top.
 
 use crate::msgpack::{Decoder, Encoder, Key, Value};
+use std::fmt;
 
 /// Field keys. The protocol uses bare integers, so naming them is the
 /// difference between readable code and a wall of magic numbers.
@@ -419,6 +420,36 @@ pub struct StreamMessage {
 #[derive(Default)]
 pub struct StreamReader {
     buf: Vec<u8>,
+    overflowed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamError {
+    TooLarge(usize),
+    BufferOverflow,
+    InvalidBody(String),
+}
+
+impl fmt::Display for StreamError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooLarge(size) => write!(f, "stream message declares {size} bytes"),
+            Self::BufferOverflow => write!(f, "stream buffer exceeded its safety limit"),
+            Self::InvalidBody(error) => write!(f, "stream message is not MessagePack: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for StreamError {}
+
+const MAX_STREAM_MESSAGE: usize = 16 * 1024 * 1024;
+
+impl StreamReader {
+    fn reset_with(&mut self, error: StreamError) -> Result<Vec<StreamMessage>, StreamError> {
+        self.buf.clear();
+        self.overflowed = false;
+        Err(error)
+    }
 }
 
 impl StreamReader {
@@ -428,11 +459,24 @@ impl StreamReader {
 
     /// Feed the bytes that followed a channel header.
     pub fn push(&mut self, bytes: &[u8]) {
-        self.buf.extend_from_slice(bytes);
+        if self
+            .buf
+            .len()
+            .checked_add(bytes.len())
+            .is_none_or(|size| size > MAX_STREAM_MESSAGE + 8)
+        {
+            self.buf.clear();
+            self.overflowed = true;
+        } else if !self.overflowed {
+            self.buf.extend_from_slice(bytes);
+        }
     }
 
     /// Whole messages that have arrived, consuming them from the buffer.
-    pub fn take_messages(&mut self) -> Vec<StreamMessage> {
+    pub fn take_messages(&mut self) -> Result<Vec<StreamMessage>, StreamError> {
+        if self.overflowed {
+            return self.reset_with(StreamError::BufferOverflow);
+        }
         let mut out = Vec::new();
         let mut pos = 0usize;
         while let Some(header_end) = pos.checked_add(8).filter(|end| *end <= self.buf.len()) {
@@ -450,27 +494,39 @@ impl StreamReader {
                 self.buf[pos + 6],
                 self.buf[pos + 7],
             ]) as usize;
+            if len > MAX_STREAM_MESSAGE {
+                return self.reset_with(StreamError::TooLarge(len));
+            }
             let Some(body_end) = header_end.checked_add(len) else {
-                break;
+                return self.reset_with(StreamError::TooLarge(len));
             };
             if self.buf.len() < body_end {
                 break; // wait for more bytes
             }
             let body = &self.buf[header_end..body_end];
-            match Decoder::new(body).value() {
-                Ok(v) => out.push(StreamMessage {
+            let decoded = {
+                let mut decoder = Decoder::new(body);
+                match decoder.value() {
+                    // Real replies carry an opaque 23-byte tail inside the
+                    // declared body on roughly every other fresh session. The
+                    // first MessagePack value is the payload; the remaining
+                    // bytes are not a second value and are not canonical.
+                    Ok(value) => Ok(value),
+                    Err(error) => Err(StreamError::InvalidBody(error.to_string())),
+                }
+            };
+            match decoded {
+                Ok(body) => out.push(StreamMessage {
                     flags,
                     service,
-                    body: v,
+                    body,
                 }),
-                // A body that will not parse means our framing is wrong; stop
-                // rather than silently resynchronising on garbage.
-                Err(_) => break,
+                Err(error) => return self.reset_with(error),
             }
             pos = body_end;
         }
         self.buf.drain(..pos);
-        out
+        Ok(out)
     }
 }
 
@@ -620,12 +676,44 @@ mod tests {
         let mut r = StreamReader::new();
         // Split mid-message: nothing should come out until it is complete.
         r.push(&framed[..6]);
-        assert!(r.take_messages().is_empty());
+        assert!(r.take_messages().unwrap().is_empty());
         r.push(&framed[6..]);
-        let msgs = r.take_messages();
+        let msgs = r.take_messages().unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].service, 6);
         assert_eq!(msgs[0].body.get(key::TXN).unwrap().as_i64(), Some(1000));
+    }
+
+    #[test]
+    fn stream_reader_rejects_unbounded_messages_and_recovers_from_bad_bodies() {
+        let mut oversized = StreamReader::new();
+        let mut header = vec![0; 8];
+        header[4..8].copy_from_slice(&((MAX_STREAM_MESSAGE as u32) + 1).to_le_bytes());
+        oversized.push(&header);
+        assert!(matches!(
+            oversized.take_messages(),
+            Err(StreamError::TooLarge(_))
+        ));
+
+        let mut trailing = StreamReader::new();
+        let body = [0xc0, 0xc0]; // two nil values in a one-value message
+        let mut framed = vec![0; 4];
+        framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        framed.extend_from_slice(&body);
+        trailing.push(&framed);
+        assert_eq!(trailing.take_messages().unwrap().len(), 1);
+
+        let mut malformed = StreamReader::new();
+        malformed.push(&[0, 0, 0, 0, 1, 0, 0, 0, 0xc1]);
+        assert!(matches!(
+            malformed.take_messages(),
+            Err(StreamError::InvalidBody(_))
+        ));
+
+        // An error clears the poisoned state instead of retaining it and
+        // growing forever; the next well-formed message is usable.
+        malformed.push(&[0, 0, 0, 0, 1, 0, 0, 0, 0xc0]);
+        assert_eq!(malformed.take_messages().unwrap().len(), 1);
     }
 
     #[test]

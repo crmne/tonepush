@@ -1768,13 +1768,16 @@ impl Worker {
         let Some(device) = self.device.as_mut() else {
             return;
         };
-        for (event, args) in device.poll_notifications() {
-            self.events
-                .send(Evt::Activity(format!("event {event}: {args:?}")));
+        let polled = device.poll_notifications();
+        if let Ok(events) = &polled {
+            for (event, args) in events {
+                self.events
+                    .send(Evt::Activity(format!("event {event}: {args:?}")));
+            }
         }
         // The device goes quiet while committing a write; one missed beat is
         // patience, not a dead link.
-        match device.keepalive() {
+        match polled.map(|_| ()).and_then(|_| device.keepalive()) {
             Ok(()) => self.stumbles = 0,
             Err(e) => {
                 self.stumbles += 1;

@@ -1163,17 +1163,21 @@ impl Session {
     }
 
     /// Any notifications the device has pushed since the last call.
-    pub fn poll_notifications(&mut self) -> Vec<(i64, Value)> {
-        let _ = self.read_once(Duration::from_millis(20));
+    pub fn poll_notifications(&mut self) -> Result<Vec<(i64, Value)>> {
+        self.read_available(Duration::from_millis(20))?;
         let mut out = Vec::new();
         for ch in self.channels.values_mut() {
-            for sm in ch.reader.take_messages() {
+            for sm in ch
+                .reader
+                .take_messages()
+                .map_err(|error| Error::Protocol(error.to_string()))?
+            {
                 if let Message::Notification { event, args } = Message::from_value(sm.body) {
                     out.push((event, args));
                 }
             }
         }
-        out
+        Ok(out)
     }
 }
 
