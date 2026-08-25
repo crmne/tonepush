@@ -1340,6 +1340,7 @@ name = "hx-cli"
 version = "0.5.5"
 dependencies = [
  "anyhow",
+ "atomic-write-file",
  "clap",
  "hx-catalog",
  "hx-proto",

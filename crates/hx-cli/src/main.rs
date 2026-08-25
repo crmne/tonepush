@@ -5,6 +5,13 @@ mod wav;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use std::io::Write;
+
+fn write_file(path: &std::path::Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let mut file = atomic_write_file::AtomicWriteFile::open(path)?;
+    file.write_all(bytes.as_ref())?;
+    file.commit()
+}
 
 fn one_based_i64(text: &str) -> std::result::Result<i64, String> {
     let value = text
@@ -995,7 +1002,7 @@ fn move_block(session: &mut hx_usb::Session, from: i64, to: i64) -> Result<()> {
 fn export_to_file(session: &mut hx_usb::Session, file: &std::path::Path) -> Result<()> {
     let preset = session.read_preset()?;
     let json = export_preset(&preset, hx_catalog::Catalog::load().ok().as_ref());
-    std::fs::write(file, json).with_context(|| format!("writing {file:?}"))?;
+    write_file(file, json).with_context(|| format!("writing {file:?}"))?;
     println!("wrote {}", file.display());
     Ok(())
 }
@@ -1004,7 +1011,7 @@ fn export_to_file(session: &mut hx_usb::Session, file: &std::path::Path) -> Resu
 fn backup(session: &mut hx_usb::Session, file: &std::path::Path) -> Result<()> {
     let preset = session.read_preset()?;
     let bytes = preset.encode();
-    std::fs::write(file, &bytes).with_context(|| format!("writing {file:?}"))?;
+    write_file(file, &bytes).with_context(|| format!("writing {file:?}"))?;
     println!("wrote {} ({} bytes)", file.display(), bytes.len());
     Ok(())
 }
@@ -1107,7 +1114,7 @@ fn backup_all(
 
         let label = hx_proto::rpc::slot_label(index);
         let file = directory.join(format!("{label}-{}.hxpreset", sanitise(name)));
-        std::fs::write(&file, preset.encode()).with_context(|| format!("writing {file:?}"))?;
+        write_file(&file, preset.encode()).with_context(|| format!("writing {file:?}"))?;
         println!("  {label}  {name}");
     }
 
@@ -1532,7 +1539,7 @@ fn export_hlx(input: &std::path::Path, output: &std::path::Path) -> Result<()> {
         .unwrap_or("Untitled");
 
     let written = hx_catalog::to_hlx(&preset, &catalog, name);
-    std::fs::write(output, written.to_pretty_string())
+    write_file(output, written.to_pretty_string())
         .with_context(|| format!("writing {output:?}"))?;
     println!("wrote {}", output.display());
     for skipped in &written.skipped {
@@ -1573,7 +1580,7 @@ fn export_hxb(bundle: &std::path::Path, output: &std::path::Path) -> Result<()> 
         device_version,
         captured,
     });
-    std::fs::write(output, &bytes).with_context(|| format!("writing {output:?}"))?;
+    write_file(output, &bytes).with_context(|| format!("writing {output:?}"))?;
 
     let kept = presets.iter().filter(|(_, t)| t.is_some()).count();
     println!(
@@ -1627,7 +1634,7 @@ fn bundle_to_presets(
             println!("  {index:>3}  {name}: {note}");
         }
         let path = output.join(format!("{index:03} {}.hxpreset", sanitise(name)));
-        std::fs::write(&path, document.encode()).with_context(|| format!("writing {path:?}"))?;
+        write_file(&path, document.encode()).with_context(|| format!("writing {path:?}"))?;
         println!("  {index:>3}  {name}  ({} blocks)", report.blocks);
         written += 1;
     }
@@ -1649,8 +1656,7 @@ fn extract_backup(file: &std::path::Path, output: &std::path::Path) -> Result<()
     for preset in backup.occupied() {
         let name = format!("{} {}", preset.label(), sanitise(&preset.name));
         let path = output.join(format!("{name}.hlx"));
-        std::fs::write(&path, preset.to_hlx_string())
-            .with_context(|| format!("writing {path:?}"))?;
+        write_file(&path, preset.to_hlx_string()).with_context(|| format!("writing {path:?}"))?;
         println!("  {}  {}", preset.label(), preset.name);
         kept += 1;
     }
