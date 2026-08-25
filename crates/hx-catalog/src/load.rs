@@ -37,7 +37,7 @@ pub(crate) fn catalog(dir: &Path) -> Result<Catalog, Error> {
 
     Ok(Catalog {
         resources: dir.to_owned(),
-        symbols: symbols(dir, &models),
+        symbols: symbols(dir, &models)?,
         categories: categories(dir, &models)?,
         models,
         displays,
@@ -45,9 +45,10 @@ pub(crate) fn catalog(dir: &Path) -> Result<Catalog, Error> {
 }
 
 /// The symbol table, whose position in the file is the device's model number.
-fn symbols(dir: &Path, models: &HashMap<String, Model>) -> Vec<Symbol> {
-    let raw: Vec<RawSymbol> = read(&dir.join("Helix.sym")).unwrap_or_default();
-    raw.into_iter()
+fn symbols(dir: &Path, models: &HashMap<String, Model>) -> Result<Vec<Symbol>, Error> {
+    let raw: Vec<RawSymbol> = read(&dir.join("Helix.sym"))?;
+    Ok(raw
+        .into_iter()
         .enumerate()
         .map(|(number, s)| {
             // The symbol table keeps mono and stereo apart where the catalog
@@ -65,7 +66,7 @@ fn symbols(dir: &Path, models: &HashMap<String, Model>) -> Vec<Symbol> {
                 parameters: s.parameters,
             }
         })
-        .collect()
+        .collect())
 }
 
 /// Every `.models` file HX Edit 3.82 ships. Named explicitly rather than
@@ -418,6 +419,23 @@ mod tests {
                 assert_eq!(path, dir.join("HelixControls.json"));
             }
             _ => panic!("a malformed display catalog should be reported"),
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn malformed_symbol_table_is_not_silently_replaced_with_an_empty_one() {
+        let dir = scratch("bad-symbols");
+        std::fs::write(dir.join("HX_ModelCatalog.json"), r#"{"categories": []}"#).unwrap();
+        std::fs::write(dir.join("HelixControls.json"), b"{}").unwrap();
+        std::fs::write(dir.join("Helix.sym"), b"[").unwrap();
+
+        match catalog(&dir) {
+            Err(Error::Parse { path, .. }) => {
+                assert_eq!(path, dir.join("Helix.sym"));
+            }
+            _ => panic!("a malformed symbol table should be reported"),
         }
 
         let _ = std::fs::remove_dir_all(dir);
