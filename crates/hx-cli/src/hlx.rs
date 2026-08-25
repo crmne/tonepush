@@ -176,14 +176,18 @@ fn slot_of(
 ) -> Result<i64, String> {
     // Ours, and exact: the device's own index, which needs nothing to read it.
     if let Some(slot) = node.get("@slot").and_then(|v| v.as_u64()) {
-        return Ok(slot as i64);
+        return i64::try_from(slot).map_err(|_| format!("slot {slot} is too large"));
     }
     let position = node.get("@position").and_then(|v| v.as_u64());
-    let branch = node.get("@path").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let branch = node.get("@path").and_then(|v| v.as_u64()).unwrap_or(0);
+    let branch =
+        usize::try_from(branch).map_err(|_| "the branch number is too large".to_owned())?;
     if let (Some(layout), Some(position)) = (layout, position) {
+        let position =
+            usize::try_from(position).map_err(|_| "the position number is too large".to_owned())?;
         return layout
-            .slot_of(dsp, branch, position as usize)
-            .map(|slot| slot as i64)
+            .slot_of(dsp, branch, position)
+            .and_then(|slot| i64::try_from(slot).ok())
             .ok_or_else(|| {
                 format!("this chain has no path {dsp} branch {branch} position {position}")
             });
@@ -196,7 +200,9 @@ fn slot_of(
             "on path {dsp} branch {branch}; placing it needs the chain it is going onto"
         ));
     }
-    Ok(position.map_or(numbered, |n| n as i64))
+    position.map_or(Ok(numbered), |position| {
+        i64::try_from(position).map_err(|_| format!("position {position} is too large"))
+    })
 }
 
 /// Whether the slot being read is one that can be switched off. A block can; a
@@ -462,6 +468,13 @@ mod tests {
             .steps
             .iter()
             .any(|s| matches!(s, Step::Model { block: 12, .. })));
+    }
+
+    #[test]
+    fn oversized_file_positions_are_reported_instead_of_wrapping_negative() {
+        let too_large = i64::MAX as u64 + 1;
+        assert!(slot_of(&serde_json::json!({ "@slot": too_large }), None, 0, 0).is_err());
+        assert!(slot_of(&serde_json::json!({ "@position": too_large }), None, 0, 0).is_err());
     }
 
     /// A file's split is applied to the slot the *chain* keeps its split in,
