@@ -1489,8 +1489,12 @@ pub fn migrate() -> usize {
             touched = true;
         }
         if touched {
-            let json = serde_json::to_vec_pretty(&setlist).unwrap_or_default();
-            let _ = atomic_write(&path, json);
+            let Ok(json) = serde_json::to_vec_pretty(&setlist) else {
+                return 0;
+            };
+            if atomic_write(&path, json).is_err() {
+                return 0;
+            }
         }
     }
 
@@ -1856,6 +1860,41 @@ mod tests {
             std::fs::read(&broken).unwrap(),
             b"{ this setlist was truncated"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_setlist_rewrite_stops_legacy_tones_from_being_retired() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new("migration-unwritable-setlist");
+        let legacy = scratch.dir.join("Only Copy.hxpreset");
+        std::fs::write(&legacy, b"the only copy").unwrap();
+        let setlists = scratch.dir.join("setlists");
+        std::fs::create_dir_all(&setlists).unwrap();
+        let gig = setlists.join("gig.json");
+        std::fs::write(
+            &gig,
+            serde_json::to_vec(&serde_json::json!({
+                "name": "Gig",
+                "description": "",
+                "venue": "",
+                "date": "",
+                "slots": [{ "file": "Only Copy.hxpreset", "name": "Only Copy" }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        std::fs::set_permissions(&setlists, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let migrated = migrate();
+        std::fs::set_permissions(&setlists, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(migrated, 0);
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"the only copy");
+        let setlist: Setlist = serde_json::from_slice(&std::fs::read(gig).unwrap()).unwrap();
+        assert_eq!(setlist.slots[0].file, "Only Copy.hxpreset");
+        assert!(setlist.slots[0].hash.is_empty());
     }
 
     /// A library from before the object store has to come across whole: the
