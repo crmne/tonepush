@@ -265,6 +265,14 @@ fn rename_object(hash: &str, name: &str) {
     if new == old {
         return;
     }
+    if !rename_pair(&old, &new) {
+        return;
+    }
+    remember_place(hash, &new);
+}
+
+/// Move a native tone and its portable companion as one recoverable pair.
+fn rename_pair(old: &Path, new: &Path) -> bool {
     // Move the portable half first. If it cannot move, the native half stays
     // where it is too; otherwise a failed second rename would split the pair
     // and the orphaned `.hlx` would look like a separate tone on the next scan.
@@ -272,15 +280,15 @@ fn rename_object(hash: &str, name: &str) {
     let new_companion = new.with_extension("hlx");
     let moved_companion = companion != old && companion.is_file();
     if moved_companion && std::fs::rename(&companion, &new_companion).is_err() {
-        return;
+        return false;
     }
-    if std::fs::rename(&old, &new).is_err() {
-        if moved_companion {
-            let _ = std::fs::rename(new_companion, companion);
-        }
-        return;
+    if std::fs::rename(old, new).is_ok() {
+        return true;
     }
-    remember_place(hash, &new);
+    if moved_companion {
+        let _ = std::fs::rename(new_companion, companion);
+    }
+    false
 }
 
 /// Write the portable form of a tone beside the object.
@@ -936,15 +944,8 @@ pub fn collect_garbage() -> usize {
             return swept;
         }
         let name = path.file_name().unwrap_or_default().to_owned();
-        if std::fs::rename(&path, trash.join(&name)).is_ok() {
+        if rename_pair(&path, &trash.join(&name)) {
             swept += 1;
-            // The portable copy goes with it. Left behind it would be an
-            // orphan that looks like a tone the library has and cannot open.
-            let companion = path.with_extension("hlx");
-            if companion.is_file() {
-                let name = companion.file_name().unwrap_or_default().to_owned();
-                let _ = std::fs::rename(&companion, trash.join(&name));
-            }
         }
     }
     if swept > 0 {
@@ -2105,6 +2106,24 @@ mod tests {
         assert!(old.is_file(), "the native file stayed put");
         assert!(old.with_extension("hlx").is_file(), "so did its companion");
         assert!(blocked.is_dir(), "the failed destination was not disturbed");
+    }
+
+    #[test]
+    fn a_failed_trash_move_does_not_split_a_tones_two_files() {
+        let scratch = Scratch::new("trash-pair");
+        let (hash, _) = keep("Blackened", "hxpreset", b"one").unwrap();
+        attach_portable(&hash, "{\"tone\": true}").unwrap();
+        let native = object_path(&hash).unwrap();
+        let portable = native.with_extension("hlx");
+        let trash = scratch.dir.join(".trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::create_dir(trash.join(portable.file_name().unwrap())).unwrap();
+
+        forget(&hash).unwrap();
+
+        assert!(native.is_file(), "the native file stayed recoverable");
+        assert!(portable.is_file(), "so did its companion");
+        assert!(!trash.join(native.file_name().unwrap()).exists());
     }
 
     /// Song and Tone facts stay separate in the exported manifest, and local
