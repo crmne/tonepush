@@ -142,7 +142,7 @@ pub fn slots_from_hlx(preset: &mut Preset, document: &Json, catalog: &Catalog) -
         // said rather than guessed.
         let cab_nodes = numbered("cab");
 
-        let mut free = run.iter().copied();
+        let mut used = std::collections::BTreeSet::new();
         for (_, block_key) in named {
             let Some(node) = dsp.get(&block_key) else {
                 continue;
@@ -152,20 +152,39 @@ pub fn slots_from_hlx(preset: &mut Preset, document: &Json, catalog: &Catalog) -
             // the branch, and the place along that branch's row, which is not
             // the slot the moment a chain splits. A file with neither packs
             // from the front, which is all a dense numbering can mean.
-            let recorded = node
-                .get("@slot")
-                .and_then(Json::as_u64)
-                .map(|n| n as usize)
-                .or_else(|| {
-                    let branch = node.get("@path").and_then(Json::as_u64).unwrap_or(0);
-                    let position = node.get("@position").and_then(Json::as_u64)?;
-                    layout.slot_of(dsp_index, branch as usize, position as usize)
+            let explicitly_placed = node.get("@slot").is_some() || node.get("@position").is_some();
+            let recorded = if let Some(slot) = node.get("@slot") {
+                slot.as_u64().and_then(|slot| usize::try_from(slot).ok())
+            } else {
+                let branch = node.get("@path").and_then(Json::as_u64).unwrap_or(0);
+                let position = node.get("@position").and_then(Json::as_u64);
+                usize::try_from(branch).ok().and_then(|branch| {
+                    usize::try_from(position?)
+                        .ok()
+                        .and_then(|position| layout.slot_of(dsp_index, branch, position))
                 })
-                .filter(|n| run.contains(n));
-            let Some(position) = recorded.or_else(|| free.next()) else {
+            }
+            .filter(|slot| run.contains(slot));
+            if explicitly_placed && recorded.is_none() {
+                skipped.push(format!(
+                    "{block_key}: its recorded position is outside this chain"
+                ));
+                continue;
+            }
+            let Some(position) = recorded.or_else(|| {
+                run.iter()
+                    .copied()
+                    .find(|position| !used.contains(position))
+            }) else {
                 skipped.push(format!("{block_key}: the chain has no room left"));
                 continue;
             };
+            if used.contains(&position) {
+                skipped.push(format!(
+                    "{block_key}: another block already uses slot {position}"
+                ));
+                continue;
+            }
             // Whose cab it is, said rather than guessed - two ways again. HX
             // Edit has the amp name its cab node, `"@cab": "cab0"`; ours has
             // the cab name the amp's slot. Either beats counting cabs against
@@ -186,6 +205,7 @@ pub fn slots_from_hlx(preset: &mut Preset, document: &Json, catalog: &Catalog) -
                 Ok(slot) => {
                     if preset.paste_slot(position, &slot) {
                         blocks += 1;
+                        used.insert(position);
                     } else {
                         skipped.push(format!("{block_key}: slot {position} would not take it"));
                     }
@@ -499,5 +519,36 @@ mod tests {
             error.contains("Gain") && error.contains("outside"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn recorded_and_dense_blocks_never_overwrite_each_other() {
+        const FIXTURE: &[u8] = include_bytes!("../../hx-proto/tests/preset.bin");
+        let Some(catalog) = crate::tests::catalog() else {
+            return;
+        };
+        let mut preset = Preset::parse(FIXTURE).expect("fixture");
+        empty_the_chain(&mut preset);
+        let first = preset
+            .slots
+            .iter()
+            .position(|slot| slot.kind == hx_proto::preset::Kind::Empty)
+            .expect("a block slot");
+        let document = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": { "@model": "HD2_DistScream808Mono", "@slot": first },
+                // No location: this one takes the first slot not already used.
+                "block1": { "@model": "HD2_DistScream808Mono" },
+                // An explicit bad location is reported, never treated as if it
+                // had no location and packed somewhere unrelated.
+                "block2": { "@model": "HD2_DistScream808Mono", "@slot": u64::MAX }
+            }}}
+        });
+
+        let built = slots_from_hlx(&mut preset, &document, &catalog);
+        assert_eq!(built.blocks, 2);
+        assert_eq!(preset.blocks().count(), 2);
+        assert_eq!(built.skipped.len(), 1);
+        assert!(built.skipped[0].contains("outside"));
     }
 }
