@@ -963,6 +963,7 @@ fn list_presets(session: &mut hx_usb::Session, setlist: i64) -> Result<()> {
 /// Send a WAV to an IR slot, named after the file.
 fn load_ir(session: &mut hx_usb::Session, slot: i64, file: &std::path::Path) -> Result<()> {
     let wav = wav::read(file)?;
+    let samples = hx_usb::ir::prepare(&wav.samples, wav.sample_rate)?;
     let name = file
         .file_stem()
         .and_then(|s| s.to_str())
@@ -971,11 +972,12 @@ fn load_ir(session: &mut hx_usb::Session, slot: i64, file: &std::path::Path) -> 
         .take(20)
         .collect::<String>();
 
-    session.upload_ir(slot - 1, &name, &wav.samples)?;
+    session.upload_ir(slot - 1, &name, &samples)?;
     println!(
-        "loaded {name} into IR slot {slot} ({} samples at {} Hz)",
+        "loaded {name} into IR slot {slot} ({} samples at {} Hz -> {} at 48000 Hz)",
         wav.samples.len(),
-        wav.sample_rate
+        wav.sample_rate,
+        samples.len()
     );
     Ok(())
 }
@@ -1696,14 +1698,14 @@ fn extract_backup(file: &std::path::Path, output: &std::path::Path) -> Result<()
 fn ir_info(file: &std::path::Path) -> Result<()> {
     let wav = wav::read(file)?;
     let samples = wav.samples.len();
+    let prepared = hx_usb::ir::prepare(&wav.samples, wav.sample_rate)?;
     println!("{}", file.display());
     println!("  {} Hz, mono, {samples} samples", wav.sample_rate);
-    let verdict = match samples {
-        0 => "will not load: it is empty".to_string(),
-        1..=2048 => "the device will accept it".to_string(),
-        n => format!("will not load: {n} samples, the device stores at most 2048"),
-    };
-    println!("  {verdict}");
+    println!(
+        "  will load as {} samples at {} Hz",
+        prepared.len(),
+        hx_usb::ir::SAMPLE_RATE
+    );
     Ok(())
 }
 

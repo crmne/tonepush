@@ -1032,6 +1032,7 @@ impl Worker {
             Cmd::LoadIr { slot, file } => {
                 let loaded = self.try_on_device(|d| {
                     let wav = crate::wav::read(&file)?;
+                    let samples = hx_usb::ir::prepare(&wav.samples, wav.sample_rate)?;
                     let name = file
                         .file_stem()
                         .and_then(|s| s.to_str())
@@ -1039,7 +1040,7 @@ impl Worker {
                         .chars()
                         .take(20)
                         .collect::<String>();
-                    d.upload_ir(slot, &name, &wav.samples)
+                    d.upload_ir(slot, &name, &samples)
                 });
                 if loaded.is_some() {
                     self.handle(Cmd::ListIrs);

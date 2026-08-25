@@ -17,6 +17,7 @@ use nusb::MaybeFuture;
 mod commands;
 pub use commands::{Assignment, Carried, Switch};
 pub mod backup;
+pub mod ir;
 pub mod replay;
 
 /// The claimed interface and its two bulk endpoints, ready to become a wire.

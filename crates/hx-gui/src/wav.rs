@@ -10,8 +10,6 @@ use std::path::Path;
 
 #[derive(Debug)]
 pub struct Wav {
-    /// Kept for parity with the CLI reader; the device does not ask for it.
-    #[allow(dead_code)]
     pub sample_rate: u32,
     pub samples: Vec<f32>,
 }
@@ -30,7 +28,18 @@ pub fn read(path: &Path) -> Result<Wav> {
     while pos + 8 <= bytes.len() {
         let id = &bytes[pos..pos + 4];
         let len = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
-        let body = bytes.get(pos + 8..pos + 8 + len).unwrap_or(&[]);
+        let body_start = pos + 8;
+        let body_end = body_start
+            .checked_add(len)
+            .ok_or_else(|| Error::Protocol("WAV chunk length overflow".into()))?;
+        if body_end > bytes.len() {
+            return Err(Error::Protocol(format!(
+                "WAV {} chunk is truncated: it declares {len} bytes but only {} remain",
+                String::from_utf8_lossy(id),
+                bytes.len() - body_start
+            )));
+        }
+        let body = &bytes[body_start..body_end];
 
         match id {
             b"fmt " if body.len() >= 16 => format = Some(Format::parse(body)),
@@ -38,7 +47,9 @@ pub fn read(path: &Path) -> Result<Wav> {
             _ => {}
         }
         // Chunks are word-aligned, and an odd length is padded.
-        pos += 8 + len + (len & 1);
+        pos = body_end
+            .checked_add(len & 1)
+            .ok_or_else(|| Error::Protocol("WAV chunk padding overflow".into()))?;
     }
 
     let format = format.ok_or_else(|| Error::Protocol("WAV has no fmt chunk".into()))?;
@@ -79,6 +90,24 @@ impl Format {
         const PCM: u16 = 1;
         const FLOAT: u16 = 3;
 
+        let sample_bytes = match (self.tag, self.bits) {
+            (PCM, 16) => 2,
+            (PCM, 24) => 3,
+            (PCM | FLOAT, 32) => 4,
+            (tag, bits) => {
+                return Err(Error::Protocol(format!(
+                    "unsupported WAV format (tag {tag}, {bits}-bit); \
+                     convert to 16-, 24-, or 32-bit mono PCM, or 32-bit float"
+                )))
+            }
+        };
+        if !data.len().is_multiple_of(sample_bytes) {
+            return Err(Error::Protocol(format!(
+                "WAV data chunk ends partway through a {}-bit sample",
+                self.bits
+            )));
+        }
+
         Ok(match (self.tag, self.bits) {
             (PCM, 16) => data
                 .chunks_exact(2)
@@ -99,12 +128,7 @@ impl Format {
                 .chunks_exact(4)
                 .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
                 .collect(),
-            (tag, bits) => {
-                return Err(Error::Protocol(format!(
-                    "unsupported WAV format (tag {tag}, {bits}-bit); \
-                     convert to 16-bit or 32-bit mono PCM"
-                )))
-            }
+            _ => unreachable!("the format was validated above"),
         })
     }
 }
@@ -146,6 +170,30 @@ pub fn write(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn wav_16bit(samples: &[i16]) -> Vec<u8> {
+        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let mut out = b"RIFF".to_vec();
+        out.extend(((36 + data.len()) as u32).to_le_bytes());
+        out.extend(b"WAVEfmt ");
+        out.extend(16u32.to_le_bytes());
+        out.extend(1u16.to_le_bytes());
+        out.extend(1u16.to_le_bytes());
+        out.extend(48_000u32.to_le_bytes());
+        out.extend(96_000u32.to_le_bytes());
+        out.extend(2u16.to_le_bytes());
+        out.extend(16u16.to_le_bytes());
+        out.extend(b"data");
+        out.extend((data.len() as u32).to_le_bytes());
+        out.extend(data);
+        out
+    }
+
+    fn write_temp(bytes: &[u8], name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, bytes).expect("writes fixture");
+        path
+    }
+
     #[test]
     fn what_is_written_reads_back_the_same() {
         let path = std::env::temp_dir().join("tonepush-wav-roundtrip.wav");
@@ -156,5 +204,23 @@ mod tests {
         assert_eq!(back.sample_rate, 48_000);
         assert_eq!(back.samples, samples);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn malformed_chunks_are_rejected_instead_of_silently_shortened() {
+        let mut truncated = wav_16bit(&[1]);
+        truncated[40..44].copy_from_slice(&4u32.to_le_bytes());
+        let path = write_temp(&truncated, "tonepush-gui-truncated-chunk.wav");
+        let error = read(&path).unwrap_err().to_string();
+        assert!(error.contains("truncated"), "{error}");
+
+        let mut partial = wav_16bit(&[1]);
+        partial.pop();
+        let riff_len = (partial.len() - 8) as u32;
+        partial[4..8].copy_from_slice(&riff_len.to_le_bytes());
+        partial[40..44].copy_from_slice(&1u32.to_le_bytes());
+        let path = write_temp(&partial, "tonepush-gui-partial-sample.wav");
+        let error = read(&path).unwrap_err().to_string();
+        assert!(error.contains("partway"), "{error}");
     }
 }

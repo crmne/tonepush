@@ -27,7 +27,18 @@ pub fn read(path: &Path) -> Result<Wav> {
     while pos + 8 <= bytes.len() {
         let id = &bytes[pos..pos + 4];
         let len = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
-        let body = bytes.get(pos + 8..pos + 8 + len).unwrap_or(&[]);
+        let body_start = pos + 8;
+        let body_end = body_start
+            .checked_add(len)
+            .context("WAV chunk length overflow")?;
+        if body_end > bytes.len() {
+            bail!(
+                "WAV {} chunk is truncated: it declares {len} bytes but only {} remain",
+                String::from_utf8_lossy(id),
+                bytes.len() - body_start
+            );
+        }
+        let body = &bytes[body_start..body_end];
 
         match id {
             b"fmt " if body.len() >= 16 => format = Some(Format::parse(body)),
@@ -35,7 +46,9 @@ pub fn read(path: &Path) -> Result<Wav> {
             _ => {}
         }
         // Chunks are word-aligned, and an odd length is padded.
-        pos += 8 + len + (len & 1);
+        pos = body_end
+            .checked_add(len & 1)
+            .context("WAV chunk padding overflow")?;
     }
 
     let format = format.context("WAV has no fmt chunk")?;
@@ -76,6 +89,22 @@ impl Format {
         const PCM: u16 = 1;
         const FLOAT: u16 = 3;
 
+        let sample_bytes = match (self.tag, self.bits) {
+            (PCM, 16) => 2,
+            (PCM, 24) => 3,
+            (PCM | FLOAT, 32) => 4,
+            (tag, bits) => bail!(
+                "unsupported WAV format (tag {tag}, {bits}-bit); \
+                 convert to 16-, 24-, or 32-bit mono PCM, or 32-bit float"
+            ),
+        };
+        if !data.len().is_multiple_of(sample_bytes) {
+            bail!(
+                "WAV data chunk ends partway through a {}-bit sample",
+                self.bits
+            );
+        }
+
         Ok(match (self.tag, self.bits) {
             (PCM, 16) => data
                 .chunks_exact(2)
@@ -96,10 +125,7 @@ impl Format {
                 .chunks_exact(4)
                 .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
                 .collect(),
-            (tag, bits) => bail!(
-                "unsupported WAV format (tag {tag}, {bits}-bit); \
-                 convert to 16-bit or 32-bit mono PCM"
-            ),
+            _ => unreachable!("the format was validated above"),
         })
     }
 }
@@ -155,5 +181,26 @@ mod tests {
     fn rejects_a_file_that_is_not_wav() {
         let path = write_temp(b"not a wav at all", "hx-test-bogus.wav");
         assert!(read(&path).is_err());
+    }
+
+    #[test]
+    fn rejects_a_chunk_that_runs_past_the_file() {
+        let mut bytes = wav_16bit(&[1]);
+        bytes[40..44].copy_from_slice(&4u32.to_le_bytes());
+        let path = write_temp(&bytes, "hx-test-truncated-chunk.wav");
+        let error = read(&path).unwrap_err().to_string();
+        assert!(error.contains("truncated"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_data_chunk_that_ends_mid_sample() {
+        let mut bytes = wav_16bit(&[1]);
+        bytes.pop();
+        let riff_len = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff_len.to_le_bytes());
+        bytes[40..44].copy_from_slice(&1u32.to_le_bytes());
+        let path = write_temp(&bytes, "hx-test-partial-sample.wav");
+        let error = read(&path).unwrap_err().to_string();
+        assert!(error.contains("partway"), "{error}");
     }
 }
