@@ -305,7 +305,7 @@ fn build_slot(node: &Json, cab: Option<&Json>, catalog: &Catalog) -> Result<Valu
     // that order. A parameter the document does not mention keeps the value the
     // catalog gives as its default rather than becoming zero, which for a knob
     // like Master is the difference between a preset and a silent one.
-    let values = values_for(symbol, node, catalog);
+    let values = values_for(symbol, node, catalog)?;
 
     // The cab that rides along, with its own values in its own order.
     let paired = match cab {
@@ -313,7 +313,7 @@ fn build_slot(node: &Json, cab: Option<&Json>, catalog: &Catalog) -> Result<Valu
             let name = cab.get("@model").and_then(Json::as_str).unwrap_or_default();
             let symbol = resolve(catalog, name, cab)
                 .ok_or_else(|| format!("the catalog does not know the cab {name}"))?;
-            Some((symbol.number, values_for(symbol, cab, catalog)))
+            Some((symbol.number, values_for(symbol, cab, catalog)?))
         }
         None => None,
     };
@@ -368,16 +368,34 @@ fn build_slot(node: &Json, cab: Option<&Json>, catalog: &Catalog) -> Result<Valu
 /// preset and a silent one. The values the symbol table does not name follow the
 /// named ones; `to_hlx` keeps them under `@unnamed`, and a file from HX Edit
 /// will not have them.
-fn values_for(symbol: &crate::Symbol, node: &Json, catalog: &Catalog) -> Vec<f32> {
+fn values_for(symbol: &crate::Symbol, node: &Json, catalog: &Catalog) -> Result<Vec<f32>, String> {
     let mut values = Vec::with_capacity(symbol.parameters.len());
-    for id in &symbol.parameters {
+    for (index, id) in symbol.parameters.iter().enumerate() {
         let found = node.get(id).and_then(number_of);
+        if let Some(value) = found {
+            if !value.is_finite() {
+                return Err(format!("{id} is not a finite number"));
+            }
+            if let Some(param) = catalog.param(symbol.number, index) {
+                if !param.accepts(value) {
+                    return Err(format!(
+                        "{} value {value} is outside {}..{}",
+                        param.name, param.min, param.max
+                    ));
+                }
+            }
+        }
         values.push(found.unwrap_or_else(|| default_of(catalog, symbol.number, id)));
     }
     if let Some(extra) = node.get("@unnamed").and_then(Json::as_array) {
-        values.extend(extra.iter().filter_map(number_of));
+        for value in extra.iter().filter_map(number_of) {
+            if !value.is_finite() {
+                return Err("an unnamed parameter is not a finite number".to_owned());
+            }
+            values.push(value);
+        }
     }
-    values
+    Ok(values)
 }
 
 /// Which firmware symbol a `@model` names.
@@ -455,4 +473,31 @@ fn default_of(catalog: &Catalog, model: u32, id: &str) -> f32 {
         .and_then(|m| catalog.ordered_params(m).into_iter().find(|p| p.id == id))
         .map(|p| p.default)
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_building_refuses_an_out_of_range_parameter() {
+        let Some(catalog) = crate::tests::catalog() else {
+            return;
+        };
+        let symbol = catalog
+            .symbols()
+            .iter()
+            .find(|symbol| symbol.symbol == "HD2_DistScream808Mono")
+            .expect("Scream 808 symbol");
+        let node = serde_json::json!({
+            "@model": "HD2_DistScream808Mono",
+            "Gain": 1.5
+        });
+
+        let error = values_for(symbol, &node, &catalog).unwrap_err();
+        assert!(
+            error.contains("Gain") && error.contains("outside"),
+            "{error}"
+        );
+    }
 }

@@ -253,6 +253,13 @@ fn read_block(
             Value::Number(n) => n.as_f64().unwrap_or(0.0) as f32,
             _ => continue,
         };
+        if !param.accepts(native) {
+            skipped.push(format!(
+                "{model_name}: {} value {native} is outside {}..{}",
+                param.name, param.min, param.max
+            ));
+            continue;
+        }
         params.push((param.name.clone(), native));
     }
 
@@ -410,5 +417,25 @@ mod tests {
         assert_eq!(tone.skipped.len(), 2, "{:?}", tone.skipped);
         assert!(tone.skipped.iter().any(|s| s.contains("HD2_NotARealModel")));
         assert!(tone.skipped.iter().any(|s| s.contains("Nonsense")));
+    }
+
+    #[test]
+    fn an_out_of_range_parameter_is_reported_and_never_made_loadable() {
+        let Some(catalog) = catalog() else { return };
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": {
+                    "@model": "HD2_DistScream808Mono",
+                    "Gain": 1.5
+                }
+            }}}
+        });
+
+        let tone = inspect(&json, &catalog);
+        assert!(tone
+            .skipped
+            .iter()
+            .any(|why| why.contains("Gain") && why.contains("outside")));
+        assert!(tone.blocks[0].params.is_empty());
     }
 }

@@ -381,11 +381,18 @@ pub fn parse_slot(text: &str) -> Option<i64> {
     let letter = slot.chars().next()?.to_ascii_uppercase();
     let position = "ABC".find(letter)? as i64;
     let bank: i64 = bank.parse().ok()?;
-    (bank >= 1).then(|| (bank - 1) * 3 + position)
+    (bank >= 1)
+        .then_some(bank)
+        .and_then(|bank| bank.checked_sub(1))
+        .and_then(|bank| bank.checked_mul(3))
+        .and_then(|index| index.checked_add(position))
 }
 
 /// Render a preset index the way the hardware labels it: `03B` for index 7.
 pub fn slot_label(index: i64) -> String {
+    if index < 0 {
+        return index.to_string();
+    }
     format!(
         "{:02}{}",
         index / 3 + 1,
@@ -428,7 +435,7 @@ impl StreamReader {
     pub fn take_messages(&mut self) -> Vec<StreamMessage> {
         let mut out = Vec::new();
         let mut pos = 0usize;
-        while self.buf.len() >= pos + 8 {
+        while let Some(header_end) = pos.checked_add(8).filter(|end| *end <= self.buf.len()) {
             // Originator tag: 1 from the host, 0 from the device. Kept for
             // symmetry but never gated on.
             let flags = u16::from_le_bytes([self.buf[pos], self.buf[pos + 1]]);
@@ -443,10 +450,13 @@ impl StreamReader {
                 self.buf[pos + 6],
                 self.buf[pos + 7],
             ]) as usize;
-            if self.buf.len() < pos + 8 + len {
+            let Some(body_end) = header_end.checked_add(len) else {
+                break;
+            };
+            if self.buf.len() < body_end {
                 break; // wait for more bytes
             }
-            let body = &self.buf[pos + 8..pos + 8 + len];
+            let body = &self.buf[header_end..body_end];
             match Decoder::new(body).value() {
                 Ok(v) => out.push(StreamMessage {
                     flags,
@@ -457,7 +467,7 @@ impl StreamReader {
                 // rather than silently resynchronising on garbage.
                 Err(_) => break,
             }
-            pos += 8 + len;
+            pos = body_end;
         }
         self.buf.drain(..pos);
         out
@@ -630,6 +640,7 @@ mod tests {
         assert_eq!(parse_slot("03D"), None);
         assert_eq!(parse_slot("nonsense"), None);
         assert_eq!(parse_slot(""), None);
+        assert_eq!(parse_slot("9223372036854775807A"), None);
     }
 
     #[test]
@@ -638,5 +649,6 @@ mod tests {
         assert_eq!(slot_label(0), "01A");
         assert_eq!(slot_label(7), "03B");
         assert_eq!(slot_label(125), "42C");
+        assert_eq!(slot_label(-1), "-1");
     }
 }

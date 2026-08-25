@@ -555,7 +555,10 @@ mod tests {
         let preset = preset(vec![
             input(),
             block(101, None, &[0.1, 0.2, 0.3], &[], true),
-            block(247, None, &[0.4, 0.5, 0.6, 0.7, 0.8, 0.9], &[], false),
+            // Room's Low/High Cut are native frequencies, not normalised
+            // knobs. Keep the synthetic document inside the same bounds a
+            // real pedal enforces so this remains a valid round-trip fixture.
+            block(247, None, &[0.4, 0.05, 100.0, 5000.0, 0.8, 0.9], &[], false),
         ]);
 
         let written = to_hlx(&preset, &catalog, "Round Trip");

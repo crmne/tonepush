@@ -10,9 +10,43 @@ use std::time::{Duration, Instant};
 
 use hx_proto::msgpack::Value;
 use hx_proto::rpc::Message;
-use hx_proto::{rpc, ChannelId, Preset};
+use hx_proto::{rpc, ChannelId, DeviceProfile, Preset};
 
 use crate::{checksum, Error, Result, Session};
+
+fn non_negative(value: i64, name: &str) -> Result<()> {
+    if value < 0 {
+        return Err(Error::Protocol(format!("{name} cannot be negative")));
+    }
+    Ok(())
+}
+
+fn block_param(block: i64, param: i64) -> Result<()> {
+    non_negative(block, "block")?;
+    non_negative(param, "parameter index")
+}
+
+fn finite_value(value: &Value, name: &str) -> Result<()> {
+    let finite = match value {
+        Value::F32(number) => number.is_finite(),
+        Value::F64(number) => number.is_finite(),
+        _ => true,
+    };
+    if !finite {
+        return Err(Error::Protocol(format!("{name} must be a finite number")));
+    }
+    Ok(())
+}
+
+fn switch_index(profile: &DeviceProfile, switch: u8) -> Result<i64> {
+    if !(1..=profile.switches).contains(&switch) {
+        return Err(Error::Protocol(format!(
+            "{} has footswitches 1 to {}; {switch} is not one",
+            profile.name, profile.switches
+        )));
+    }
+    Ok(i64::from(switch - 1))
+}
 
 /// What controls a parameter, and over what part of its travel.
 ///
@@ -124,6 +158,8 @@ impl Session {
     /// The value is in the parameter's own units; `hx-catalog` knows the range
     /// and how to display it.
     pub fn set_param(&mut self, block: i64, index: i64, value: Value) -> Result<()> {
+        block_param(block, index)?;
+        finite_value(&value, "parameter value")?;
         self.command(
             ChannelId::DATA,
             rpc::op::SET_PARAM,
@@ -325,6 +361,12 @@ impl Session {
     /// unknown; if the device rejects an upload, that is the first thing to
     /// suspect.
     pub fn upload_ir(&mut self, slot: i64, name: &str, samples: &[f32]) -> Result<()> {
+        non_negative(slot, "impulse response slot")?;
+        if samples.iter().any(|sample| !sample.is_finite()) {
+            return Err(Error::Protocol(
+                "an impulse response contains a non-finite sample".into(),
+            ));
+        }
         // The descriptor declares the stored length as 256 × 2^code samples
         // (key 115; key 114 is a multiplier the editor always sends as 1).
         // The device zero-pads shorter data to the declared length - but data
@@ -394,6 +436,7 @@ impl Session {
 
     /// Empty an impulse response slot.
     pub fn clear_ir(&mut self, slot: i64) -> Result<()> {
+        non_negative(slot, "impulse response slot")?;
         self.bootstrap()?;
         self.command(
             ChannelId::CONTROL,
@@ -412,6 +455,7 @@ impl Session {
     /// which is a quietly misleading combination - HX Edit always selects then
     /// clears, and so do we.
     pub fn clear_block(&mut self, block: i64) -> Result<()> {
+        non_negative(block, "block")?;
         self.select_block(block)?;
         self.command(
             ChannelId::DATA,
@@ -422,6 +466,7 @@ impl Session {
 
     /// Switch to a snapshot, by zero-based index.
     pub fn select_snapshot(&mut self, index: i64) -> Result<()> {
+        non_negative(index, "snapshot index")?;
         self.command(
             ChannelId::DATA,
             rpc::op::SELECT_SNAPSHOT,
@@ -540,6 +585,8 @@ impl Session {
     /// The value's type has to match what the device holds - sending a float
     /// where it wants a boolean is refused with error -3.
     pub fn set_object(&mut self, id: i64, value: Value) -> Result<()> {
+        non_negative(id, "object id")?;
+        finite_value(&value, "object value")?;
         self.command(
             ChannelId::DATA,
             rpc::op::SET_OBJECT,
@@ -576,6 +623,8 @@ impl Session {
     /// ignored, and this opcode, captured from HX Edit's own routing clicks,
     /// is the way that works.
     pub fn set_routing(&mut self, block: i64, to: i64) -> Result<()> {
+        non_negative(block, "block")?;
+        non_negative(to, "routing destination")?;
         self.command(
             ChannelId::DATA,
             rpc::op::SET_ROUTING,
@@ -645,6 +694,7 @@ impl Session {
 
     /// Move the editing cursor, which the device's own screen follows.
     pub fn select_block(&mut self, block: i64) -> Result<()> {
+        non_negative(block, "block")?;
         self.command(
             ChannelId::DATA,
             rpc::op::SELECT_BLOCK,
@@ -678,6 +728,10 @@ impl Session {
         /// Constant across every captured assignment.
         const SCOPE: i64 = 300;
 
+        non_negative(block, "block")?;
+        if cc.is_some_and(|cc| !(0..=127).contains(&cc)) {
+            return Err(Error::Protocol("a MIDI CC is 0 to 127".into()));
+        }
         self.command(
             ChannelId::DATA,
             rpc::op::ASSIGN_CONTROLLER,
@@ -702,6 +756,10 @@ impl Session {
     /// [`Session::assign_bypass_midi`], where the number rides the assignment
     /// itself.
     pub fn set_assign_cc(&mut self, block: i64, param: i64, cc: i64) -> Result<()> {
+        block_param(block, param)?;
+        if !(0..=127).contains(&cc) {
+            return Err(Error::Protocol("a MIDI CC is 0 to 127".into()));
+        }
         self.command(
             ChannelId::DATA,
             rpc::op::SET_ASSIGN_CC,
@@ -734,6 +792,7 @@ impl Session {
         param: i64,
         source: Option<rpc::Source>,
     ) -> Result<()> {
+        block_param(block, param)?;
         let (flags, kind) = match source {
             Some(source) => (source.ordinal(), 4),
             None => (rpc::Source::NONE, 0),
@@ -764,6 +823,12 @@ impl Session {
         value: f32,
         high_end: bool,
     ) -> Result<()> {
+        block_param(block, param)?;
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(Error::Protocol(
+                "an assignment endpoint must be between 0 and 1".into(),
+            ));
+        }
         let op = if high_end {
             rpc::op::ASSIGN_MAX_OP
         } else {
@@ -787,6 +852,7 @@ impl Session {
     /// `None` for a parameter nothing controls - which the device reports as
     /// source ordinal 0, the same "None" the assign page offers.
     pub fn read_assignment_raw(&mut self, block: i64, param: i64) -> Result<Value> {
+        block_param(block, param)?;
         self.request(
             ChannelId::DATA,
             rpc::op::READ_ASSIGNMENT,
@@ -800,6 +866,7 @@ impl Session {
     }
 
     pub fn read_assignment(&mut self, block: i64, param: i64) -> Result<Option<Assignment>> {
+        block_param(block, param)?;
         let reply = self.request(
             ChannelId::DATA,
             rpc::op::READ_ASSIGNMENT,
@@ -833,12 +900,14 @@ impl Session {
     /// Bypass is a switch, so only a footswitch or a MIDI CC can drive it -
     /// HX Edit lists expression pedals for it but steps over them.
     pub fn assign_bypass_footswitch(&mut self, block: i64, switch: u8) -> Result<()> {
+        non_negative(block, "block")?;
+        let switch = switch_index(&self.profile, switch)?;
         self.command(
             ChannelId::DATA,
             rpc::op::ASSIGN_FOOTSWITCH,
             hx_proto::msgmap! {
                 rpc::key::BLOCK => Value::Int(block),
-                rpc::key::SWITCH => Value::Int(switch.saturating_sub(1) as i64),
+                rpc::key::SWITCH => Value::Int(switch),
             },
         )
     }
@@ -852,11 +921,12 @@ impl Session {
     /// The one-based number goes in here so a caller says "footswitch 3" and
     /// means it.
     pub fn read_switch(&mut self, switch: u8) -> Result<Switch> {
+        switch_index(&self.profile, switch)?;
         let reply = self.request(
             ChannelId::DATA,
             rpc::op::FOOTSWITCH_CONFIG,
             hx_proto::msgmap! {
-                rpc::key::SWITCH => Value::Int(switch.max(1) as i64),
+                rpc::key::SWITCH => Value::Int(i64::from(switch)),
             },
         )?;
         let carries = match reply.get(rpc::key::SWITCH_ASSIGNED) {
@@ -888,11 +958,12 @@ impl Session {
     /// Latching, which toggles, or momentary, which holds while your foot is
     /// down.
     pub fn set_switch_momentary(&mut self, switch: u8, momentary: bool) -> Result<()> {
+        let switch = switch_index(&self.profile, switch)?;
         self.command(
             ChannelId::DATA,
             rpc::op::SWITCH_TYPE,
             hx_proto::msgmap! {
-                rpc::key::SWITCH => Value::Int(switch.saturating_sub(1) as i64),
+                rpc::key::SWITCH => Value::Int(switch),
                 rpc::key::MOMENTARY => Value::Bool(momentary),
             },
         )
@@ -901,7 +972,7 @@ impl Session {
     /// Write a name under a footswitch, or clear it back to whatever it
     /// carries. Clearing is its own opcode rather than an empty string.
     pub fn set_switch_label(&mut self, switch: u8, label: Option<&str>) -> Result<()> {
-        let switch = Value::Int(switch.saturating_sub(1) as i64);
+        let switch = Value::Int(switch_index(&self.profile, switch)?);
         match label {
             Some(label) => self.command(
                 ChannelId::DATA,
@@ -926,7 +997,12 @@ impl Session {
     /// value: the capture sets White by sending `66: 1`. Auto Color is index 0
     /// of that list and has an opcode to itself.
     pub fn set_switch_colour(&mut self, switch: u8, colour: Option<i64>) -> Result<()> {
-        let switch = Value::Int(switch.saturating_sub(1) as i64);
+        let switch = Value::Int(switch_index(&self.profile, switch)?);
+        if colour.is_some_and(|colour| colour < 1) {
+            return Err(Error::Protocol(
+                "a chosen footswitch colour must be 1 or greater; use None for Auto Color".into(),
+            ));
+        }
         match colour {
             Some(colour) => self.command(
                 ChannelId::DATA,
@@ -946,12 +1022,14 @@ impl Session {
 
     /// Take a block's bypass off a footswitch again.
     pub fn unassign_bypass_footswitch(&mut self, block: i64, switch: u8) -> Result<()> {
+        non_negative(block, "block")?;
+        let switch = switch_index(&self.profile, switch)?;
         self.command(
             ChannelId::DATA,
             rpc::op::UNASSIGN_FOOTSWITCH,
             hx_proto::msgmap! {
                 rpc::key::BLOCK => Value::Int(block),
-                rpc::key::SWITCH => Value::Int(switch.saturating_sub(1) as i64),
+                rpc::key::SWITCH => Value::Int(switch),
             },
         )
     }
@@ -961,6 +1039,11 @@ impl Session {
     /// No opcode carries tempo on its own, so this edits the preset document
     /// and writes it back.
     pub fn set_tempo(&mut self, bpm: f32) -> Result<()> {
+        if !bpm.is_finite() || !(40.0..=240.0).contains(&bpm) {
+            return Err(Error::Protocol(
+                "tempo must be between 40 and 240 BPM".into(),
+            ));
+        }
         let mut preset = self.read_preset()?;
         if !preset.set_tempo(bpm) {
             return Err(Error::Protocol("this preset has no tempo field".into()));
@@ -1000,6 +1083,7 @@ impl Session {
 
     /// Switch a block in or out of the signal path.
     pub fn set_enabled(&mut self, block: i64, enabled: bool) -> Result<()> {
+        non_negative(block, "block")?;
         self.command(
             ChannelId::DATA,
             rpc::op::SET_ENABLED,
@@ -1051,5 +1135,33 @@ impl Session {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn non_finite_wire_values_are_rejected() {
+        assert!(finite_value(&Value::F32(f32::NAN), "value").is_err());
+        assert!(finite_value(&Value::F32(f32::INFINITY), "value").is_err());
+        assert!(finite_value(&Value::F64(f64::NEG_INFINITY), "value").is_err());
+        assert!(finite_value(&Value::F32(0.5), "value").is_ok());
+    }
+
+    #[test]
+    fn footswitches_are_checked_against_the_device_profile() {
+        assert_eq!(switch_index(&hx_proto::HX_STOMP, 1).unwrap(), 0);
+        assert_eq!(switch_index(&hx_proto::HX_STOMP, 5).unwrap(), 4);
+        assert!(switch_index(&hx_proto::HX_STOMP, 0).is_err());
+        assert!(switch_index(&hx_proto::HX_STOMP, 6).is_err());
+    }
+
+    #[test]
+    fn protocol_addresses_cannot_be_negative() {
+        assert!(block_param(0, 0).is_ok());
+        assert!(block_param(-1, 0).is_err());
+        assert!(block_param(0, -1).is_err());
     }
 }

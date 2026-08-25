@@ -208,11 +208,12 @@ impl<'a> Decoder<'a> {
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        if self.pos + n > self.buf.len() {
+        let end = self.pos.checked_add(n).ok_or(Error::Eof)?;
+        if end > self.buf.len() {
             return Err(Error::Eof);
         }
-        let s = &self.buf[self.pos..self.pos + n];
-        self.pos += n;
+        let s = &self.buf[self.pos..end];
+        self.pos = end;
         Ok(s)
     }
 
@@ -571,5 +572,14 @@ mod tests {
             Value::Bin(b, _) => assert_eq!(b, vec![0x01, 0x02, 0x03, 0xff]),
             other => panic!("expected blob, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_overflowing_declared_length_is_an_incomplete_value_not_a_panic() {
+        let mut decoder = Decoder {
+            buf: &[],
+            pos: usize::MAX,
+        };
+        assert_eq!(decoder.take(1), Err(Error::Eof));
     }
 }

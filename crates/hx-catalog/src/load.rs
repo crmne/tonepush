@@ -281,7 +281,11 @@ struct RawModel {
     #[serde(default)]
     stereo: bool,
     #[serde(default)]
-    load: f32,
+    load: Option<f32>,
+    #[serde(default)]
+    load_mono: Option<f32>,
+    #[serde(default)]
+    load_stereo: Option<f32>,
     /// Only amps carry this: the cab they pair with in an Amp+Cab block.
     #[serde(default, rename = "cablink")]
     cab_link: Option<String>,
@@ -322,7 +326,10 @@ impl From<RawModel> for Model {
             name: m.name,
             category: m.category,
             stereo: m.stereo,
-            load: m.load,
+            // Most models call their mono cost `load`, while stereo-only
+            // models have only `load_stereo`. Keep preferring the ordinary
+            // field for models that offer both variants.
+            load: m.load.or(m.load_mono).or(m.load_stereo).unwrap_or_default(),
             image: None,
             cab_link: m.cab_link,
             params: m.params.into_iter().map(Param::from).collect(),
@@ -349,5 +356,43 @@ impl From<Fields> for Param {
             id: text(&f, "symbolicID"),
             name: text(&f, "name"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(json: &str) -> Model {
+        serde_json::from_str::<RawModel>(json).unwrap().into()
+    }
+
+    #[test]
+    fn stereo_only_models_use_their_stereo_load() {
+        let chamber = model(
+            r#"{
+                "symbolicID": "HD2_ReverbChamber",
+                "name": "Chamber",
+                "stereo": true,
+                "load_stereo": 7.93
+            }"#,
+        );
+
+        assert_eq!(chamber.load, 7.93);
+    }
+
+    #[test]
+    fn models_with_both_loads_keep_their_mono_load() {
+        let simple_eq = model(
+            r#"{
+                "symbolicID": "HD2_EQSimple3Band",
+                "name": "Simple EQ",
+                "stereo": true,
+                "load": 1.28,
+                "load_stereo": 1.63
+            }"#,
+        );
+
+        assert_eq!(simple_eq.load, 1.28);
     }
 }

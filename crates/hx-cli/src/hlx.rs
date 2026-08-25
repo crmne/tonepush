@@ -268,6 +268,13 @@ fn read_block(
             serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) as f32,
             _ => continue,
         };
+        if !param.accepts(native) {
+            plan.skipped.push(format!(
+                "{name}: {} value {native} is outside {}..{}",
+                param.name, param.min, param.max
+            ));
+            continue;
+        }
         plan.steps.push(Step::Param {
             block: position,
             index: index as i64,
@@ -566,5 +573,28 @@ mod tests {
         assert_eq!(plan.skipped.len(), 2);
         assert!(plan.skipped[0].contains("HD2_NotARealModel"));
         assert!(plan.skipped[1].contains("Nonsense"));
+    }
+
+    #[test]
+    fn refuses_out_of_range_parameter_values_from_a_tone_file() {
+        let Some(catalog) = catalog() else { return };
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": {
+                    "@model": "HD2_DistScream808Mono",
+                    "Gain": 1.5
+                }
+            }}}
+        });
+
+        let plan = plan(&json, &catalog).unwrap();
+        assert!(plan
+            .skipped
+            .iter()
+            .any(|why| why.contains("Gain") && why.contains("outside")));
+        assert!(!plan
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::Param { name, .. } if name == "Gain")));
     }
 }

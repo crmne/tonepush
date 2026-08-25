@@ -6,6 +6,86 @@ mod wav;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
+fn one_based_i64(text: &str) -> std::result::Result<i64, String> {
+    let value = text
+        .parse::<i64>()
+        .map_err(|_| format!("{text:?} is not a whole number"))?;
+    (value >= 1)
+        .then_some(value)
+        .ok_or_else(|| "the number must be 1 or greater".to_owned())
+}
+
+fn non_negative_i64(text: &str) -> std::result::Result<i64, String> {
+    let value = text
+        .parse::<i64>()
+        .map_err(|_| format!("{text:?} is not a whole number"))?;
+    (value >= 0)
+        .then_some(value)
+        .ok_or_else(|| "the number cannot be negative".to_owned())
+}
+
+fn one_based_usize(text: &str) -> std::result::Result<usize, String> {
+    let value = text
+        .parse::<usize>()
+        .map_err(|_| format!("{text:?} is not a positive whole number"))?;
+    (value >= 1)
+        .then_some(value)
+        .ok_or_else(|| "the number must be 1 or greater".to_owned())
+}
+
+fn one_based_u8(text: &str) -> std::result::Result<u8, String> {
+    let value = text
+        .parse::<u8>()
+        .map_err(|_| format!("{text:?} is not a footswitch number"))?;
+    (value >= 1)
+        .then_some(value)
+        .ok_or_else(|| "footswitches are numbered from 1".to_owned())
+}
+
+fn midi_cc(text: &str) -> std::result::Result<i64, String> {
+    let value = text
+        .parse::<i64>()
+        .map_err(|_| format!("{text:?} is not a MIDI CC"))?;
+    (0..=127)
+        .contains(&value)
+        .then_some(value)
+        .ok_or_else(|| "a MIDI CC is 0 to 127".to_owned())
+}
+
+fn controller_source(text: &str) -> std::result::Result<i64, String> {
+    let value = text
+        .parse::<i64>()
+        .map_err(|_| format!("{text:?} is not a controller source"))?;
+    (0..=9)
+        .contains(&value)
+        .then_some(value)
+        .ok_or_else(|| "a controller source is 0 to 9".to_owned())
+}
+
+fn tempo_bpm(text: &str) -> std::result::Result<f32, String> {
+    let value = text
+        .parse::<f32>()
+        .map_err(|_| format!("{text:?} is not a tempo"))?;
+    (value.is_finite() && (40.0..=240.0).contains(&value))
+        .then_some(value)
+        .ok_or_else(|| "tempo must be between 40 and 240 BPM".to_owned())
+}
+
+fn normalised(text: &str) -> std::result::Result<f32, String> {
+    let value = text
+        .parse::<f32>()
+        .map_err(|_| format!("{text:?} is not a number"))?;
+    (value.is_finite() && (0.0..=1.0).contains(&value))
+        .then_some(value)
+        .ok_or_else(|| "the value must be between 0 and 1".to_owned())
+}
+
+fn zero_based(position: usize, what: &str) -> Result<usize> {
+    position
+        .checked_sub(1)
+        .with_context(|| format!("{what} are numbered from 1"))
+}
+
 #[derive(Parser)]
 #[command(
     name = "tonepush",
@@ -26,7 +106,7 @@ enum Cmd {
     /// Load a preset, by front-panel label (`03B`) or zero-based index (`7`).
     Select {
         index: String,
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, value_parser = non_negative_i64)]
         setlist: i64,
     },
     /// Dump the loaded preset.
@@ -37,7 +117,7 @@ enum Cmd {
     },
     /// List every preset by name.
     Presets {
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, value_parser = non_negative_i64)]
         setlist: i64,
     },
     /// Show the signal chain of the loaded preset, with parameter values.
@@ -45,42 +125,67 @@ enum Cmd {
     /// Set a parameter. Block is its position in `tonepush chain`; the parameter may
     /// be named or given by index.
     Set {
+        #[arg(value_parser = one_based_i64)]
         block: i64,
         param: String,
         value: String,
     },
     /// Switch a block on or off. Off is what the front panel calls bypassed.
     Enable {
+        #[arg(value_parser = one_based_i64)]
         block: i64,
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
     /// Change a block's model, by name ("Room") or catalog number.
-    Model { block: i64, model: String },
+    Model {
+        #[arg(value_parser = one_based_i64)]
+        block: i64,
+        model: String,
+    },
     /// Remove a block, by position as shown in `tonepush chain`.
-    Clear { block: i64 },
+    Clear {
+        #[arg(value_parser = one_based_i64)]
+        block: i64,
+    },
     /// Send an impulse response to a slot (1-based), from a mono WAV.
     ///
-    IrLoad { slot: i64, file: std::path::PathBuf },
+    IrLoad {
+        #[arg(value_parser = one_based_i64)]
+        slot: i64,
+        file: std::path::PathBuf,
+    },
     /// Put a block's bypass under MIDI, or take it off, by position as in
     /// `tonepush chain`.
     Assign {
+        #[arg(value_parser = one_based_i64)]
         block: i64,
         /// Which CC drives it. 4 is what the pedal picks for itself.
-        #[arg(long, default_value_t = 4)]
+        #[arg(long, default_value_t = 4, value_parser = midi_cc)]
         cc: i64,
         #[arg(long)]
         off: bool,
     },
     /// Set the tempo of the loaded preset, in BPM.
-    Tempo { bpm: f32 },
+    Tempo {
+        #[arg(value_parser = tempo_bpm)]
+        bpm: f32,
+    },
     /// Rename a snapshot (1-based).
-    SnapshotName { number: usize, name: String },
+    SnapshotName {
+        #[arg(value_parser = one_based_usize)]
+        number: usize,
+        name: String,
+    },
     /// Route an input or output, by slot position and destination name.
     ///
     /// `tonepush route 0 "Return L/R"` - see `tonepush chain` for slots,
     /// and pass a partial name; it is matched against the device's own menu.
-    Route { block: i64, to: String },
+    Route {
+        #[arg(value_parser = non_negative_i64)]
+        block: i64,
+        to: String,
+    },
     /// Print the signal path as the device is wired: one row per lane.
     Topology,
     /// Dump one slot's raw body, for protocol work.
@@ -89,9 +194,19 @@ enum Cmd {
     ///
     /// Writes the whole preset document, so the block arrives complete -
     /// model, values, paired cab and all.
-    CopyBlock { from: usize, to: usize },
+    CopyBlock {
+        #[arg(value_parser = one_based_usize)]
+        from: usize,
+        #[arg(value_parser = one_based_usize)]
+        to: usize,
+    },
     /// Copy a snapshot's settings over another, keeping the target's name.
-    CopySnapshot { from: usize, to: usize },
+    CopySnapshot {
+        #[arg(value_parser = one_based_usize)]
+        from: usize,
+        #[arg(value_parser = one_based_usize)]
+        to: usize,
+    },
     /// Back up every preset in a setlist to a directory.
     ///
     /// One file per preset, byte for byte as the device holds it. Slow by
@@ -99,7 +214,7 @@ enum Cmd {
     /// walks the whole setlist and takes a few minutes.
     BackupAll {
         directory: std::path::PathBuf,
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, value_parser = non_negative_i64)]
         setlist: i64,
     },
     /// Back up the whole pedal: every preset, setting and impulse response.
@@ -136,25 +251,43 @@ enum Cmd {
         /// Rename while saving. Defaults to the current name.
         #[arg(long)]
         name: Option<String>,
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, value_parser = non_negative_i64)]
         setlist: i64,
     },
     /// Read a device setting by numeric id, or list the ones that answer.
-    Setting { id: Option<i64> },
+    Setting {
+        #[arg(value_parser = non_negative_i64)]
+        id: Option<i64>,
+    },
     /// Write a device setting: a whole number, `on`/`off`, or a decimal.
-    SetSetting { id: i64, value: String },
+    SetSetting {
+        #[arg(value_parser = non_negative_i64)]
+        id: i64,
+        value: String,
+    },
     /// List setlists.
     Setlists,
     /// List the impulse response slots.
     Irs,
     /// Empty an impulse response slot (1-based).
-    IrClear { slot: i64 },
+    IrClear {
+        #[arg(value_parser = one_based_i64)]
+        slot: i64,
+    },
     /// Switch snapshot, by number as shown in `tonepush chain` (1-based).
-    Snapshot { number: i64 },
+    Snapshot {
+        #[arg(value_parser = one_based_i64)]
+        number: i64,
+    },
     /// Move a block along the chain, by position as shown in `tonepush chain`.
     ///
     /// Writes the whole preset back, which is untested against hardware.
-    Move { from: i64, to: i64 },
+    Move {
+        #[arg(value_parser = one_based_i64)]
+        from: i64,
+        #[arg(value_parser = one_based_i64)]
+        to: i64,
+    },
     /// Write the loaded preset to a file as JSON.
     Export { file: std::path::PathBuf },
     /// Save the loaded preset to a file exactly as the device holds it.
@@ -228,39 +361,74 @@ enum Cmd {
     Rename {
         index: String,
         name: String,
-        #[arg(long, default_value_t = 0)]
+        #[arg(long, default_value_t = 0, value_parser = non_negative_i64)]
         setlist: i64,
     },
     /// Fetch an object by numeric id.
-    Fetch { id: i64 },
+    Fetch {
+        #[arg(value_parser = non_negative_i64)]
+        id: i64,
+    },
     /// Every controller assignment in the loaded preset, from its document.
     Controllers,
     /// What controls each of a block's parameters. Reads only.
-    Assignments { block: i64, count: i64 },
+    Assignments {
+        #[arg(value_parser = non_negative_i64)]
+        block: i64,
+        #[arg(value_parser = non_negative_i64)]
+        count: i64,
+    },
     /// Put a parameter under a controller, by source ordinal. Edit buffer only.
-    AssignParam { block: i64, param: i64, source: i64 },
+    AssignParam {
+        #[arg(value_parser = non_negative_i64)]
+        block: i64,
+        #[arg(value_parser = non_negative_i64)]
+        param: i64,
+        #[arg(value_parser = controller_source)]
+        source: i64,
+    },
     /// Say which MIDI CC drives a parameter already under MIDI. Edit buffer
     /// only.
     ///
     /// A bypass carries its CC on the assignment itself - that is `assign
     /// --cc` - and a parameter does not: opcode 64 is the only message that
     /// says which number reaches it.
-    AssignCc { block: i64, param: i64, cc: i64 },
+    AssignCc {
+        #[arg(value_parser = non_negative_i64)]
+        block: i64,
+        #[arg(value_parser = non_negative_i64)]
+        param: i64,
+        #[arg(value_parser = midi_cc)]
+        cc: i64,
+    },
     /// The raw reply behind one parameter's assignment. Reads only.
-    AssignmentRaw { block: i64, param: i64 },
+    AssignmentRaw {
+        #[arg(value_parser = non_negative_i64)]
+        block: i64,
+        #[arg(value_parser = non_negative_i64)]
+        param: i64,
+    },
     /// Move one end of a controller's travel. Edit buffer only.
     AssignRange {
+        #[arg(value_parser = non_negative_i64)]
         block: i64,
+        #[arg(value_parser = non_negative_i64)]
         param: i64,
+        #[arg(value_parser = normalised)]
         value: f32,
         #[arg(long)]
         max: bool,
     },
     /// Read a footswitch's configuration, for protocol work. Reads only.
-    Switch { switch: u8 },
+    Switch {
+        #[arg(value_parser = one_based_u8)]
+        switch: u8,
+    },
     /// Put a block's bypass on a footswitch, or take it off. Edit buffer only.
     SwitchAssign {
+        #[arg(value_parser = non_negative_i64)]
         block: i64,
+        #[arg(value_parser = one_based_u8)]
         switch: u8,
         #[arg(long)]
         off: bool,
@@ -272,10 +440,11 @@ enum Cmd {
     /// Color. The colour is an index into HX Edit's own list, which starts
     /// Auto Color, White, Red.
     SwitchSet {
+        #[arg(value_parser = one_based_u8)]
         switch: u8,
         #[arg(long)]
         name: Option<String>,
-        #[arg(long)]
+        #[arg(long, value_parser = non_negative_i64)]
         colour: Option<i64>,
         #[arg(long)]
         momentary: Option<bool>,
@@ -402,7 +571,7 @@ fn on_device(cmd: Cmd) -> Result<()> {
         }
         Cmd::Route { block, to } => route(s, block, &to),
         Cmd::SnapshotName { number, name } => {
-            s.rename_snapshot(number - 1, &name)?;
+            s.rename_snapshot(zero_based(number, "snapshots")?, &name)?;
             println!("snapshot {number} renamed to {name}");
             Ok(())
         }
@@ -597,6 +766,7 @@ fn on_device(cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Switch { switch } => {
+            validate_switch(s, switch)?;
             println!("{:#?}", s.read_switch(switch)?);
             Ok(())
         }
@@ -606,6 +776,7 @@ fn on_device(cmd: Cmd) -> Result<()> {
             colour,
             momentary,
         } => {
+            validate_switch(s, switch)?;
             if let Some(name) = name {
                 // An empty name is not a name; it clears back to what the
                 // switch carries, which is what opcode 60 is for.
@@ -622,6 +793,7 @@ fn on_device(cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::SwitchAssign { block, switch, off } => {
+            validate_switch(s, switch)?;
             if off {
                 s.unassign_bypass_footswitch(block, switch)?;
             } else {
@@ -640,6 +812,17 @@ fn on_device(cmd: Cmd) -> Result<()> {
         Cmd::ExportHxb { bundle, output } => export_hxb(&bundle, &output),
         Cmd::IrInfo { file } => ir_info(&file),
     }
+}
+
+fn validate_switch(session: &hx_usb::Session, switch: u8) -> Result<()> {
+    if switch > session.profile.switches {
+        bail!(
+            "{} has footswitches 1 to {}; {switch} is not one",
+            session.profile.name,
+            session.profile.switches
+        );
+    }
+    Ok(())
 }
 
 fn select(session: &mut hx_usb::Session, setlist: i64, index: &str) -> Result<()> {
@@ -1036,11 +1219,13 @@ fn sanitise(name: &str) -> String {
 
 /// Copy one block over another and write the document back.
 fn copy_block(session: &mut hx_usb::Session, from: usize, to: usize) -> Result<()> {
+    let source = zero_based(from, "block positions")?;
+    let target = zero_based(to, "block positions")?;
     let mut preset = session.read_preset()?;
     let block = preset
-        .copy_slot(from)
-        .with_context(|| format!("no slot {from}"))?;
-    if !preset.paste_slot(to, &block) {
+        .copy_slot(source)
+        .with_context(|| format!("no block at position {from}"))?;
+    if !preset.paste_slot(target, &block) {
         bail!("slot {to} cannot hold a block - inputs, outputs, splits and joins are fixed");
     }
     session.write_preset(&preset)?;
@@ -1052,8 +1237,8 @@ fn copy_block(session: &mut hx_usb::Session, from: usize, to: usize) -> Result<(
 fn copy_snapshot(session: &mut hx_usb::Session, from: usize, to: usize) -> Result<()> {
     let mut preset = session.read_preset()?;
     let count = preset.snapshots().len();
-    let (a, b) = (from.saturating_sub(1), to.saturating_sub(1));
-    if from == 0 || to == 0 || a >= count || b >= count {
+    let (a, b) = (zero_based(from, "snapshots")?, zero_based(to, "snapshots")?);
+    if a >= count || b >= count {
         bail!("snapshots are numbered 1 to {count}");
     }
     let snapshot = preset.copy_snapshot(a).context("copying the snapshot")?;
@@ -1066,6 +1251,35 @@ fn copy_snapshot(session: &mut hx_usb::Session, from: usize, to: usize) -> Resul
 }
 
 /// Write one device setting, matching the type the device already holds.
+fn validate_setting_value(id: i64, value: &hx_proto::msgpack::Value) -> Result<()> {
+    use hx_proto::msgpack::Value;
+
+    let Some(setting) = hx_proto::settings::setting(id) else {
+        return Ok(());
+    };
+    match (&setting.kind, value) {
+        (hx_proto::settings::Kind::Number { min, max, .. }, Value::F32(number))
+            if !(*min..=*max).contains(number) =>
+        {
+            bail!(
+                "{} must be between {min} and {max}; got {number}",
+                setting.name
+            );
+        }
+        (hx_proto::settings::Kind::Choice(choices), Value::Int(index))
+            if !usize::try_from(*index).is_ok_and(|i| i < choices.len()) =>
+        {
+            bail!(
+                "{} is choice 0 to {}; got {index}",
+                setting.name,
+                choices.len().saturating_sub(1)
+            );
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn set_setting(session: &mut hx_usb::Session, id: i64, text: &str) -> Result<()> {
     use hx_proto::msgpack::Value;
     // A value of the wrong type is refused with error -3, so read first and
@@ -1075,16 +1289,23 @@ fn set_setting(session: &mut hx_usb::Session, id: i64, text: &str) -> Result<()>
         (Value::Bool(_), "true" | "on" | "1") => Value::Bool(true),
         (Value::Bool(_), "false" | "off" | "0") => Value::Bool(false),
         (Value::Bool(_), _) => bail!("setting {id} is a switch; use on or off"),
-        (Value::F32(_) | Value::F64(_), _) => Value::F32(
-            text.parse()
-                .with_context(|| format!("{text:?} is not a number"))?,
-        ),
+        (Value::F32(_) | Value::F64(_), _) => {
+            let number: f32 = text
+                .parse()
+                .with_context(|| format!("{text:?} is not a number"))?;
+            if !number.is_finite() {
+                bail!("{text:?} is not a finite number");
+            }
+            Value::F32(number)
+        }
         (Value::Nil, _) => bail!("setting {id} does not exist on this device"),
         _ => Value::Int(
             text.parse()
                 .with_context(|| format!("{text:?} is not a whole number"))?,
         ),
     };
+
+    validate_setting_value(id, &value)?;
     session.set_object(id, value)?;
     println!("{id}: {current:?} -> {:?}", session.object(id)?);
     Ok(())
@@ -1190,6 +1411,9 @@ fn set_param_by_index(
     let native: f32 = value
         .parse()
         .with_context(|| format!("{value:?} is not a number"))?;
+    if !native.is_finite() {
+        bail!("{value:?} is not a finite number");
+    }
     session.set_param(block - 1, index, hx_proto::msgpack::Value::F32(native))?;
     println!("block {block}: parameter {index} = {native}");
     Ok(())
@@ -1741,6 +1965,8 @@ fn parse_hexdumps(text: &str) -> Vec<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn extracts_bytes_from_a_dump_line() {
         let log = "[0] +1.0 ASYNC-OUT ep=0x01 len=20\n\t0000  0c 00 00 28 01 10 ef 03  00 00 00 02 00 01 00 21 |...(...........!|\n\t0010  00 10 00 00                                      |....|\nnext\n";
@@ -1749,5 +1975,60 @@ mod tests {
         assert_eq!(blocks[0].len(), 20);
         let f = hx_proto::Frame::decode(&blocks[0]).unwrap();
         assert_eq!(f.dst, 0x1001);
+    }
+
+    #[test]
+    fn one_based_positions_map_to_the_slots_chain_prints() {
+        assert_eq!(zero_based(1, "blocks").unwrap(), 0);
+        assert_eq!(zero_based(5, "blocks").unwrap(), 4);
+        assert!(zero_based(0, "blocks").is_err());
+    }
+
+    #[test]
+    fn unsafe_numeric_arguments_are_rejected_before_a_device_is_opened() {
+        let invalid: &[&[&str]] = &[
+            &["tonepush", "set", "0", "Gain", "0.5"],
+            &["tonepush", "snapshot-name", "0", "Verse"],
+            &["tonepush", "copy-block", "0", "1"],
+            &["tonepush", "ir-clear", "-1"],
+            &["tonepush", "presets", "--setlist=-1"],
+            &["tonepush", "tempo", "NaN"],
+            &["tonepush", "tempo", "39.9"],
+            &["tonepush", "tempo", "240.1"],
+            &["tonepush", "assign-range", "0", "0", "1.1"],
+            &["tonepush", "assign-param", "0", "0", "10"],
+            &["tonepush", "assign-cc", "0", "0", "128"],
+            &["tonepush", "switch", "0"],
+            &["tonepush", "switch-set", "1", "--colour=-1"],
+        ];
+
+        for args in invalid {
+            assert!(
+                Cli::try_parse_from(*args).is_err(),
+                "unsafe arguments parsed: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn boundary_numeric_arguments_still_parse() {
+        for args in [["tonepush", "tempo", "40"], ["tonepush", "tempo", "240"]] {
+            assert!(Cli::try_parse_from(args).is_ok(), "did not parse: {args:?}");
+        }
+        assert!(Cli::try_parse_from(["tonepush", "assign-range", "0", "0", "0"]).is_ok());
+        assert!(Cli::try_parse_from(["tonepush", "assign-range", "0", "0", "1"]).is_ok());
+    }
+
+    #[test]
+    fn known_global_settings_enforce_their_declared_ranges() {
+        use hx_proto::msgpack::Value;
+
+        assert!(validate_setting_value(16, &Value::F32(40.0)).is_ok());
+        assert!(validate_setting_value(16, &Value::F32(240.0)).is_ok());
+        assert!(validate_setting_value(16, &Value::F32(39.9)).is_err());
+        assert!(validate_setting_value(16, &Value::F32(240.1)).is_err());
+        assert!(validate_setting_value(97, &Value::Int(0)).is_ok());
+        assert!(validate_setting_value(97, &Value::Int(11)).is_ok());
+        assert!(validate_setting_value(97, &Value::Int(12)).is_err());
     }
 }

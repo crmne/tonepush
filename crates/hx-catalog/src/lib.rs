@@ -97,6 +97,18 @@ pub struct Param {
     pub display: Option<String>,
 }
 
+impl Param {
+    /// Whether a native value is safe to send for this parameter.
+    ///
+    /// External tone files carry bare floats and can therefore contain values
+    /// that HX Edit would never let a person choose. Some HX hardware accepts
+    /// those values and stops passing audio, so every route from a file to the
+    /// device uses this same check.
+    pub fn accepts(&self, value: f32) -> bool {
+        value.is_finite() && value >= self.min && value <= self.max
+    }
+}
+
 /// What sort of value a parameter holds.
 ///
 /// Mirrors the catalog's `valueType`, which is an integer we would otherwise be
@@ -493,22 +505,26 @@ impl Catalog {
         let entry = param.display.as_deref().and_then(|k| self.displays.get(k));
 
         if let Some(index) = entry.and_then(|d| d.label_index(text, self)) {
-            return Some(index);
+            return param.accepts(index).then_some(index);
         }
         if param.kind == Kind::Switch {
-            return match text.to_ascii_lowercase().as_str() {
+            let value = match text.to_ascii_lowercase().as_str() {
                 "on" | "true" | "1" => Some(1.0),
                 "off" | "false" | "0" => Some(0.0),
                 _ => None,
-            };
+            }?;
+            return param.accepts(value).then_some(value);
         }
 
-        let typed: f32 = text
-            .trim()
-            .trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
-            .parse()
-            .ok()?;
-        Some(entry.map_or(typed, |d| d.to_native(typed, self)))
+        let text = text.trim();
+        let number_end = text
+            .char_indices()
+            .find(|(_, c)| !matches!(c, '0'..='9' | '.' | '-' | '+' | 'e' | 'E'))
+            .map_or(text.len(), |(i, _)| i);
+        let typed: f32 = text[..number_end].parse().ok()?;
+        let unit = text[number_end..].trim();
+        let native = entry.map_or(typed, |d| d.to_native(typed, unit, self));
+        param.accepts(native).then_some(native)
     }
 
     /// The list a parameter is chosen from, when it is a menu rather than a
@@ -634,6 +650,43 @@ pub(crate) mod tests {
         assert_eq!(c.parse(ty, "Limit"), Some(1.0));
         assert_eq!(c.parse(ty, "Compress"), Some(0.0));
         assert_eq!(c.parse(ty, "on"), Some(1.0));
+    }
+
+    #[test]
+    fn parse_understands_kilohertz_and_rejects_values_outside_the_parameter_range() {
+        let frequency: Display = serde_json::from_str(
+            r#"{
+                "format": [
+                    { "lowerBound": 20, "upperBound": 1000,
+                      "formatUnits": "%.0f Hz" },
+                    { "lowerBound": 1000, "upperBound": 999999,
+                      "formatUnits": "%.1f kHz", "unitsMultiplier": 0.001 }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let catalog = Catalog {
+            models: HashMap::new(),
+            categories: Vec::new(),
+            displays: HashMap::from([("frequency".to_owned(), frequency)]),
+            symbols: Vec::new(),
+            resources: PathBuf::new(),
+        };
+        let mid_frequency = Param {
+            id: "MidFreq".to_owned(),
+            name: "Mid Freq".to_owned(),
+            kind: Kind::Continuous,
+            min: 125.0,
+            max: 4000.0,
+            default: 600.0,
+            display: Some("frequency".to_owned()),
+        };
+
+        assert_eq!(catalog.parse(&mid_frequency, "1.2 kHz"), Some(1200.0));
+        assert_eq!(catalog.parse(&mid_frequency, "1.2 KHz"), Some(1200.0));
+        assert_eq!(catalog.parse(&mid_frequency, "4000 Hz"), Some(4000.0));
+        assert_eq!(catalog.parse(&mid_frequency, "1.2 Hz"), None);
+        assert_eq!(catalog.parse(&mid_frequency, "4.1 kHz"), None);
     }
 
     #[test]

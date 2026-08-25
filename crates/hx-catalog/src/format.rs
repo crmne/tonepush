@@ -84,14 +84,27 @@ impl Display {
     /// Turn a value the user typed back into the units the device wants.
     ///
     /// The exact inverse of [`render`](Self::render) for the common cases:
-    /// undo the scale and offset, or match a menu label. Ranged formats are
-    /// not inverted - they are rare and not uniquely invertible - so they fall
-    /// back to the plain scale.
-    pub(crate) fn to_native(&self, shown: f32, catalog: &Catalog) -> f32 {
+    /// undo the scale and offset, or match a menu label. A ranged format's unit
+    /// identifies its multiplier: `1.2 kHz`, for example, reverses the
+    /// frequency range's `0.001` multiplier and becomes `1200`.
+    pub(crate) fn to_native(&self, shown: f32, unit: &str, catalog: &Catalog) -> f32 {
         if let Some(target) = self.alias.as_deref().and_then(|a| catalog.display(a)) {
-            return target.to_native(shown, catalog);
+            return target.to_native(shown, unit, catalog);
         }
-        (shown - self.offset.unwrap_or(0.0)) / self.scale.unwrap_or(1.0)
+        let scaled = if unit.is_empty() {
+            shown
+        } else {
+            match &self.format {
+                Some(Pattern::Ranges(ranges)) => ranges
+                    .iter()
+                    .find(|range| range.has_unit(unit))
+                    .and_then(|range| range.multiplier)
+                    .filter(|multiplier| *multiplier != 0.0)
+                    .map_or(shown, |multiplier| shown / multiplier),
+                _ => shown,
+            }
+        };
+        (scaled - self.offset.unwrap_or(0.0)) / self.scale.unwrap_or(1.0)
     }
 
     /// The index of a menu label, for parameters displayed as a word.
@@ -106,6 +119,21 @@ impl Display {
                 .map(|i| i as f32),
             _ => None,
         }
+    }
+}
+
+impl Range {
+    fn has_unit(&self, wanted: &str) -> bool {
+        self.format_units
+            .as_deref()
+            .or(self.format.as_deref())
+            .and_then(|pattern| {
+                let percent = pattern.find('%')?;
+                let rest = &pattern[percent + 1..];
+                let conversion = rest.find(['f', 'd'])?;
+                Some(rest[conversion + 1..].trim())
+            })
+            .is_some_and(|unit| unit.eq_ignore_ascii_case(wanted))
     }
 }
 
