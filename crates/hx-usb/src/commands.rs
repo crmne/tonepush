@@ -291,18 +291,7 @@ impl Session {
     /// a local file.
     pub fn favourites(&mut self) -> Result<Vec<(i64, String)>> {
         let result = self.request(ChannelId::DATA, rpc::op::LIST_FAVOURITES, Value::Nil)?;
-        let Value::Array(entries) = result else {
-            return Ok(Vec::new());
-        };
-        Ok(entries
-            .iter()
-            .filter_map(|e| {
-                Some((
-                    e.get(rpc::key::OBJECT_ID)?.as_i64()?,
-                    e.get(rpc::key::NAME)?.as_str()?.to_owned(),
-                ))
-            })
-            .collect())
+        decode_favourites(result)
     }
 
     /// Keep a block as a favourite, under a name.
@@ -1202,6 +1191,40 @@ fn decode_ir_samples(bytes: &[u8]) -> Result<Vec<f32>> {
     Ok(samples)
 }
 
+fn decode_favourites(value: Value) -> Result<Vec<(i64, String)>> {
+    let Value::Array(entries) = value else {
+        return Err(Error::Protocol(
+            "the device returned an invalid favourite list".into(),
+        ));
+    };
+    let mut seen = BTreeSet::new();
+    entries
+        .into_iter()
+        .enumerate()
+        .map(|(position, entry)| {
+            let index = entry
+                .get(rpc::key::OBJECT_ID)
+                .and_then(Value::as_i64)
+                .filter(|index| (0..16).contains(index))
+                .ok_or_else(|| {
+                    Error::Protocol(format!("favourite entry {position} has no valid slot"))
+                })?;
+            let name = entry
+                .get(rpc::key::NAME)
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    Error::Protocol(format!("favourite entry {position} has no name"))
+                })?;
+            if !seen.insert(index) {
+                return Err(Error::Protocol(format!(
+                    "favourite entry {position} repeats slot {index}"
+                )));
+            }
+            Ok((index, name.to_owned()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod validation_tests {
     use super::*;
@@ -1235,5 +1258,20 @@ mod validation_tests {
         assert!(decode_ir_samples(&[0, 1, 2]).is_err());
         assert!(decode_ir_samples(&f32::NAN.to_le_bytes()).is_err());
         assert!(decode_ir_samples(&[]).is_err());
+    }
+
+    #[test]
+    fn malformed_device_favourites_are_not_silently_dropped() {
+        let valid = Value::Array(vec![hx_proto::msgmap! {
+            rpc::key::OBJECT_ID => Value::Int(3),
+            rpc::key::NAME => Value::Str("Lead".into()),
+        }]);
+        assert_eq!(decode_favourites(valid).unwrap(), vec![(3, "Lead".into())]);
+
+        let missing_name = Value::Array(vec![hx_proto::msgmap! {
+            rpc::key::OBJECT_ID => Value::Int(3),
+        }]);
+        assert!(decode_favourites(missing_name).is_err());
+        assert!(decode_favourites(Value::Nil).is_err());
     }
 }
