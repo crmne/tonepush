@@ -14,7 +14,7 @@ pub const FLAG_HANDSHAKE: u8 = 0x28;
 /// 3     flags
 /// 4..6  destination node, u16 LE
 /// 6..8  source node, u16 LE
-/// 8..   payload, zero-padded to a 4-byte boundary
+/// 8..   payload, padded to a 4-byte boundary
 /// ```
 #[derive(Clone, PartialEq, Eq)]
 pub struct Frame {
@@ -22,6 +22,10 @@ pub struct Frame {
     pub dst: u16,
     pub src: u16,
     pub payload: Vec<u8>,
+    /// Bytes after the declared payload up to the transfer boundary. Host
+    /// frames use zeroes; real device frames sometimes expose opaque non-zero
+    /// bytes here, so a faithful decode/encode must retain them.
+    pub padding: Vec<u8>,
 }
 
 impl fmt::Debug for Frame {
@@ -43,6 +47,8 @@ pub enum FrameError {
     TooShort(usize),
     /// The declared payload length does not fit the transfer.
     LengthMismatch { declared: usize, available: usize },
+    /// The transfer has bytes beyond the one padded frame it declares.
+    TransferLength { expected: usize, actual: usize },
 }
 
 impl fmt::Display for FrameError {
@@ -56,6 +62,10 @@ impl fmt::Display for FrameError {
                 f,
                 "frame declares {declared} payload bytes but {available} are present"
             ),
+            FrameError::TransferLength { expected, actual } => write!(
+                f,
+                "one padded frame should occupy {expected} bytes, but the transfer has {actual}"
+            ),
         }
     }
 }
@@ -68,11 +78,13 @@ fn pad4(n: usize) -> usize {
 
 impl Frame {
     pub fn new(dst: u16, src: u16, payload: Vec<u8>) -> Self {
+        let padding = vec![0; pad4(8 + payload.len()) - (8 + payload.len())];
         Frame {
             flags: FLAG_DATA,
             dst,
             src,
             payload,
+            padding,
         }
     }
 
@@ -87,11 +99,20 @@ impl Frame {
                 available: buf.len() - 8,
             });
         }
+        let frame_end = 8 + len;
+        let expected = pad4(frame_end);
+        if buf.len() != expected {
+            return Err(FrameError::TransferLength {
+                expected,
+                actual: buf.len(),
+            });
+        }
         Ok(Frame {
             flags: buf[3],
             dst: u16::from_le_bytes([buf[4], buf[5]]),
             src: u16::from_le_bytes([buf[6], buf[7]]),
-            payload: buf[8..8 + len].to_vec(),
+            payload: buf[8..frame_end].to_vec(),
+            padding: buf[frame_end..].to_vec(),
         })
     }
 
@@ -103,7 +124,12 @@ impl Frame {
         out.extend_from_slice(&self.dst.to_le_bytes());
         out.extend_from_slice(&self.src.to_le_bytes());
         out.extend_from_slice(&self.payload);
-        out.resize(pad4(8 + len), 0);
+        let padding = pad4(8 + len) - (8 + len);
+        if self.padding.len() == padding {
+            out.extend_from_slice(&self.padding);
+        } else {
+            out.resize(out.len() + padding, 0);
+        }
         out
     }
 
@@ -276,5 +302,19 @@ mod tests {
                 available: 4
             })
         ));
+    }
+
+    #[test]
+    fn rejects_trailing_frames_and_preserves_opaque_padding() {
+        let mut trailing = HELLO.to_vec();
+        trailing.extend_from_slice(&[0; 4]);
+        assert!(matches!(
+            Frame::decode(&trailing),
+            Err(FrameError::TransferLength { .. })
+        ));
+
+        let mut padded = PADDED.to_vec();
+        *padded.last_mut().unwrap() = 1;
+        assert_eq!(Frame::decode(&padded).unwrap().encode(), padded);
     }
 }
