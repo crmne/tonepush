@@ -635,18 +635,19 @@ impl Session {
             let before = self.rx_bytes(id);
             self.read_available(Self::REPLY_READ)?;
             let got = self.rx_bytes(id) != before;
-            let done = self
+            let messages = self
                 .channels
                 .get_mut(&ChannelId::EVENTS.device)
                 .map(|ch| ch.reader.take_messages())
                 .transpose()
                 .map_err(|error| Error::Protocol(error.to_string()))?
-                .unwrap_or_default()
-                .into_iter()
-                .any(|sm| match Message::from_value(sm.body) {
-                    Message::Notification { args, .. } => completion_matches(&args, txn),
-                    _ => false,
-                });
+                .unwrap_or_default();
+            let mut done = false;
+            for sm in messages {
+                if let Message::Notification { args, .. } = decode_message(sm.body)? {
+                    done |= completion_matches(&args, txn);
+                }
+            }
             if got {
                 self.ack_channel(id)?;
             }
@@ -775,7 +776,7 @@ impl Session {
                     txn: t,
                     status,
                     result,
-                } = Message::from_value(sm.body)
+                } = decode_message(sm.body)?
                 {
                     if t == txn {
                         // Key 103 is not a plain error code. A successful
@@ -1142,6 +1143,11 @@ fn debug() -> bool {
 fn completion_matches(args: &Value, txn: i64) -> bool {
     args.get(rpc::key::TXN).and_then(Value::as_i64) == Some(txn)
         && args.get(rpc::key::STATUS).and_then(Value::as_i64) == Some(0)
+}
+
+fn decode_message(value: Value) -> Result<Message> {
+    Message::try_from_value(value)
+        .map_err(|error| Error::Protocol(format!("malformed RPC message: {error}")))
 }
 
 fn hex(b: &[u8]) -> String {

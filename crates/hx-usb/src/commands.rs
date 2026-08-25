@@ -13,7 +13,7 @@ use hx_proto::msgpack::Value;
 use hx_proto::rpc::Message;
 use hx_proto::{rpc, ChannelId, DeviceProfile, Preset};
 
-use crate::{checksum, Error, Result, Session};
+use crate::{checksum, decode_message, Error, Result, Session};
 
 fn non_negative(value: i64, name: &str) -> Result<()> {
     if value < 0 {
@@ -1161,7 +1161,8 @@ impl Session {
                 .take_messages()
                 .map_err(|error| Error::Protocol(error.to_string()))?
             {
-                if let Message::Notification { event, args } = Message::from_value(sm.body) {
+                let message = decode_message(sm.body)?;
+                if let Message::Notification { event, args } = message {
                     out.push((event, args));
                 }
             }

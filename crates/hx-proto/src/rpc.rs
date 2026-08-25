@@ -316,25 +316,40 @@ pub enum Message {
 }
 
 impl Message {
-    pub fn from_value(v: Value) -> Message {
+    /// Decode a recognised RPC shape, rejecting fields whose wire types are
+    /// impossible for that shape. Unknown maps remain [`Message::Other`]; a
+    /// response-shaped map with a string transaction id is malformed instead
+    /// of being quietly rewritten as transaction zero.
+    pub fn try_from_value(v: Value) -> Result<Message, &'static str> {
         let get = |k: i64| v.get(k).cloned().unwrap_or(Value::Nil);
-        match (v.get(key::TXN), v.get(key::EVENT)) {
+        Ok(match (v.get(key::TXN), v.get(key::EVENT)) {
             (Some(t), _) if v.get(key::OPCODE).is_some() => Message::Request {
-                txn: t.as_i64().unwrap_or(0),
-                opcode: get(key::OPCODE).as_i64().unwrap_or(-1),
+                txn: t.as_i64().ok_or("RPC transaction id is not an integer")?,
+                opcode: get(key::OPCODE)
+                    .as_i64()
+                    .ok_or("RPC opcode is not an integer")?,
                 args: get(key::ARGS),
             },
             (Some(t), _) if v.get(key::STATUS).is_some() => Message::Response {
-                txn: t.as_i64().unwrap_or(0),
-                status: get(key::STATUS).as_i64().unwrap_or(-1),
+                txn: t.as_i64().ok_or("RPC transaction id is not an integer")?,
+                status: get(key::STATUS)
+                    .as_i64()
+                    .ok_or("RPC status is not an integer")?,
                 result: get(key::RESULT),
             },
             (None, Some(e)) => Message::Notification {
-                event: e.as_i64().unwrap_or(-1),
+                event: e.as_i64().ok_or("RPC event id is not an integer")?,
                 args: get(key::EVENT_ARGS),
             },
             _ => Message::Other(v),
-        }
+        })
+    }
+
+    /// Lenient classification for diagnostics and protocol inspection.
+    /// Transport code should use [`Self::try_from_value`] so malformed replies
+    /// do not turn into timeouts or synthetic transaction ids.
+    pub fn from_value(v: Value) -> Message {
+        Self::try_from_value(v.clone()).unwrap_or(Message::Other(v))
     }
 
     /// Field order matches HX Edit's own - transaction id first - so encoded
@@ -638,6 +653,26 @@ mod tests {
             }
             other => panic!("expected a request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn malformed_recognised_messages_do_not_invent_identifiers() {
+        let bad_response = crate::msgmap! {
+            key::TXN => Value::Str("1000".into()),
+            key::STATUS => Value::Int(0),
+            key::RESULT => Value::Nil,
+        };
+        assert!(Message::try_from_value(bad_response.clone()).is_err());
+        assert!(matches!(
+            Message::from_value(bad_response),
+            Message::Other(_)
+        ));
+
+        let bad_event = crate::msgmap! {
+            key::EVENT => Value::Bool(true),
+            key::EVENT_ARGS => Value::Nil,
+        };
+        assert!(Message::try_from_value(bad_event).is_err());
     }
 
     #[test]
