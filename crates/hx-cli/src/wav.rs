@@ -19,12 +19,22 @@ pub fn read(path: &Path) -> Result<Wav> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         bail!("{path:?} is not a WAV file");
     }
+    let declared = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    if usize::try_from(declared).ok() != Some(bytes.len() - 8) {
+        bail!(
+            "WAV declares {declared} bytes after its RIFF header, but {} are present",
+            bytes.len() - 8
+        );
+    }
 
     let mut format = None;
     let mut samples = None;
     let mut pos = 12;
 
-    while pos + 8 <= bytes.len() {
+    while pos < bytes.len() {
+        if bytes.len() - pos < 8 {
+            bail!("WAV ends partway through a chunk header");
+        }
         let id = &bytes[pos..pos + 4];
         let len = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
         let body_start = pos + 8;
@@ -41,14 +51,31 @@ pub fn read(path: &Path) -> Result<Wav> {
         let body = &bytes[body_start..body_end];
 
         match id {
-            b"fmt " if body.len() >= 16 => format = Some(Format::parse(body)),
-            b"data" => samples = Some(body.to_vec()),
+            b"fmt " => {
+                if format.is_some() {
+                    bail!("WAV has more than one fmt chunk");
+                }
+                if body.len() < 16 {
+                    bail!("WAV fmt chunk is truncated");
+                }
+                format = Some(Format::parse(body));
+            }
+            b"data" => {
+                if samples.is_some() {
+                    bail!("WAV has more than one data chunk");
+                }
+                samples = Some(body.to_vec());
+            }
             _ => {}
         }
         // Chunks are word-aligned, and an odd length is padded.
-        pos = body_end
+        let padded_end = body_end
             .checked_add(len & 1)
             .context("WAV chunk padding overflow")?;
+        if padded_end > bytes.len() {
+            bail!("WAV chunk padding is truncated");
+        }
+        pos = padded_end;
     }
 
     let format = format.context("WAV has no fmt chunk")?;
@@ -196,11 +223,27 @@ mod tests {
     fn rejects_a_data_chunk_that_ends_mid_sample() {
         let mut bytes = wav_16bit(&[1]);
         bytes.pop();
+        bytes.push(0); // valid word padding after the one declared data byte
         let riff_len = (bytes.len() - 8) as u32;
         bytes[4..8].copy_from_slice(&riff_len.to_le_bytes());
         bytes[40..44].copy_from_slice(&1u32.to_le_bytes());
         let path = write_temp(&bytes, "hx-test-partial-sample.wav");
         let error = read(&path).unwrap_err().to_string();
         assert!(error.contains("partway"), "{error}");
+    }
+
+    #[test]
+    fn rejects_trailing_bytes_and_a_false_riff_size() {
+        let mut trailing = wav_16bit(&[1]);
+        trailing.push(0);
+        let riff_len = (trailing.len() - 8) as u32;
+        trailing[4..8].copy_from_slice(&riff_len.to_le_bytes());
+        let path = write_temp(&trailing, "hx-test-partial-header.wav");
+        assert!(read(&path).unwrap_err().to_string().contains("header"));
+
+        let mut wrong_riff_size = wav_16bit(&[1]);
+        wrong_riff_size[4..8].copy_from_slice(&12u32.to_le_bytes());
+        let path = write_temp(&wrong_riff_size, "hx-test-wrong-riff-size.wav");
+        assert!(read(&path).unwrap_err().to_string().contains("declares"));
     }
 }
