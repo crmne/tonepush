@@ -79,19 +79,27 @@ impl Backup {
 /// Read an `.hxb` bundle into its presets, touching no hardware.
 pub fn read_backup(bytes: &[u8]) -> Result<Backup, Error> {
     let container = Container::parse(bytes)?;
-    let setlist = container
+    if container.version != 1 {
+        return Err(Error::Backup(format!(
+            "unsupported AF6L backup version {}",
+            container.version
+        )));
+    }
+    let block = container
         .blocks
         .iter()
-        .filter_map(|b| b.decompress().ok())
-        .filter_map(|raw| serde_json::from_slice::<Value>(&raw).ok())
-        .find(|json| {
-            json.pointer("/data/presets")
-                .and_then(Value::as_array)
-                .is_some()
-        })
+        .find(|block| is_setlist_tag(&block.tag))
         .ok_or_else(|| Error::Backup("no setlist block found in this .hxb".into()))?;
+    let raw = block.decompress()?;
+    let setlist: Value = serde_json::from_slice(&raw)
+        .map_err(|error| Error::Backup(format!("the backup's setlist is not JSON: {error}")))?;
 
     presets_from(&setlist)
+}
+
+fn is_setlist_tag(tag: &[u8; 4]) -> bool {
+    (tag[0..2] == *b"SL" && tag[2..].iter().all(u8::is_ascii_digit))
+        || (tag[2..] == *b"LS" && tag[..2].iter().all(u8::is_ascii_digit))
 }
 
 /// Lift the presets out of a `{data: {meta, presets}}` document, which is what a
@@ -112,30 +120,43 @@ fn presets_from(setlist: &Value) -> Result<Backup, Error> {
     let presets = raw
         .iter()
         .enumerate()
-        .map(|(index, preset)| {
+        .map(|(index, preset)| -> Result<BackupPreset, Error> {
+            let preset = preset
+                .as_object()
+                .ok_or_else(|| Error::Backup(format!("preset slot {index} is not an object")))?;
             let meta = preset.get("meta");
-            let name = meta
-                .and_then(|m| m.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned();
+            let name = match meta {
+                None => String::new(),
+                Some(meta) => meta
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        Error::Backup(format!("preset slot {index} has invalid metadata"))
+                    })?
+                    .to_owned(),
+            };
             let tone = preset.get("tone").cloned().unwrap_or(Value::Null);
             // A slot is worth keeping only if it names a tone someone made.
             let empty = meta.is_none() || name.is_empty() || name == "New Preset";
+            if !empty && !tone.is_object() {
+                return Err(Error::Backup(format!(
+                    "named preset slot {index} holds no tone"
+                )));
+            }
             let hlx = json!({
                 "data": {
                     "meta": meta.cloned().unwrap_or_else(|| json!({ "name": name })),
                     "tone": tone,
                 }
             });
-            BackupPreset {
+            Ok(BackupPreset {
                 index,
                 name,
                 hlx,
                 empty,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Backup { name, presets })
 }
@@ -168,12 +189,34 @@ impl Block {
     /// The block's content, inflating it if it was stored compressed.
     pub fn decompress(&self) -> Result<Vec<u8>, Error> {
         if !self.compressed {
+            if self.raw_len != self.stored.len() as u64 {
+                return Err(Error::Backup(format!(
+                    "a backup block is {} bytes where its table says {}",
+                    self.stored.len(),
+                    self.raw_len
+                )));
+            }
             return Ok(self.stored.clone());
+        }
+        const MAX_BLOCK_LEN: u64 = 64 * 1024 * 1024;
+        if self.raw_len > MAX_BLOCK_LEN {
+            return Err(Error::Backup(format!(
+                "a backup block declares {} decompressed bytes, above the {MAX_BLOCK_LEN}-byte safety limit",
+                self.raw_len
+            )));
         }
         let mut out = Vec::new();
         flate2::read::ZlibDecoder::new(&self.stored[..])
+            .take(self.raw_len.saturating_add(1))
             .read_to_end(&mut out)
             .map_err(|e| Error::Backup(format!("a backup block would not inflate: {e}")))?;
+        if out.len() as u64 != self.raw_len {
+            return Err(Error::Backup(format!(
+                "a backup block inflated to {} bytes where its table says {}",
+                out.len(),
+                self.raw_len
+            )));
+        }
         Ok(out)
     }
 }
@@ -197,10 +240,15 @@ impl Container {
             return Err(Error::Backup("not an AF6L backup bundle".into()));
         }
         let version = u32le(bytes, 4);
-        let table_off = u64le(bytes, 8) as usize;
-        let count = u64le(bytes, 16) as usize;
+        let table_off = usize::try_from(u64le(bytes, 8))
+            .map_err(|_| Error::Backup("backup block table offset is too large".into()))?;
+        let count = usize::try_from(u64le(bytes, 16))
+            .map_err(|_| Error::Backup("backup block count is too large".into()))?;
 
-        if table_off > bytes.len() || table_off + count * ENTRY_LEN > bytes.len() {
+        let table_end = count
+            .checked_mul(ENTRY_LEN)
+            .and_then(|len| table_off.checked_add(len));
+        if table_end.is_none_or(|end| end > bytes.len()) {
             return Err(Error::Backup(
                 "backup block table runs past the file".into(),
             ));
@@ -209,18 +257,29 @@ impl Container {
         for i in 0..count {
             let e = table_off + i * ENTRY_LEN;
             let tag = [bytes[e], bytes[e + 1], bytes[e + 2], bytes[e + 3]];
-            let off = u64le(bytes, e + 4) as usize;
-            let stored_len = u64le(bytes, e + 12) as usize;
+            let off = usize::try_from(u64le(bytes, e + 4))
+                .map_err(|_| Error::Backup("backup block offset is too large".into()))?;
+            let stored_len = usize::try_from(u64le(bytes, e + 12))
+                .map_err(|_| Error::Backup("backup block length is too large".into()))?;
             let flags = u32le(bytes, e + 20);
             let raw_len = u64le(bytes, e + 24);
-            if off + stored_len > bytes.len() {
+            let reserved = u32le(bytes, e + 32);
+            if flags > 1 || reserved != 0 {
+                return Err(Error::Backup(
+                    "a backup block has unsupported table flags".into(),
+                ));
+            }
+            let Some(end) = off.checked_add(stored_len) else {
+                return Err(Error::Backup("a backup block runs past the file".into()));
+            };
+            if end > bytes.len() {
                 return Err(Error::Backup("a backup block runs past the file".into()));
             }
             blocks.push(Block {
                 tag,
                 compressed: flags == 1,
                 raw_len,
-                stored: bytes[off..off + stored_len].to_vec(),
+                stored: bytes[off..end].to_vec(),
             });
         }
         Ok(Container { version, blocks })
@@ -364,6 +423,84 @@ mod tests {
         assert!(read_backup(&bundle(&json!({ "data": { "nope": 1 } }))).is_err());
     }
 
+    #[test]
+    fn corrupt_setlist_blocks_and_preset_records_are_reported() {
+        let broken = Container {
+            version: 1,
+            blocks: vec![Block {
+                tag: *b"SL00",
+                compressed: true,
+                raw_len: 20,
+                stored: b"not zlib".to_vec(),
+            }],
+        }
+        .encode();
+        let error = read_backup(&broken)
+            .err()
+            .expect("corrupt block")
+            .to_string();
+        assert!(error.contains("inflate"), "{error}");
+
+        let named_without_tone = json!({
+            "data": { "presets": [{ "meta": { "name": "Looks occupied" } }] }
+        });
+        let error = read_backup(&bundle(&named_without_tone))
+            .err()
+            .expect("missing tone")
+            .to_string();
+        assert!(error.contains("holds no tone"), "{error}");
+
+        let mut future = bundle(&json!({ "data": { "presets": [] } }));
+        future[4..8].copy_from_slice(&2u32.to_le_bytes());
+        assert!(read_backup(&future)
+            .err()
+            .expect("future version")
+            .to_string()
+            .contains("unsupported"));
+    }
+
+    #[test]
+    fn malformed_table_arithmetic_is_an_error_not_a_panic() {
+        let mut header = vec![0; HEADER_LEN];
+        header[0..4].copy_from_slice(MAGIC);
+        header[8..16].copy_from_slice(&(HEADER_LEN as u64).to_le_bytes());
+        header[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(Container::parse(&header).is_err());
+
+        let mut table = vec![0; HEADER_LEN + ENTRY_LEN];
+        table[0..4].copy_from_slice(MAGIC);
+        table[8..16].copy_from_slice(&(HEADER_LEN as u64).to_le_bytes());
+        table[16..24].copy_from_slice(&1u64.to_le_bytes());
+        table[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(b"TEST");
+        table[HEADER_LEN + 4..HEADER_LEN + 12].copy_from_slice(&u64::MAX.to_le_bytes());
+        table[HEADER_LEN + 12..HEADER_LEN + 20].copy_from_slice(&2u64.to_le_bytes());
+        assert!(Container::parse(&table).is_err());
+
+        table[HEADER_LEN + 4..HEADER_LEN + 20].fill(0);
+        table[HEADER_LEN + 20..HEADER_LEN + 24].copy_from_slice(&2u32.to_le_bytes());
+        assert!(Container::parse(&table).is_err(), "unknown flags");
+    }
+
+    #[test]
+    fn a_blocks_declared_size_is_checked_after_inflation() {
+        let (stored, raw_len) = deflate(&json!({ "tone": "clean" }));
+        let compressed = Block {
+            tag: *b"TEST",
+            compressed: true,
+            raw_len: raw_len + 1,
+            stored,
+        };
+        assert!(compressed.decompress().is_err());
+
+        let plain = Block {
+            tag: *b"TEST",
+            compressed: false,
+            raw_len: 2,
+            stored: vec![0],
+        };
+        assert!(plain.decompress().is_err());
+    }
+
     /// Byte-exact round trip against real HX Stomp backups, when they are on
     /// this machine. Ignored by default - it needs Carmine's backup folder - and
     /// run with `--ignored` to prove the writer against genuine `.hxb` files.
@@ -420,15 +557,28 @@ pub fn read_setlist_file(bytes: &[u8]) -> Result<Backup, Error> {
 
     let compressed = base64(encoded)
         .ok_or_else(|| Error::Backup("the setlist file's payload is not base64".into()))?;
+    const MAX_SETLIST_LEN: u64 = 64 * 1024 * 1024;
+    let declared = wrapper
+        .pointer("/compression/decompressed_size")
+        .and_then(Value::as_u64);
+    let limit = declared.unwrap_or(MAX_SETLIST_LEN);
+    if limit > MAX_SETLIST_LEN {
+        return Err(Error::Backup(format!(
+            "the setlist file declares {limit} decompressed bytes, above the {MAX_SETLIST_LEN}-byte safety limit"
+        )));
+    }
     let mut raw = Vec::new();
     flate2::read::ZlibDecoder::new(&compressed[..])
+        .take(limit.saturating_add(1))
         .read_to_end(&mut raw)
         .map_err(|e| Error::Backup(format!("the setlist file would not inflate: {e}")))?;
+    if raw.len() as u64 > limit {
+        return Err(Error::Backup(
+            "the setlist file expands beyond its safe declared size".into(),
+        ));
+    }
 
-    if let Some(expected) = wrapper
-        .pointer("/compression/decompressed_size")
-        .and_then(Value::as_u64)
-    {
+    if let Some(expected) = declared {
         if expected != raw.len() as u64 {
             return Err(Error::Backup(format!(
                 "the setlist file is {} bytes where it says {expected}; it is truncated",
@@ -440,8 +590,10 @@ pub fn read_setlist_file(bytes: &[u8]) -> Result<Backup, Error> {
         .pointer("/compression/crc32")
         .and_then(Value::as_u64)
     {
+        let expected = u32::try_from(expected)
+            .map_err(|_| Error::Backup("the setlist file's checksum is out of range".into()))?;
         let got = crc32(&raw);
-        if expected as u32 != got {
+        if expected != got {
             return Err(Error::Backup(
                 "the setlist file's checksum does not match its contents".into(),
             ));
@@ -496,21 +648,42 @@ pub fn read_favourite_file(bytes: &[u8]) -> Result<Favourite, Error> {
 /// its payload in.
 fn base64(text: &str) -> Option<Vec<u8>> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::with_capacity(text.len() / 4 * 3);
-    let (mut acc, mut bits) = (0u32, 0u32);
-    for byte in text.bytes() {
-        if byte == b'=' {
-            break;
-        }
-        if byte.is_ascii_whitespace() {
-            continue;
-        }
-        let value = ALPHABET.iter().position(|c| *c == byte)? as u32;
-        acc = (acc << 6) | value;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
+    let compact: Vec<u8> = text
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    if !compact.len().is_multiple_of(4) {
+        return None;
+    }
+    let value = |byte| {
+        ALPHABET
+            .iter()
+            .position(|candidate| *candidate == byte)
+            .map(|n| n as u8)
+    };
+    let mut out = Vec::with_capacity(compact.len() / 4 * 3);
+    let chunks = compact.len() / 4;
+    for (index, chunk) in compact.chunks_exact(4).enumerate() {
+        let (a, b) = (value(chunk[0])?, value(chunk[1])?);
+        let last = index + 1 == chunks;
+        match (chunk[2], chunk[3]) {
+            (b'=', b'=') if last && b & 0x0f == 0 => {
+                out.push((a << 2) | (b >> 4));
+            }
+            (c, b'=') if last => {
+                let c = value(c)?;
+                if c & 0x03 != 0 {
+                    return None;
+                }
+                out.push((a << 2) | (b >> 4));
+                out.push((b << 4) | (c >> 2));
+            }
+            (c, d) => {
+                let (c, d) = (value(c)?, value(d)?);
+                out.push((a << 2) | (b >> 4));
+                out.push((b << 4) | (c >> 2));
+                out.push((c << 6) | d);
+            }
         }
     }
     Some(out)
@@ -597,6 +770,9 @@ mod editor_file_tests {
         assert_eq!(base64("aGVsbG8=").unwrap(), b"hello");
         // Whitespace is ignored, the way a pretty-printed payload carries it.
         assert_eq!(base64("aGVs\n bG8=").unwrap(), b"hello");
+        for malformed in ["a", "a===", "aGV=sbG8", "aGVsbG8=garbage", "ab=="] {
+            assert!(base64(malformed).is_none(), "accepted {malformed:?}");
+        }
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926, "the standard check value");
     }
 }
