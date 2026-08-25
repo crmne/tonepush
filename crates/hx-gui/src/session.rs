@@ -1189,24 +1189,37 @@ impl Worker {
 
     /// Move one step back or forward through the document history.
     fn step_history(&mut self, back: bool) {
-        let (from, to) = if back {
-            (&mut self.history, &mut self.future)
+        let document = if back {
+            self.history.last()
         } else {
-            (&mut self.future, &mut self.history)
-        };
-        let Some(document) = from.pop() else {
+            self.future.last()
+        }
+        .cloned();
+        let Some(document) = document else {
             let what = if back { "undo" } else { "redo" };
             return self.send(Evt::Activity(format!("nothing to {what}")));
         };
         let Some(preset) = hx_proto::Preset::parse(&document) else {
+            if back {
+                self.history.pop();
+            } else {
+                self.future.pop();
+            }
+            self.report_history();
             return self.send(Evt::Failed("the history is corrupt".into()));
         };
         // Keep the current state on the other stack so the step is reversible.
-        let current = self.device.as_mut().and_then(|d| d.read_preset().ok());
-        if let Some(current) = current {
-            to.push(current.encode());
-        }
+        let Some(current) = self.try_on_device(|device| device.read_preset()) else {
+            return;
+        };
         if self.run_on_device(|d| d.write_preset(&preset)) {
+            if back {
+                self.history.pop();
+                self.future.push(current.encode());
+            } else {
+                self.future.pop();
+                self.history.push(current.encode());
+            }
             // The buffer now differs from the stored preset - almost always,
             // and "save available after undo" errs on the side of not losing
             // the state someone deliberately stepped to.
