@@ -1289,16 +1289,18 @@ fn validate_setting_value(id: i64, value: &hx_proto::msgpack::Value) -> Result<(
     Ok(())
 }
 
-fn set_setting(session: &mut hx_usb::Session, id: i64, text: &str) -> Result<()> {
+fn parse_setting_value(
+    id: i64,
+    current: &hx_proto::msgpack::Value,
+    text: &str,
+) -> Result<hx_proto::msgpack::Value> {
     use hx_proto::msgpack::Value;
-    // A value of the wrong type is refused with error -3, so read first and
-    // send back the same shape.
-    let current = session.object(id)?;
-    let value = match (&current, text) {
-        (Value::Bool(_), "true" | "on" | "1") => Value::Bool(true),
-        (Value::Bool(_), "false" | "off" | "0") => Value::Bool(false),
-        (Value::Bool(_), _) => bail!("setting {id} is a switch; use on or off"),
-        (Value::F32(_) | Value::F64(_), _) => {
+
+    let value = match current {
+        Value::Bool(_) if matches!(text, "true" | "on" | "1") => Value::Bool(true),
+        Value::Bool(_) if matches!(text, "false" | "off" | "0") => Value::Bool(false),
+        Value::Bool(_) => bail!("setting {id} is a switch; use on or off"),
+        Value::F32(_) => {
             let number: f32 = text
                 .parse()
                 .with_context(|| format!("{text:?} is not a number"))?;
@@ -1307,12 +1309,44 @@ fn set_setting(session: &mut hx_usb::Session, id: i64, text: &str) -> Result<()>
             }
             Value::F32(number)
         }
-        (Value::Nil, _) => bail!("setting {id} does not exist on this device"),
-        _ => Value::Int(
+        Value::F64(_) => {
+            let number: f64 = text
+                .parse()
+                .with_context(|| format!("{text:?} is not a number"))?;
+            if !number.is_finite() {
+                bail!("{text:?} is not a finite number");
+            }
+            Value::F64(number)
+        }
+        Value::Int(_) => Value::Int(
             text.parse()
                 .with_context(|| format!("{text:?} is not a whole number"))?,
         ),
+        Value::UInt(_) => Value::UInt(
+            text.parse()
+                .with_context(|| format!("{text:?} is not a whole number"))?,
+        ),
+        Value::Wide(_, width) => Value::Wide(
+            text.parse()
+                .with_context(|| format!("{text:?} is not a whole number"))?,
+            *width,
+        ),
+        Value::WideInt(_, width) => Value::WideInt(
+            text.parse()
+                .with_context(|| format!("{text:?} is not a whole number"))?,
+            *width,
+        ),
+        Value::Nil => bail!("setting {id} does not exist on this device"),
+        other => bail!("setting {id} has an unsupported value type: {other:?}"),
     };
+    Ok(value)
+}
+
+fn set_setting(session: &mut hx_usb::Session, id: i64, text: &str) -> Result<()> {
+    // A value of the wrong type is refused with error -3, so read first and
+    // send back the same shape.
+    let current = session.object(id)?;
+    let value = parse_setting_value(id, &current, text)?;
 
     validate_setting_value(id, &value)?;
     session.set_object(id, value)?;
@@ -2008,5 +2042,26 @@ mod tests {
         assert!(validate_setting_value(97, &Value::Int(0)).is_ok());
         assert!(validate_setting_value(97, &Value::Int(11)).is_ok());
         assert!(validate_setting_value(97, &Value::Int(12)).is_err());
+    }
+
+    #[test]
+    fn setting_edits_preserve_the_device_wire_type() {
+        use hx_proto::msgpack::Value;
+
+        let cases = [
+            (Value::Bool(false), "on", Value::Bool(true)),
+            (Value::Int(0), "-1", Value::Int(-1)),
+            (Value::UInt(0), "1", Value::UInt(1)),
+            (Value::Wide(0, 4), "2", Value::Wide(2, 4)),
+            (Value::WideInt(0, 2), "-2", Value::WideInt(-2, 2)),
+            (Value::F32(0.0), "1.25", Value::F32(1.25)),
+            (Value::F64(0.0), "1.25", Value::F64(1.25)),
+        ];
+        for (current, text, expected) in cases {
+            assert_eq!(parse_setting_value(7, &current, text).unwrap(), expected);
+        }
+
+        assert!(parse_setting_value(7, &Value::Str("old".into()), "new").is_err());
+        assert!(parse_setting_value(7, &Value::F64(0.0), "NaN").is_err());
     }
 }
