@@ -2,7 +2,8 @@
 //!
 //! A preset arrives as a blob whose contents are themselves MessagePack - the
 //! magic string `l6-helix`, a table of section offsets, and the tone. The tone
-//! is a fixed array of slots, most of them empty on a small device.
+//! holds one fixed slot array per DSP, most of the slots empty on a small
+//! device. Public slot positions flatten those arrays in DSP order.
 //!
 //! Slots are keyed by integers throughout, so the constants here are doing the
 //! work a schema would do elsewhere. They were read off captured presets and
@@ -253,8 +254,12 @@ impl Kind {
 mod key {
     /// Metadata: DSP name, firmware, build string.
     pub const META: i64 = 7;
-    /// The signal path.
+    /// The first signal path, for synthetic fixtures.
+    #[cfg(test)]
     pub const PATH: i64 = 0;
+    /// Signal paths in DSP order. Full-size Helix devices use both; Stomp
+    /// leaves the second one nil.
+    pub const PATHS: [i64; 2] = [0, 1];
     /// Slot array within the path.
     pub const SLOTS: i64 = 22;
 
@@ -403,15 +408,14 @@ impl Preset {
             return None;
         }
 
-        let slot_values = tone.get(key::PATH)?.get(key::SLOTS)?;
-        let Value::Array(raw_slots) = slot_values else {
-            return None;
-        };
-        if raw_slots.is_empty()
-            || raw_slots.iter().any(|slot| {
-                !slot_is_well_formed(slot)
-                    || !endpoint_route_is_well_formed(slot)
-                    || !junction_is_well_formed(slot)
+        let raw_slots = slot_arrays(&tone)?;
+        if raw_slots.iter().any(|slots| slots.is_empty())
+            || raw_slots.iter().any(|slots| {
+                slots.iter().any(|slot| {
+                    !slot_is_well_formed(slot)
+                        || !endpoint_route_is_well_formed(slot)
+                        || !junction_is_well_formed(slot)
+                })
             })
         {
             return None;
@@ -419,13 +423,16 @@ impl Preset {
         if !assignments_are_well_formed(&tone) {
             return None;
         }
-        if !snapshots_are_well_formed(&tone, raw_slots.len()) {
+        let slot_count = raw_slots
+            .iter()
+            .try_fold(0usize, |total, slots| total.checked_add(slots.len()))?;
+        if !snapshots_are_well_formed(&tone, slot_count) {
             return None;
         }
         if !settings_are_well_formed(&tone) {
             return None;
         }
-        let slots = collect_slots(slot_values);
+        let slots = collect_slots(&tone);
 
         let preset = Preset {
             sections,
@@ -482,13 +489,33 @@ impl Preset {
         if !self.holds_blocks(a) || !self.holds_blocks(b) {
             return false;
         }
-        let Some(Value::Array(slots)) = self.tone.at_mut(&[key::PATH, key::SLOTS]) else {
+        let Some((_, a_path, a_local)) = slot_location(&self.tone, a) else {
             return false;
         };
-        if a >= slots.len() || b >= slots.len() {
+        let Some((_, b_path, b_local)) = slot_location(&self.tone, b) else {
             return false;
+        };
+        if a_path == b_path {
+            let Some(Value::Array(slots)) = self.tone.at_mut(&[a_path, key::SLOTS]) else {
+                return false;
+            };
+            slots.swap(a_local, b_local);
+        } else {
+            let Some(a_slot) = raw_slot_at(&self.tone, a).cloned() else {
+                return false;
+            };
+            let Some(b_slot) = raw_slot_at(&self.tone, b).cloned() else {
+                return false;
+            };
+            let Some(target) = raw_slot_at_mut(&mut self.tone, a) else {
+                return false;
+            };
+            *target = b_slot;
+            let Some(target) = raw_slot_at_mut(&mut self.tone, b) else {
+                return false;
+            };
+            *target = a_slot;
         }
-        slots.swap(a, b);
         self.slots.swap(a, b);
         true
     }
@@ -520,17 +547,23 @@ impl Preset {
         if !same_lane {
             return self.swap_slots(from, to);
         }
-        let Some(Value::Array(items)) = self.tone.at_mut(&[key::PATH, key::SLOTS]) else {
+        let Some((_, from_path, from_local)) = slot_location(&self.tone, from) else {
             return false;
         };
-        if from >= items.len() || to >= items.len() {
+        let Some((_, to_path, to_local)) = slot_location(&self.tone, to) else {
+            return false;
+        };
+        if from_path != to_path {
             return false;
         }
-        if from < to {
-            items[from..=to].rotate_left(1);
+        let Some(Value::Array(items)) = self.tone.at_mut(&[from_path, key::SLOTS]) else {
+            return false;
+        };
+        if from_local < to_local {
+            items[from_local..=to_local].rotate_left(1);
             self.slots[from..=to].rotate_left(1);
         } else {
-            items[to..=from].rotate_right(1);
+            items[to_local..=from_local].rotate_right(1);
             self.slots[to..=from].rotate_right(1);
         }
         true
@@ -625,6 +658,20 @@ impl Preset {
             Some(Kind::Split) => key::SPLIT_BODY,
             Some(Kind::Join) => key::JOIN_BODY,
             _ => return false,
+        };
+        let Some((dsp, _, _)) = slot_location(&self.tone, position) else {
+            return false;
+        };
+        let before = if before == 0 {
+            0
+        } else {
+            let Some((before_dsp, _, local)) = slot_location(&self.tone, before) else {
+                return false;
+            };
+            if before_dsp != dsp {
+                return false;
+            }
+            local
         };
         let Ok(before) = i64::try_from(before) else {
             return false;
@@ -870,6 +917,18 @@ impl Preset {
             Some(Kind::Join) => key::JOIN_BODY,
             _ => return None,
         };
+        let local = self.attach(position, body_key)?;
+        let (dsp, _, _) = slot_location(&self.tone, position)?;
+        flat_slot_position(&self.tone, dsp, local)
+    }
+
+    /// DSP-local attachment index as stored in the native document.
+    pub fn local_attach_of(&self, position: usize) -> Option<usize> {
+        let body_key = match self.slots.get(position).map(|s| s.kind) {
+            Some(Kind::Split) => key::SPLIT_BODY,
+            Some(Kind::Join) => key::JOIN_BODY,
+            _ => return None,
+        };
         self.attach(position, body_key)
     }
 
@@ -967,11 +1026,11 @@ impl Preset {
 
             let split_at = path
                 .split
-                .and_then(|p| self.attach(p, key::SPLIT_BODY))
-                .unwrap_or(0);
+                .and_then(|p| self.attach_of(p))
+                .unwrap_or_else(|| path.input.unwrap_or(0));
             let join_at = path
                 .join
-                .and_then(|p| self.attach(p, key::JOIN_BODY))
+                .and_then(|p| self.attach_of(p))
                 .unwrap_or(usize::MAX);
 
             path.head = straight.iter().copied().filter(|p| *p < split_at).collect();
@@ -1047,18 +1106,17 @@ impl Preset {
         }
     }
 
+    /// DSP number and DSP-local position for a flattened slot index.
+    pub fn slot_address(&self, position: usize) -> Option<(usize, usize)> {
+        slot_location(&self.tone, position).map(|(dsp, _, local)| (dsp, local))
+    }
+
     fn slot_body(&self, position: usize) -> Option<&Value> {
-        match self.tone.get(key::PATH)?.get(key::SLOTS)? {
-            Value::Array(items) => items.get(position)?.get(key::BODY),
-            _ => None,
-        }
+        raw_slot_at(&self.tone, position)?.get(key::BODY)
     }
 
     fn slot_body_mut(&mut self, position: usize) -> Option<&mut Value> {
-        match self.tone.at_mut(&[key::PATH, key::SLOTS])? {
-            Value::Array(items) => items.get_mut(position)?.get_mut(key::BODY),
-            _ => None,
-        }
+        raw_slot_at_mut(&mut self.tone, position)?.get_mut(key::BODY)
     }
 
     /// Recompute the section-offset table from this preset's own encoding.
@@ -1123,10 +1181,7 @@ impl Preset {
     /// and rebuilding one from the parts we understand would quietly drop the
     /// rest. HX Edit's block copy is a client-side clipboard too.
     pub fn copy_slot(&self, position: usize) -> Option<Value> {
-        match self.tone.get(key::PATH)?.get(key::SLOTS)? {
-            Value::Array(items) => items.get(position).cloned(),
-            _ => None,
-        }
+        raw_slot_at(&self.tone, position).cloned()
     }
 
     /// Drop a previously copied slot into `position`.
@@ -1149,19 +1204,11 @@ impl Preset {
         if !matches!(kind, Some(Kind::Block) | Some(Kind::Empty)) {
             return false;
         }
-        let Some(Value::Array(items)) = self.tone.at_mut(&[key::PATH, key::SLOTS]) else {
-            return false;
-        };
-        let Some(existing) = items.get_mut(position) else {
+        let Some(existing) = raw_slot_at_mut(&mut self.tone, position) else {
             return false;
         };
         *existing = slot.clone();
-        self.slots = collect_slots(
-            self.tone
-                .get(key::PATH)
-                .and_then(|p| p.get(key::SLOTS))
-                .unwrap_or(&Value::Nil),
-        );
+        self.slots = collect_slots(&self.tone);
         true
     }
 
@@ -1184,21 +1231,22 @@ impl Preset {
         }) else {
             return false;
         };
-        let Some(Value::Array(items)) = self.tone.at_mut(&[key::PATH, key::SLOTS]) else {
+        let Some((_, at_path, at_local)) = slot_location(&self.tone, at) else {
             return false;
         };
-        if free >= items.len() {
+        let Some((_, free_path, free_local)) = slot_location(&self.tone, free) else {
+            return false;
+        };
+        if at_path != free_path {
             return false;
         }
+        let Some(Value::Array(items)) = self.tone.at_mut(&[at_path, key::SLOTS]) else {
+            return false;
+        };
         // Slide everything from `at` up to the free slot along by one, which
         // leaves the empty one sitting at `at`.
-        items[at..=free].rotate_right(1);
-        self.slots = collect_slots(
-            self.tone
-                .get(key::PATH)
-                .and_then(|p| p.get(key::SLOTS))
-                .unwrap_or(&Value::Nil),
-        );
+        items[at_local..=free_local].rotate_right(1);
+        self.slots = collect_slots(&self.tone);
         true
     }
 
@@ -1263,11 +1311,76 @@ impl Preset {
     }
 }
 
-fn collect_slots(slots: &Value) -> Vec<Slot> {
-    let Value::Array(items) = slots else {
-        return Vec::new();
-    };
-    items.iter().map(read_slot).collect()
+fn slot_arrays(tone: &Value) -> Option<Vec<&[Value]>> {
+    let mut arrays = Vec::new();
+    for (index, path_key) in key::PATHS.into_iter().enumerate() {
+        match tone.get(path_key) {
+            None if index > 0 => {}
+            Some(Value::Nil) if index > 0 => {}
+            None | Some(Value::Nil) => return None,
+            Some(path) => match path.get(key::SLOTS) {
+                Some(Value::Array(slots)) => arrays.push(slots.as_slice()),
+                _ => return None,
+            },
+        }
+    }
+    (!arrays.is_empty()).then_some(arrays)
+}
+
+fn slot_location(tone: &Value, position: usize) -> Option<(usize, i64, usize)> {
+    let mut offset = 0usize;
+    for (dsp, path_key) in key::PATHS.into_iter().enumerate() {
+        let Some(Value::Array(slots)) = tone.get(path_key).and_then(|path| path.get(key::SLOTS))
+        else {
+            continue;
+        };
+        let end = offset.checked_add(slots.len())?;
+        if position < end {
+            return Some((dsp, path_key, position - offset));
+        }
+        offset = end;
+    }
+    None
+}
+
+fn flat_slot_position(tone: &Value, dsp: usize, local: usize) -> Option<usize> {
+    let mut offset = 0usize;
+    for (candidate, path_key) in key::PATHS.into_iter().enumerate() {
+        let Some(Value::Array(slots)) = tone.get(path_key).and_then(|path| path.get(key::SLOTS))
+        else {
+            continue;
+        };
+        if candidate == dsp {
+            return (local < slots.len()).then(|| offset + local);
+        }
+        offset = offset.checked_add(slots.len())?;
+    }
+    None
+}
+
+fn raw_slot_at(tone: &Value, position: usize) -> Option<&Value> {
+    let (_, path_key, local) = slot_location(tone, position)?;
+    match tone.get(path_key)?.get(key::SLOTS)? {
+        Value::Array(slots) => slots.get(local),
+        _ => None,
+    }
+}
+
+fn raw_slot_at_mut(tone: &mut Value, position: usize) -> Option<&mut Value> {
+    let (_, path_key, local) = slot_location(tone, position)?;
+    match tone.at_mut(&[path_key, key::SLOTS])? {
+        Value::Array(slots) => slots.get_mut(local),
+        _ => None,
+    }
+}
+
+fn collect_slots(tone: &Value) -> Vec<Slot> {
+    slot_arrays(tone)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(read_slot)
+        .collect()
 }
 
 fn section_word(offset: usize) -> Option<[u8; 4]> {
@@ -2319,6 +2432,50 @@ mod tests {
 
     /// A real preset captured from an HX Stomp, shared with the round-trip test.
     const FIXTURE: &[u8] = include_bytes!("../tests/preset.bin");
+
+    fn dual_dsp_fixture() -> Vec<u8> {
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+        let second = preset.tone.get(key::PATH).unwrap().clone();
+        *preset.tone.get_mut(1).unwrap() = second;
+        let snapshots = preset
+            .tone
+            .get_mut(key::SNAPSHOT_SECTION)
+            .and_then(|section| section.get_mut(key::SNAPSHOTS));
+        if let Some(Value::Array(entries)) = snapshots {
+            for entry in entries {
+                if let Some(Value::Array(states)) = entry.get_mut(key::SNAPSHOT_SLOTS) {
+                    states.extend(states.clone());
+                }
+            }
+        }
+        if let Some(Value::Array(states)) = preset
+            .tone
+            .get_mut(key::SNAPSHOT_SECTION)
+            .and_then(|section| section.get_mut(13))
+        {
+            states.extend(states.clone());
+        }
+        preset.encode()
+    }
+
+    #[test]
+    fn parses_both_dsp_slot_arrays_and_flattened_snapshots() {
+        let preset = Preset::parse(&dual_dsp_fixture()).expect("dual-DSP preset parses");
+        assert_eq!(preset.slots.len(), 40);
+        assert_eq!(preset.slot_address(0), Some((0, 0)));
+        assert_eq!(preset.slot_address(20), Some((1, 0)));
+        assert_eq!(preset.layout().paths.len(), 2);
+        assert_eq!(preset.copy_slot(20), preset.copy_slot(0));
+        assert!(preset
+            .snapshot_details()
+            .iter()
+            .all(|snapshot| snapshot.enabled.len() == 40));
+
+        let split = preset.layout().paths[1].split.unwrap();
+        let local_attach = preset.local_attach_of(split).unwrap();
+        assert_eq!(preset.attach_of(split), Some(20 + local_attach));
+        assert_eq!(Preset::parse(&preset.encode()).unwrap().slots.len(), 40);
+    }
 
     // Kinds, for readable fixtures.
     const IN: i64 = 0;

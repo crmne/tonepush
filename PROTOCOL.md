@@ -820,8 +820,16 @@ The preset map decodes as:
      35: 0x03800000,                # firmware, BCD -> 3.80
      37: 'v3.71-32-g1039661'},      # build string
  0: {21: 0,
+     22: [ {19: <slot type>, 20: {<parameters>}}, ... ]},
+ 1: {21: 0,
      22: [ {19: <slot type>, 20: {<parameters>}}, ... ]}}
 ```
+
+Keys `0` and `1` are the two DSPs. A Helix LT capture has 20 slots under each,
+while an HX Stomp preset has 20 under key `0` and leaves key `1` nil. Snapshot
+state arrays are not DSP-local: they flatten the two arrays in DSP order, so the
+LT snapshot has 40 entries. Code that validates a snapshot against only
+`tone[0][22]` therefore rejects a valid full-size Helix preset.
 
 Block parameter maps use `{2: n, 3: n, 4: [values]}` groups, and floats carry the
 actual parameter values. Snapshot names (`SNAPSHOT 1`…) and the preset name appear
@@ -851,7 +859,9 @@ stored 0..1. Switches are MessagePack booleans.
 
 ### Slot structure [confirmed]
 
-The tone holds a fixed array of slots at `tone[0][22]`, each `{19: kind, 20: body}`:
+The tone holds one fixed array of slots per DSP at `tone[0][22]` and
+`tone[1][22]`, each slot `{19: kind, 20: body}`. Junction attachment indexes are
+local to their DSP array; snapshot slot indexes are flattened across both arrays.
 
 | Kind | Meaning | Model number at | Values at |
 |---|---|---|---|

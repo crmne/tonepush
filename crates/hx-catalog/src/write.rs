@@ -75,6 +75,7 @@ pub fn to_hlx(preset: &Preset, catalog: &Catalog, name: &str) -> Written {
     let mut dsps: Vec<Map<String, Value>> = vec![Map::new()];
     let mut next_block: Vec<i64> = vec![0];
     let mut next_cab: Vec<i64> = vec![0];
+    let mut slot_nodes: Vec<Option<(usize, String)>> = vec![None; preset.slots.len()];
     let mut path = 0usize;
     let mut opened = false;
 
@@ -90,6 +91,7 @@ pub fn to_hlx(preset: &Preset, catalog: &Catalog, name: &str) -> Written {
                 opened = true;
             }
             SlotKind::Block | SlotKind::Looper if slot.model.is_some() => {
+                let block_number = next_block[path];
                 emit(
                     &mut dsps[path],
                     &mut next_block[path],
@@ -100,6 +102,9 @@ pub fn to_hlx(preset: &Preset, catalog: &Catalog, name: &str) -> Written {
                     catalog,
                     &mut skipped,
                 );
+                if next_block[path] > block_number {
+                    slot_nodes[index] = Some((path, format!("block{block_number}")));
+                }
                 // The cab rides in the amp's slot on the wire; write it out as
                 // its own block, sharing the amp's bypass state.
                 // The cab rides in the amp's slot on the wire, and HX Edit
@@ -170,7 +175,7 @@ pub fn to_hlx(preset: &Preset, catalog: &Catalog, name: &str) -> Written {
                 "split".into(),
                 junction(
                     &named(split, "HD2_AppDSPFlowSplitY"),
-                    preset.attach_of(split),
+                    preset.local_attach_of(split),
                     at(preset.attach_of(split)),
                 ),
             );
@@ -178,7 +183,7 @@ pub fn to_hlx(preset: &Preset, catalog: &Catalog, name: &str) -> Written {
                 "join".into(),
                 junction(
                     &named(join, "HD2_AppDSPFlowJoin"),
-                    preset.attach_of(join),
+                    preset.local_attach_of(join),
                     at(preset.attach_of(join)),
                 ),
             );
@@ -213,6 +218,7 @@ pub fn to_hlx(preset: &Preset, catalog: &Catalog, name: &str) -> Written {
         }
     }
 
+    let dsp_count = layout.paths.len().max(1);
     let mut tone = Map::new();
     for (index, dsp) in dsps.into_iter().enumerate() {
         tone.insert(format!("dsp{index}"), Value::Object(dsp));
@@ -223,31 +229,34 @@ pub fn to_hlx(preset: &Preset, catalog: &Catalog, name: &str) -> Written {
     // the player set up.
     for (index, snapshot) in preset.snapshot_details().iter().enumerate() {
         let mut blocks = Map::new();
-        let mut dsp0 = Map::new();
+        let mut by_dsp = vec![Map::new(); dsp_count];
         // Snapshot state is indexed by slot; the document names blocks in the
-        // order they were emitted, so walk the same slots the same way.
-        let mut block_number = 0i64;
-        for (position, slot) in preset.slots.iter().enumerate() {
-            if !matches!(slot.kind, SlotKind::Block | SlotKind::Looper) || slot.model.is_none() {
+        // order they were emitted, including which DSP owns each one.
+        for (position, node) in slot_nodes.iter().enumerate() {
+            let Some((dsp, node)) = node else { continue };
+            let Some(Some(on)) = snapshot.enabled.get(position) else {
                 continue;
+            };
+            if let Some(states) = by_dsp.get_mut(*dsp) {
+                states.insert(node.clone(), Value::Bool(*on));
             }
-            if let Some(Some(on)) = snapshot.enabled.get(position) {
-                dsp0.insert(format!("block{block_number}"), Value::Bool(*on));
-            }
-            block_number += 1;
         }
         // A split is switched by a snapshot like any block, and HX Edit records
         // it under its node name rather than a block number.
-        for dsp_path in &layout.paths {
+        for (dsp, dsp_path) in layout.paths.iter().enumerate() {
             if let Some(split) = dsp_path.split {
                 if preset.junction_switchable(split) {
                     if let Some(Some(on)) = snapshot.enabled.get(split) {
-                        dsp0.insert("split".into(), Value::Bool(*on));
+                        if let Some(states) = by_dsp.get_mut(dsp) {
+                            states.insert("split".into(), Value::Bool(*on));
+                        }
                     }
                 }
             }
         }
-        blocks.insert("dsp0".into(), Value::Object(dsp0));
+        for (dsp, states) in by_dsp.into_iter().enumerate() {
+            blocks.insert(format!("dsp{dsp}"), Value::Object(states));
+        }
 
         tone.insert(
             format!("snapshot{index}"),
@@ -436,6 +445,11 @@ mod tests {
     const PATH: i64 = 0;
     const SLOTS: i64 = 22;
     const SNAPSHOT_SECTION: i64 = 10;
+    const SNAPSHOT_SLOTS: i64 = 3;
+    const SNAPSHOT_NAME: i64 = 4;
+    const SNAPSHOT_TEMPO: i64 = 5;
+    const SNAPSHOT_VALID: i64 = 0;
+    const SNAPSHOT_NAMED: i64 = 14;
     const MODEL_REF: i64 = 24;
     const MODEL: i64 = 25;
     const PAIRED_MODEL: i64 = 26;
@@ -499,6 +513,33 @@ mod tests {
             .get_mut(SNAPSHOT_SECTION)
             .expect("the template has a snapshot section") = Value::Nil;
         Preset::parse(&template.encode()).expect("the synthetic blob parses")
+    }
+
+    fn dual_preset(first: Vec<Value>, second: Vec<Value>) -> Preset {
+        let slot_count = first.len() + second.len();
+        let mut preset = preset(first);
+        *preset.tone.get_mut(1).expect("the template has DSP 2") =
+            msgmap! { SLOTS => Value::Array(second) };
+        *preset
+            .tone
+            .get_mut(SNAPSHOT_SECTION)
+            .expect("the template has snapshots") = msgmap! {
+            SNAPSHOT_SECTION => Value::Array(vec![msgmap! {
+                SNAPSHOT_VALID => Value::Bool(true),
+                SNAPSHOT_SLOTS => Value::Array(
+                    (0..slot_count)
+                        .map(|slot| Value::Array(vec![
+                            Value::Bool(false),
+                            Value::Bool(slot % 2 == 1),
+                        ]))
+                        .collect(),
+                ),
+                SNAPSHOT_NAME => Value::Str("Dual".into()),
+                SNAPSHOT_TEMPO => Value::F32(120.0),
+                SNAPSHOT_NAMED => Value::Bool(true),
+            }]),
+        };
+        Preset::parse(&preset.encode()).expect("the dual-DSP blob parses")
     }
 
     /// The blocks a preset should read back as, derived straight from it through
@@ -602,12 +643,13 @@ mod tests {
         };
 
         // Path 0: an amp with a cab riding in its slot. Path 1: a lone effect.
-        let preset = preset(vec![
-            input(),
-            block(amp, Some(cab), &[0.5, 0.5], &[0.5, 0.5], true),
-            input(),
-            block(101, None, &[0.2, 0.3, 0.4], &[], true),
-        ]);
+        let preset = dual_preset(
+            vec![
+                input(),
+                block(amp, Some(cab), &[0.5, 0.5], &[0.5, 0.5], true),
+            ],
+            vec![input(), block(101, None, &[0.2, 0.3, 0.4], &[], true)],
+        );
 
         let written = to_hlx(&preset, &catalog, "Two DSPs");
         assert!(written.skipped.is_empty(), "{:?}", written.skipped);
@@ -623,6 +665,14 @@ mod tests {
         assert!(
             dsp1.as_object().unwrap().contains_key("block0"),
             "the second path's effect"
+        );
+        assert_eq!(
+            written.document["data"]["tone"]["snapshot0"]["blocks"]["dsp0"]["block0"],
+            true
+        );
+        assert_eq!(
+            written.document["data"]["tone"]["snapshot0"]["blocks"]["dsp1"]["block0"],
+            true
         );
 
         let tone = inspect(&written.document, &catalog);
