@@ -662,6 +662,9 @@ impl Preset {
 
     /// Rename a snapshot.
     pub fn set_snapshot_name(&mut self, index: usize, name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
         let Some(Value::Array(entries)) =
             self.tone.at_mut(&[key::SNAPSHOT_SECTION, key::SNAPSHOTS])
         else {
@@ -2203,6 +2206,8 @@ mod tests {
         assert!(preset.set_snapshot_name(0, "Verse"));
         assert_eq!(preset.snapshots(), vec!["Verse".to_string()]);
         assert!(!preset.set_snapshot_name(9, "Nope"));
+        assert!(!preset.set_snapshot_name(0, ""));
+        assert_eq!(preset.snapshots(), vec!["Verse".to_string()]);
     }
 
     /// Build a preset from a bare list of slot kinds. Blocks are given a model
