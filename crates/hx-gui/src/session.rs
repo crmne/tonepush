@@ -1738,15 +1738,22 @@ impl Worker {
     /// lands inside that moment fails. That is a busy device, not a dead one:
     /// only when it stays unreachable is the session dropped.
     fn read_settled(&mut self) -> Option<hx_proto::Preset> {
-        let device = self.device.as_mut()?;
         let mut last = None;
         for attempt in 0..3 {
             if attempt > 0 {
                 std::thread::sleep(Duration::from_millis(300));
             }
-            match device.read_preset() {
+            let result = self.device.as_mut()?.read_preset();
+            match result {
                 Ok(preset) => return Some(preset),
-                Err(e) => last = Some(e),
+                Err(error) if !error.loses_session() => last = Some(error),
+                Err(error) => {
+                    self.send(Evt::Failed(error.to_string()));
+                    self.device = None;
+                    self.stumbles = 0;
+                    self.send(Evt::Disconnected);
+                    return None;
+                }
             }
         }
         if let Some(e) = last {
