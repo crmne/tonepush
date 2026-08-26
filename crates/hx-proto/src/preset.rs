@@ -408,6 +408,9 @@ impl Preset {
         if raw_slots.is_empty() || raw_slots.iter().any(|slot| !slot_is_well_formed(slot)) {
             return None;
         }
+        if !assignments_are_well_formed(&tone) {
+            return None;
+        }
         let slots = collect_slots(slot_values);
 
         let preset = Preset {
@@ -1229,6 +1232,54 @@ fn collect_slots(slots: &Value) -> Vec<Slot> {
         return Vec::new();
     };
     items.iter().map(read_slot).collect()
+}
+
+fn assignments_are_well_formed(tone: &Value) -> bool {
+    let by_source = match tone.get(key::ASSIGNMENTS) {
+        None | Some(Value::Nil) => return true,
+        Some(Value::Array(by_source)) => by_source,
+        Some(_) => return false,
+    };
+    by_source.iter().enumerate().all(|(ordinal, entries)| {
+        let entries = match entries {
+            Value::Nil => return true,
+            Value::Array(entries) => entries,
+            _ => return false,
+        };
+        if !entries.is_empty() && crate::rpc::Source::from_ordinal(ordinal as i64).is_none() {
+            return false;
+        }
+        entries.iter().all(|entry| {
+            let Some(what) = entry.get(key::ASSIGNED_WHAT) else {
+                return false;
+            };
+            let valid_block = what
+                .get(key::ASSIGNED_ON)
+                .and_then(Value::as_i64)
+                .is_some_and(|block| block >= 0);
+            let valid_target = match what.get(key::ASSIGNED_BYPASS) {
+                Some(bypass) => bypass.as_i64().is_some_and(|target| target >= 0),
+                None => what
+                    .get(key::ASSIGNED_TARGET)
+                    .and_then(|target| target.get(key::ASSIGNED_PARAM))
+                    .and_then(Value::as_i64)
+                    .is_some_and(|parameter| parameter >= 0),
+            };
+            let valid_ends = [key::ASSIGNED_MIN, key::ASSIGNED_MAX]
+                .into_iter()
+                .all(|field| match what.get(field) {
+                    None | Some(Value::Nil) => true,
+                    Some(value) => value.as_f32().is_some_and(f32::is_finite),
+                });
+            let valid_kind = match what.get(key::ASSIGNED_KIND) {
+                None | Some(Value::Nil) => ordinal != 8,
+                Some(value) => value
+                    .as_i64()
+                    .is_some_and(|kind| ordinal != 8 || (0..=127).contains(&kind)),
+            };
+            valid_block && valid_target && valid_ends && valid_kind
+        })
+    })
 }
 
 fn slot_is_well_formed(raw: &Value) -> bool {
@@ -2273,6 +2324,55 @@ mod tests {
     #[test]
     fn rejects_a_blob_that_is_not_a_preset() {
         assert!(Preset::parse(b"\xa3abc").is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_controller_tables() {
+        let document = |assignments: Value| {
+            let mut preset = Preset::parse(&sample()).unwrap();
+            *preset.tone.get_mut(key::ASSIGNMENTS).unwrap() = assignments;
+            preset.encode()
+        };
+        let entry = |what| {
+            crate::msgmap! {
+                0 => Value::Int(0),
+                key::ASSIGNED_WHAT => what,
+            }
+        };
+        let parameter = crate::msgmap! {
+            key::ASSIGNED_KIND => Value::Int(4),
+            key::ASSIGNED_MIN => Value::Int(0),
+            key::ASSIGNED_MAX => Value::Int(1),
+            key::ASSIGNED_ON => Value::Int(0),
+            key::ASSIGNED_TARGET => crate::msgmap! {
+                key::ASSIGNED_PARAM => Value::Int(1),
+            },
+        };
+        let under_footswitch = |entry| {
+            Value::Array(vec![
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Array(vec![entry]),
+            ])
+        };
+        assert!(Preset::parse(&document(under_footswitch(entry(parameter)))).is_some());
+
+        let missing_target = crate::msgmap! {
+            key::ASSIGNED_KIND => Value::Int(4),
+            key::ASSIGNED_ON => Value::Int(0),
+        };
+        assert!(Preset::parse(&document(under_footswitch(entry(missing_target)))).is_none());
+        assert!(Preset::parse(&document(Value::Bool(false))).is_none());
+
+        let midi = crate::msgmap! {
+            key::ASSIGNED_KIND => Value::Int(128),
+            key::ASSIGNED_ON => Value::Int(0),
+            key::ASSIGNED_BYPASS => Value::Int(5),
+        };
+        let mut by_source = (0..9).map(|_| Value::Nil).collect::<Vec<_>>();
+        by_source[8] = Value::Array(vec![entry(midi)]);
+        assert!(Preset::parse(&document(Value::Array(by_source))).is_none());
     }
 
     #[test]
