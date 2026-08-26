@@ -90,6 +90,10 @@ fn retry_device_refusal<T>(result: Result<T>) -> Result<Option<T>> {
     }
 }
 
+fn preset_matches(info: &(i64, i64, String), setlist: i64, index: i64) -> bool {
+    info.0 == setlist && info.1 == index
+}
+
 /// A device found on the bus.
 #[derive(Debug, Clone)]
 pub struct Found {
@@ -1007,8 +1011,8 @@ impl Session {
             // A busy device may refuse the question; that is patience, not
             // failure, until the deadline says otherwise.
             match retry_device_refusal(self.preset_info()) {
-                Ok(Some((_, current, _))) => {
-                    if current == index {
+                Ok(Some(current)) => {
+                    if preset_matches(&current, setlist, index) {
                         return Ok(());
                     }
                 }
@@ -1314,6 +1318,14 @@ mod tests {
             retry_device_refusal::<()>(Err(Error::Protocol("bad reply".into()))),
             Err(Error::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn preset_completion_includes_the_setlist() {
+        let current = (2, 17, "Current".into());
+        assert!(preset_matches(&current, 2, 17));
+        assert!(!preset_matches(&current, 1, 17));
+        assert!(!preset_matches(&current, 2, 18));
     }
 
     /// The control channel opens two services in turn and talks on the second;
