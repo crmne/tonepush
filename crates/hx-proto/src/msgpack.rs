@@ -384,24 +384,24 @@ impl Encoder {
             Value::Bool(true) => self.buf.push(0xc3),
             Value::UInt(u) => self.uint(*u),
             Value::WideInt(i, width) => {
+                let width = integer_width(*width);
                 self.buf.push(match width {
                     1 => 0xd0,
                     2 => 0xd1,
                     4 => 0xd2,
                     _ => 0xd3,
                 });
-                self.buf
-                    .extend_from_slice(&i.to_be_bytes()[8 - *width as usize..]);
+                self.buf.extend_from_slice(&i.to_be_bytes()[8 - width..]);
             }
             Value::Wide(u, width) => {
+                let width = integer_width(*width);
                 self.buf.push(match width {
                     1 => 0xcc,
                     2 => 0xcd,
                     4 => 0xce,
                     _ => 0xcf,
                 });
-                self.buf
-                    .extend_from_slice(&u.to_be_bytes()[8 - *width as usize..]);
+                self.buf.extend_from_slice(&u.to_be_bytes()[8 - width..]);
             }
             Value::Int(i) => {
                 if *i >= 0 {
@@ -522,6 +522,13 @@ impl Encoder {
     }
 }
 
+fn integer_width(width: u8) -> usize {
+    match width {
+        1 | 2 | 4 | 8 => usize::from(width),
+        _ => 8,
+    }
+}
+
 /// Build a map from integer-keyed pairs - the shape nearly every request takes.
 #[macro_export]
 macro_rules! msgmap {
@@ -615,6 +622,19 @@ mod tests {
             .value()
             .unwrap();
         assert_eq!(v.as_f32(), Some(120.0));
+    }
+
+    #[test]
+    fn invalid_preserved_integer_widths_encode_as_64_bit_values() {
+        for width in [0, 3, 9, u8::MAX] {
+            let signed = Encoder::encode(&Value::WideInt(-7, width));
+            assert_eq!(signed[0], 0xd3);
+            assert_eq!(Decoder::new(&signed).value().unwrap().as_i64(), Some(-7));
+
+            let unsigned = Encoder::encode(&Value::Wide(7, width));
+            assert_eq!(unsigned[0], 0xcf);
+            assert_eq!(Decoder::new(&unsigned).value().unwrap().as_i64(), Some(7));
+        }
     }
 
     #[test]
