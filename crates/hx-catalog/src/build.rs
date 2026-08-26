@@ -391,7 +391,12 @@ fn build_slot(node: &Json, cab: Option<&Json>, catalog: &Catalog) -> Result<Valu
 fn values_for(symbol: &crate::Symbol, node: &Json, catalog: &Catalog) -> Result<Vec<f32>, String> {
     let mut values = Vec::with_capacity(symbol.parameters.len());
     for (index, id) in symbol.parameters.iter().enumerate() {
-        let found = node.get(id).and_then(number_of);
+        let found = match node.get(id) {
+            Some(value) => Some(
+                number_of(value).ok_or_else(|| format!("{id} is not a numeric parameter value"))?,
+            ),
+            None => None,
+        };
         if let Some(value) = found {
             if !value.is_finite() {
                 return Err(format!("{id} is not a finite number"));
@@ -407,8 +412,13 @@ fn values_for(symbol: &crate::Symbol, node: &Json, catalog: &Catalog) -> Result<
         }
         values.push(found.unwrap_or_else(|| default_of(catalog, symbol.number, id)));
     }
-    if let Some(extra) = node.get("@unnamed").and_then(Json::as_array) {
-        for value in extra.iter().filter_map(number_of) {
+    if let Some(extra) = node.get("@unnamed") {
+        let extra = extra
+            .as_array()
+            .ok_or("@unnamed parameters are not an array")?;
+        for (index, raw) in extra.iter().enumerate() {
+            let value = number_of(raw)
+                .ok_or_else(|| format!("unnamed parameter {index} is not numeric"))?;
             if !value.is_finite() {
                 return Err("an unnamed parameter is not a finite number".to_owned());
             }
@@ -519,6 +529,27 @@ mod tests {
             error.contains("Gain") && error.contains("outside"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn document_building_refuses_malformed_parameter_values() {
+        let Some(catalog) = crate::tests::catalog() else {
+            return;
+        };
+        let symbol = catalog
+            .symbols()
+            .iter()
+            .find(|symbol| symbol.symbol == "HD2_DistScream808Mono")
+            .expect("Scream 808 symbol");
+
+        let named = serde_json::json!({ "Gain": "loud" });
+        assert!(values_for(symbol, &named, &catalog).is_err());
+
+        let unnamed = serde_json::json!({ "@unnamed": [0.5, "broken", 0.7] });
+        assert!(values_for(symbol, &unnamed, &catalog).is_err());
+
+        let wrong_container = serde_json::json!({ "@unnamed": 0.5 });
+        assert!(values_for(symbol, &wrong_container, &catalog).is_err());
     }
 
     #[test]
