@@ -10,16 +10,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.5"
+version = "0.5.6"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/crmne/tonepush"
 rust-version = "1.87"
 
 [workspace.dependencies]
-hx-proto = { path = "crates/hx-proto", version = "0.5.5" }
-hx-usb = { path = "crates/hx-usb", version = "0.5.5" }
-hx-catalog = { path = "crates/hx-catalog", version = "0.5.5" }
+hx-proto = { path = "crates/hx-proto", version = "0.5.6" }
+hx-usb = { path = "crates/hx-usb", version = "0.5.6" }
+hx-catalog = { path = "crates/hx-catalog", version = "0.5.6" }
 nusb = "0.2"
 anyhow = "1"
 thiserror = "2"
