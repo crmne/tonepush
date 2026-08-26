@@ -2430,6 +2430,24 @@ mod tests {
         Preset::parse(&blob).unwrap()
     }
 
+    /// Two synthetic paths, with the second path's junction addresses kept
+    /// local to its own native slot array.
+    fn dual_shaped_at(
+        first: &[i64],
+        second: &[i64],
+        second_split_at: usize,
+        second_join_at: usize,
+    ) -> Preset {
+        let mut preset = shaped(first);
+        let second = shaped_at(second, second_split_at, second_join_at);
+        *preset.tone.get_mut(1).expect("the envelope has DSP 2") = second
+            .tone
+            .get(key::PATH)
+            .expect("the synthetic path exists")
+            .clone();
+        Preset::parse(&preset.encode()).expect("the dual-DSP document parses")
+    }
+
     /// A real preset captured from an HX Stomp, shared with the round-trip test.
     const FIXTURE: &[u8] = include_bytes!("../tests/preset.bin");
 
@@ -2475,6 +2493,68 @@ mod tests {
         let local_attach = preset.local_attach_of(split).unwrap();
         assert_eq!(preset.attach_of(split), Some(20 + local_attach));
         assert_eq!(Preset::parse(&preset.encode()).unwrap().slots.len(), 40);
+    }
+
+    #[test]
+    fn dual_dsp_mutations_update_the_owning_native_slot_array() {
+        let first = [IN, BLOCK, EMPTY, OUT];
+        let second = [IN, BLOCK, EMPTY, BLOCK, OUT];
+        let offset = first.len();
+        let round_trips = |preset: &Preset| {
+            let reparsed = Preset::parse(&preset.encode()).expect("the edit re-parses");
+            assert_eq!(reparsed.slots, preset.slots);
+        };
+
+        // Copying across paths writes into DSP 2 rather than the same local
+        // address in DSP 1.
+        let mut preset = dual_shaped_at(&first, &second, 0, usize::MAX);
+        let copied = preset.copy_slot(1).expect("a DSP 1 block");
+        assert!(preset.paste_slot(offset + 2, &copied));
+        assert_eq!(preset.slots[offset + 2].model, preset.slots[1].model);
+        assert_eq!(preset.slots[2].kind, Kind::Empty, "DSP 1 was untouched");
+        round_trips(&preset);
+
+        // A cross-DSP swap addresses both native arrays, despite the same
+        // local indices existing in each.
+        let mut preset = dual_shaped_at(&first, &second, 0, usize::MAX);
+        let moved_model = preset.slots[1].model;
+        assert!(preset.swap_slots(1, offset + 2));
+        assert_eq!(preset.slots[1].kind, Kind::Empty);
+        assert_eq!(preset.slots[offset + 2].model, moved_model);
+        round_trips(&preset);
+
+        // A move and make-room operation stay inside DSP 2's local lane.
+        let mut preset = dual_shaped_at(&first, &second, 0, usize::MAX);
+        assert!(preset.move_slot(offset + 1, offset + 3));
+        assert_eq!(preset.slots[offset + 1].kind, Kind::Empty);
+        assert_eq!(preset.slots[1].kind, Kind::Block, "DSP 1 was untouched");
+        round_trips(&preset);
+
+        let mut preset = dual_shaped_at(&first, &second, 0, usize::MAX);
+        let bounds = preset
+            .lane_bounds(offset + 1)
+            .expect("the DSP 2 block is in a lane");
+        assert!(preset.make_room(offset + 1, bounds));
+        assert!(preset.slots[offset + 1].model.is_none());
+        assert_eq!(preset.slots[1].kind, Kind::Block, "DSP 1 was untouched");
+        round_trips(&preset);
+
+        // Public positions are global, but the encoded split/join attachment
+        // fields are local to their DSP's array.
+        let junctions = [IN, BLOCK, BLOCK, BLOCK, OUT, SPLIT, BLOCK, JOIN];
+        let mut preset = dual_shaped_at(&first, &junctions, 2, 4);
+        let split = offset + 5;
+        let join = offset + 7;
+        assert!(preset.set_attach(split, offset + 1));
+        assert!(preset.set_attach(join, offset + 3));
+        assert_eq!(preset.local_attach_of(split), Some(1));
+        assert_eq!(preset.local_attach_of(join), Some(3));
+        assert_eq!(preset.attach_of(split), Some(offset + 1));
+        assert_eq!(preset.attach_of(join), Some(offset + 3));
+        assert!(!preset.set_attach(split, 1), "cannot attach across DSPs");
+        let reparsed = Preset::parse(&preset.encode()).expect("the edit re-parses");
+        assert_eq!(reparsed.local_attach_of(split), Some(1));
+        assert_eq!(reparsed.attach_of(join), Some(offset + 3));
     }
 
     // Kinds, for readable fixtures.
