@@ -44,7 +44,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 Names, parameter ranges, value formatting, and artwork come from HX Edit's own data files, which are Line 6's and are **not** redistributed here. The editor walks you through this the first time it opens: if HX Edit is installed on the machine it copies the data by itself, and otherwise it takes the HX Edit installer you download from [line6.com/software](https://line6.com/software/), either the Mac .dmg or the Windows .exe, on any OS.
 
-Reading an installer needs 7-Zip on Linux and Windows; on most distros that is the `p7zip` package, and the AUR package already suggests it. On Windows, install [7-Zip](https://www.7-zip.org/) the ordinary way and the editor finds it where the installer left it — there is nothing to add to PATH. macOS needs nothing extra.
+Reading an installer needs 7-Zip on Linux and Windows; on most distros that is the `p7zip` package, and the AUR package already suggests it. On Windows, install [7-Zip](https://www.7-zip.org/) the ordinary way and the editor finds it where the installer left it. There is nothing to add to PATH. macOS needs nothing extra.
 
 ## Connect
 

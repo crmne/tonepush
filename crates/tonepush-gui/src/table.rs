@@ -405,7 +405,7 @@ fn draw_headers(ui: &mut Ui, grid: &Grid) -> Option<(usize, bool)> {
 }
 
 /// The same visibility menu belongs to every header cell. Keeping it here
-/// also gives an empty table—whose headers are drawn without `egui_table`—the
+/// also gives an empty table (whose headers are drawn without `egui_table`) the
 /// identical interaction.
 fn column_context_menu(
     response: &egui::Response,

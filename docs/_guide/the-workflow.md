@@ -11,7 +11,7 @@ The pedal, your library and your setlists are three different things, and knowin
 **Your library is where tones live afterwards.** It is on your computer, not on the pedal, so it outlives any slot on any device. Sell the pedal, buy another, and your tones are still there.
 
 **A setlist is a whole pedal kept as one thing.** Every slot the connected
-device provides—126 on an HX Stomp, 60 on a StompStation PRO—in order, as they
+device provides (126 on an HX Stomp or 60 on a StompStation PRO) in order, as they
 were on the night they worked.
 
 ## The loop
@@ -48,7 +48,7 @@ This is also why deleting a tone from your library never breaks a setlist. If a 
 
 ## Publishing a Song and Tone
 
-On [TonePush](https://tonepush.rocks), a **Song** is the musical idea: either a catalog song by an Artist or an original. A **Tone** is one playable, device-native preset belonging to that Song. Publishing from the library creates the Song first and then attaches the publishable device artifact—`.hlx` for Line 6 or `.vxpreset` for StompStation PRO—as its first Tone. If adding the Tone fails, the editor says that the empty Song remains instead of pretending the two requests were one transaction.
+On [TonePush](https://tonepush.rocks), a **Song** is the musical idea: either a catalog song by an Artist or an original. A **Tone** is one playable, device-native preset belonging to that Song. Publishing from the library creates the Song first and then attaches the publishable device artifact (`.hlx` for Line 6 or `.vxpreset` for StompStation PRO) as its first Tone. If adding the Tone fails, the editor says that the empty Song remains instead of pretending the two requests were one transaction.
 
 **Export for the web** writes the same information without publishing it: the
 Tone's `.hlx` or `.vxpreset`, plus a `.json` manifest with separate `song` and
