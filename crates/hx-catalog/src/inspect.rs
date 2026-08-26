@@ -229,10 +229,18 @@ fn read_block(
 
     // No `@enabled` means on: the endpoints and a handful of blocks omit it, and
     // treating them as bypassed would misread the tone.
-    let enabled = block
-        .get("@enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let enabled = match block.get("@enabled") {
+        None => true,
+        Some(value) => match value.as_bool() {
+            Some(enabled) => enabled,
+            None => {
+                skipped.push(format!(
+                    "dsp{path}/block{position}: @enabled is not a boolean value"
+                ));
+                return;
+            }
+        },
+    };
 
     let mut params = Vec::new();
     for (key, value) in block.as_object().into_iter().flatten() {
@@ -402,6 +410,26 @@ mod tests {
             .iter()
             .any(|why| why.contains("Gain") && why.contains("not a numeric")));
         assert!(!tone.blocks[0].params.iter().any(|(name, _)| name == "Gain"));
+    }
+
+    #[test]
+    fn reports_a_malformed_bypass_flag() {
+        let Some(catalog) = catalog() else { return };
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": {
+                    "@model": "HD2_DistScream808Mono",
+                    "@enabled": "yes"
+                }
+            }}}
+        });
+
+        let tone = inspect(&json, &catalog);
+        assert!(tone.blocks.is_empty());
+        assert!(tone
+            .skipped
+            .iter()
+            .any(|why| why.contains("@enabled") && why.contains("not a boolean")));
     }
 
     #[test]
