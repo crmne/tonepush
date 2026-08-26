@@ -97,6 +97,16 @@ fn refusal_code(result: &Value) -> Result<i64> {
         .ok_or_else(|| Error::Protocol("device refusal has no valid error code".into()))
 }
 
+fn is_deferred(status: i64) -> Result<bool> {
+    match status {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(Error::Protocol(format!(
+            "deferred command returned unknown status {status}"
+        ))),
+    }
+}
+
 fn preset_matches(info: &(i64, i64, String), setlist: i64, index: i64) -> bool {
     info.0 == setlist && info.1 == index
 }
@@ -669,7 +679,7 @@ impl Session {
     /// racing commits before its transfer state machine jams for good.
     fn command_deferred(&mut self, id: ChannelId, opcode: i64, args: Value) -> Result<()> {
         let (txn, status, _) = self.request_raw(id, opcode, args)?;
-        if status != 1 {
+        if !is_deferred(status)? {
             return Ok(()); // completed synchronously
         }
         let deadline = Instant::now() + Self::COMPLETION_BUDGET;
@@ -1337,6 +1347,13 @@ mod tests {
             rpc::key::ERROR_CODE => Value::Str("bad reference".into()),
         };
         assert!(matches!(refusal_code(&wrong_type), Err(Error::Protocol(_))));
+    }
+
+    #[test]
+    fn deferred_commands_reject_unknown_statuses() {
+        assert!(!is_deferred(0).unwrap());
+        assert!(is_deferred(1).unwrap());
+        assert!(matches!(is_deferred(2), Err(Error::Protocol(_))));
     }
 
     #[test]
