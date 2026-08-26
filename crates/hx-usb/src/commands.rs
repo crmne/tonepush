@@ -18,6 +18,27 @@ use crate::{
     Session,
 };
 
+fn assignment_source(reply: &Value) -> Result<Option<rpc::Source>> {
+    if matches!(reply, Value::Nil) {
+        return Ok(None);
+    }
+    if !matches!(reply, Value::Map(_)) {
+        return Err(Error::Protocol(
+            "the device returned an invalid assignment".into(),
+        ));
+    }
+    let ordinal = reply
+        .get(rpc::key::ASSIGN_SOURCE)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| Error::Protocol("the assignment has no valid source".into()))?;
+    if ordinal == rpc::Source::NONE {
+        return Ok(None);
+    }
+    rpc::Source::from_ordinal(ordinal)
+        .map(Some)
+        .ok_or_else(|| Error::Protocol(format!("the assignment has unknown source {ordinal}")))
+}
+
 fn block_param(block: i64, param: i64) -> Result<()> {
     non_negative(block, "block")?;
     non_negative(param, "parameter index")
@@ -994,17 +1015,7 @@ impl Session {
         // every parameter came back unassigned, which is why an assignment that
         // the pedal had certainly made showed nothing at all in the editor.
         //
-        // A parameter nothing controls answers `nil`, not a map with a zero in
-        // it, so `get` finding nothing is the same answer as ordinal 0.
-        let ordinal = reply
-            .get(rpc::key::ASSIGN_SOURCE)
-            .and_then(|v| v.as_i64())
-            .unwrap_or(rpc::Source::NONE);
-        // Ordinal 0 is None, and `from_ordinal` says so by answering nothing.
-        let Some(source) = rpc::Source::from_ordinal(ordinal) else {
-            return Ok(None);
-        };
-        Ok(Some(Assignment { source }))
+        assignment_source(&reply).map(|source| source.map(|source| Assignment { source }))
     }
 
     /// Make a footswitch toggle a block in and out.
@@ -1246,6 +1257,37 @@ impl Session {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assignment_replies_distinguish_none_from_malformed() {
+        assert_eq!(assignment_source(&Value::Nil).unwrap(), None);
+        assert_eq!(
+            assignment_source(&hx_proto::msgmap! {
+                rpc::key::ASSIGN_SOURCE => Value::Int(0),
+            })
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            assignment_source(&hx_proto::msgmap! {
+                rpc::key::ASSIGN_SOURCE => Value::Int(1),
+            })
+            .unwrap(),
+            Some(rpc::Source::Expression(1))
+        );
+
+        assert!(assignment_source(&Value::Map(Vec::new())).is_err());
+        assert!(assignment_source(&hx_proto::msgmap! {
+            rpc::key::ASSIGN_SOURCE => Value::Int(99),
+        })
+        .is_err());
+        assert!(assignment_source(&Value::Bool(false)).is_err());
     }
 }
 
