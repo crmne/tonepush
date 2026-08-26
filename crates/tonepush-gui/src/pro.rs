@@ -235,10 +235,9 @@ pub(crate) struct Panel {
     tempo_draft: Option<String>,
     taps: Vec<std::time::Instant>,
     names: BTreeMap<(Library, usize), String>,
+    library_searches: BTreeMap<Library, String>,
     target_slots: BTreeMap<Library, usize>,
-    import_name: String,
-    stereo_left: usize,
-    stereo_right: usize,
+    slot_renaming: Option<(Library, usize)>,
     save_name: String,
     show_favorites_only: bool,
     renaming_preset: Option<(usize, String)>,
@@ -283,10 +282,9 @@ impl Panel {
             tempo_draft: None,
             taps: Vec::new(),
             names: BTreeMap::new(),
+            library_searches: BTreeMap::new(),
             target_slots: LIBRARIES.into_iter().map(|library| (library, 1)).collect(),
-            import_name: String::new(),
-            stereo_left: 1,
-            stereo_right: 2,
+            slot_renaming: None,
             save_name: String::new(),
             show_favorites_only: false,
             renaming_preset: None,
@@ -854,7 +852,9 @@ impl Panel {
             // paint over the rightmost controls.
             if block_selector(snapshot, &self.selected_group).is_some() {
                 egui::Panel::right("pro_shelf")
-                    .default_size(270.0)
+                    .min_size(320.0)
+                    .max_size(420.0)
+                    .default_size(360.0)
                     .resizable(true)
                     .show(root, |ui| self.model_shelf(ui, snapshot));
             }
@@ -1274,9 +1274,24 @@ impl Panel {
                 .hint_text("Search")
                 .desired_width(f32::INFINITY),
         );
-        self.shelf_library_tools(ui, snapshot, &description, &current);
-        ui.separator();
         let needle = self.shelf_search.trim().to_ascii_lowercase();
+        let referenced_library = description.reference.as_deref().and_then(|reference| {
+            snapshot
+                .libraries
+                .iter()
+                .find(|state| state.info.path.as_str() == reference)
+        });
+        if let Some(state) = referenced_library {
+            if matches!(
+                state.library,
+                Library::Irs | Library::Amps | Library::Drives
+            ) {
+                self.slot_library_shelf(ui, state, &path, &description, &current, &needle);
+                return;
+            }
+        }
+
+        ui.separator();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -1304,31 +1319,18 @@ impl Panel {
             });
     }
 
-    /// Put device-library operations beside the model list they affect. A NAM
-    /// amp or IR is selected here, so importing, naming and ordering it here is
-    /// less surprising than opening a second, unrelated manager window.
-    fn shelf_library_tools(
+    /// Installed IR/NAM choices are physical device slots, so show that fact
+    /// directly instead of putting a slot-number form above a name-only list.
+    fn slot_library_shelf(
         &mut self,
         ui: &mut egui::Ui,
-        snapshot: &Snapshot,
+        state: &LibraryState,
+        path: &NodePath,
         description: &NodeDescription,
         current: &Value,
+        needle: &str,
     ) {
-        let Some(reference) = description.reference.as_deref() else {
-            return;
-        };
-        let Some(state) = snapshot
-            .libraries
-            .iter()
-            .find(|state| state.info.path.as_str() == reference)
-        else {
-            return;
-        };
         let library = state.library;
-        if !matches!(library, Library::Irs | Library::Amps | Library::Drives) {
-            return;
-        }
-
         let current_index = current.as_str().and_then(|selected| {
             state
                 .info
@@ -1340,145 +1342,18 @@ impl Panel {
             self.target_slots.insert(library, index + 1);
         }
         ui.add_space(5.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("MANAGE").small().color(theme::DIM));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "{} / {}",
-                        state.info.occupied().count(),
-                        state.info.count
-                    ))
-                    .small()
-                    .color(theme::DIM),
-                );
-            });
-        });
-
-        ui.horizontal(|ui| {
-            let target = self.target_slots.entry(library).or_insert(1);
-            ui.label("Slot");
-            ui.add(egui::DragValue::new(target).range(1..=state.info.count));
-            if ui
-                .add_enabled(self.rollback.is_some(), egui::Button::new("Import…"))
-                .on_disabled_hover_text("capture or verify a rollback backup first")
-                .clicked()
-            {
-                if let Some(file) = rfd::FileDialog::new()
-                    .add_filter(library.extension(), &[library.extension()])
-                    .pick_file()
-                {
-                    let name = file
-                        .file_stem()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("Imported")
-                        .to_owned();
-                    let index = target.saturating_sub(1);
-                    let command = Cmd::Import {
-                        library,
-                        index,
-                        name,
-                        file,
-                    };
-                    if state.info.names.get(index).is_some_and(Option::is_some) {
-                        self.confirmation = Some(Confirmation {
-                            question: format!(
-                                "Replace {} slot {}? The rollback remains available.",
-                                library.title(),
-                                index + 1
-                            ),
-                            command,
-                        });
-                    } else {
-                        let _ = self.tx.send(command);
-                    }
-                }
-            }
-        });
-
-        let Some(index) = current_index else {
+        self.slot_count_header(ui, state);
+        if let Some(index) = current_index {
+            self.slot_tools_ui(ui, state, index);
+        } else {
             ui.label(
-                RichText::new("Choose an installed model to export or edit it.")
+                RichText::new("Choose an installed model below to manage its slot.")
                     .small()
                     .color(theme::DIM),
             );
-            return;
-        };
-        let draft = self.names.entry((library, index)).or_default();
-        ui.add(egui::TextEdit::singleline(draft).hint_text("Model name"));
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(
-                    self.rollback.is_some() && !draft.trim().is_empty(),
-                    egui::Button::new("Rename"),
-                )
-                .clicked()
-            {
-                let _ = self.tx.send(Cmd::Rename {
-                    library,
-                    index,
-                    name: draft.trim().into(),
-                });
-            }
-            if ui.button("Export…").clicked() {
-                let stem = sanitise(if draft.is_empty() { "model" } else { draft });
-                if let Some(file) = rfd::FileDialog::new()
-                    .set_file_name(format!("{stem}.{}", library.extension()))
-                    .save_file()
-                {
-                    let _ = self.tx.send(Cmd::Export {
-                        library,
-                        index,
-                        file,
-                    });
-                }
-            }
-            if state.info.movable {
-                if ui
-                    .add_enabled(self.rollback.is_some() && index > 0, egui::Button::new("↑"))
-                    .on_hover_text("move up")
-                    .clicked()
-                {
-                    let _ = self.tx.send(Cmd::Move {
-                        library,
-                        from: index,
-                        to: index - 1,
-                    });
-                }
-                if ui
-                    .add_enabled(
-                        self.rollback.is_some() && index + 1 < state.info.count,
-                        egui::Button::new("↓"),
-                    )
-                    .on_hover_text("move down")
-                    .clicked()
-                {
-                    let _ = self.tx.send(Cmd::Move {
-                        library,
-                        from: index,
-                        to: index + 1,
-                    });
-                }
-            }
-            if ui
-                .add_enabled(self.rollback.is_some(), egui::Button::new("Remove"))
-                .clicked()
-            {
-                self.confirmation = Some(Confirmation {
-                    question: format!(
-                        "Remove {} from {} slot {}?",
-                        draft,
-                        library.title(),
-                        index + 1
-                    ),
-                    command: Cmd::Clear { library, index },
-                });
-            }
-        });
-
-        if library == Library::Irs {
-            ui.collapsing("Stereo IR", |ui| self.stereo_ir_ui(ui, state.info.count));
         }
+        ui.separator();
+        self.slot_rows_ui(ui, state, needle, Some((path, description, current)));
     }
 
     fn device_window(&mut self, ctx: &egui::Context, snapshot: &Snapshot) {
@@ -1937,14 +1812,14 @@ impl Panel {
         };
         ui.horizontal(|ui| {
             ui.heading(library.title());
-            ui.label(
-                RichText::new(format!(
-                    "{} of {} occupied",
-                    state.info.occupied().count(),
-                    state.info.count
-                ))
-                .color(theme::DIM),
-            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let search = self.library_searches.entry(library).or_default();
+                ui.add(
+                    egui::TextEdit::singleline(search)
+                        .hint_text("Search slots")
+                        .desired_width(220.0),
+                );
+            });
         });
         if library == Library::Presets {
             ui.horizontal(|ui| {
@@ -1962,201 +1837,386 @@ impl Panel {
                 }
             });
         }
+        self.slot_count_header(ui, state);
+        let selected = self
+            .target_slots
+            .entry(library)
+            .or_insert(1)
+            .saturating_sub(1)
+            .min(state.info.count.saturating_sub(1));
+        self.slot_tools_ui(ui, state, selected);
+        ui.separator();
+        let needle = self
+            .library_searches
+            .get(&library)
+            .map_or("", String::as_str)
+            .trim()
+            .to_ascii_lowercase();
+        self.slot_rows_ui(ui, state, &needle, None);
+    }
+
+    fn slot_count_header(&self, ui: &mut egui::Ui, state: &LibraryState) {
         ui.horizontal(|ui| {
-            let target = self.target_slots.entry(library).or_insert(1);
-            ui.label("Slot");
-            ui.add(egui::DragValue::new(target).range(1..=state.info.count));
-            ui.label("name");
-            ui.add(egui::TextEdit::singleline(&mut self.import_name).desired_width(180.0));
-            if ui
-                .add_enabled(self.rollback.is_some(), egui::Button::new("Import…"))
-                .on_disabled_hover_text("load a rollback bundle first")
-                .clicked()
-            {
-                if let Some(file) = rfd::FileDialog::new()
-                    .add_filter(library.extension(), &[library.extension()])
-                    .pick_file()
+            ui.label(RichText::new("SLOTS").small().color(theme::DIM));
+            let occupied = state.info.occupied().count();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{occupied} installed · {} empty",
+                        state.info.count.saturating_sub(occupied)
+                    ))
+                    .small()
+                    .color(theme::DIM),
+                );
+            });
+        });
+    }
+
+    fn slot_tools_ui(&mut self, ui: &mut egui::Ui, state: &LibraryState, index: usize) {
+        let library = state.library;
+        let occupied = state.info.names.get(index).and_then(Option::as_deref);
+        ui.add_space(3.0);
+        ui.label(
+            RichText::new(format!("SLOT {}", index + 1))
+                .small()
+                .color(theme::DIM),
+        );
+        let Some(original) = occupied else {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Empty and ready for an import").color(theme::DIM));
+                if ui
+                    .add_enabled(self.rollback.is_some(), egui::Button::new("Import here…"))
+                    .on_disabled_hover_text("automatic backup must be ready first")
+                    .clicked()
                 {
-                    let name = if self.import_name.trim().is_empty() {
-                        file.file_stem()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("Imported")
-                            .to_owned()
-                    } else {
-                        self.import_name.trim().to_owned()
-                    };
-                    let index = target.saturating_sub(1);
-                    let command = Cmd::Import {
-                        library,
-                        index,
-                        name,
-                        file,
-                    };
-                    if state.info.names.get(index).is_some_and(Option::is_some) {
-                        self.confirmation = Some(Confirmation {
-                            question: format!(
-                                "Replace {} slot {}? The loaded rollback remains available.",
-                                library.title(),
-                                index + 1
-                            ),
-                            command,
-                        });
-                    } else {
-                        let _ = self.tx.send(command);
-                    }
+                    self.import_into_slot(state, index);
                 }
+            });
+            return;
+        };
+
+        let key = (library, index);
+        let editing_name = self.slot_renaming == Some(key);
+        let mut draft = self
+            .names
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| original.to_owned());
+        if editing_name {
+            if ui
+                .add(egui::TextEdit::singleline(&mut draft).hint_text("Slot name"))
+                .changed()
+            {
+                self.names.insert(key, draft.clone());
+            }
+        } else {
+            ui.label(RichText::new(original).strong());
+        }
+
+        let mut begin_rename = false;
+        let mut save_rename = false;
+        let mut cancel_rename = false;
+        let mut replace = false;
+        let mut export = false;
+        let mut up = false;
+        let mut down = false;
+        let mut remove = false;
+        let mut export_pair = false;
+        ui.horizontal_wrapped(|ui| {
+            if editing_name {
+                save_rename = ui
+                    .add_enabled(
+                        self.rollback.is_some() && !draft.trim().is_empty() && draft != original,
+                        egui::Button::new("Save name"),
+                    )
+                    .clicked();
+                cancel_rename = ui.button("Cancel").clicked();
+            } else {
+                begin_rename = ui
+                    .add_enabled(self.rollback.is_some(), egui::Button::new("Rename"))
+                    .clicked();
+                replace = ui
+                    .add_enabled(self.rollback.is_some(), egui::Button::new("Replace…"))
+                    .clicked();
+                export = ui.button("Export…").clicked();
+                if library == Library::Irs
+                    && state.info.names.get(index + 1).is_some_and(Option::is_some)
+                {
+                    export_pair = ui
+                        .button("Export pair…")
+                        .on_hover_text(format!(
+                            "export slots {} and {} as a stereo WAV",
+                            index + 1,
+                            index + 2
+                        ))
+                        .clicked();
+                }
+                if state.info.movable {
+                    up = ui
+                        .add_enabled(self.rollback.is_some() && index > 0, egui::Button::new("↑"))
+                        .on_hover_text("move this slot up")
+                        .clicked();
+                    down = ui
+                        .add_enabled(
+                            self.rollback.is_some() && index + 1 < state.info.count,
+                            egui::Button::new("↓"),
+                        )
+                        .on_hover_text("move this slot down")
+                        .clicked();
+                }
+                remove = ui
+                    .add_enabled(self.rollback.is_some(), egui::Button::new("Remove"))
+                    .clicked();
             }
         });
-        if library == Library::Irs {
-            self.stereo_ir_ui(ui, state.info.count);
+
+        if begin_rename {
+            self.names.insert(key, original.to_owned());
+            self.slot_renaming = Some(key);
         }
-        ui.separator();
+        if save_rename {
+            let _ = self.tx.send(Cmd::Rename {
+                library,
+                index,
+                name: draft.trim().into(),
+            });
+            self.slot_renaming = None;
+        }
+        if cancel_rename {
+            self.names.insert(key, original.to_owned());
+            self.slot_renaming = None;
+        }
+        if replace {
+            self.import_into_slot(state, index);
+        }
+        if export {
+            let stem = sanitise(if draft.is_empty() { "slot" } else { &draft });
+            if let Some(file) = rfd::FileDialog::new()
+                .set_file_name(format!("{stem}.{}", library.extension()))
+                .save_file()
+            {
+                let _ = self.tx.send(Cmd::Export {
+                    library,
+                    index,
+                    file,
+                });
+            }
+        }
+        if export_pair {
+            let stem = sanitise(if draft.is_empty() {
+                "stereo-ir"
+            } else {
+                &draft
+            });
+            if let Some(file) = rfd::FileDialog::new()
+                .set_file_name(format!("{stem}.wav"))
+                .save_file()
+            {
+                let _ = self.tx.send(Cmd::ExportStereo {
+                    left: index,
+                    right: index + 1,
+                    file,
+                });
+            }
+        }
+        if up {
+            let _ = self.tx.send(Cmd::Move {
+                library,
+                from: index,
+                to: index - 1,
+            });
+        }
+        if down {
+            let _ = self.tx.send(Cmd::Move {
+                library,
+                from: index,
+                to: index + 1,
+            });
+        }
+        if remove {
+            self.confirmation = Some(Confirmation {
+                question: format!(
+                    "Remove {original} from {} slot {}?",
+                    library.title(),
+                    index + 1
+                ),
+                command: Cmd::Clear { library, index },
+            });
+        }
+    }
+
+    fn slot_rows_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &LibraryState,
+        needle: &str,
+        selector: Option<(&NodePath, &NodeDescription, &Value)>,
+    ) {
+        let library = state.library;
+        let managed = self.target_slots.get(&library).copied().unwrap_or(1);
+        let mut chose = None;
+        let mut import = None;
+        let mut shown = 0usize;
         egui::ScrollArea::vertical()
+            .id_salt(("pro-slot-list", library.path()))
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for index in 0..state.info.count {
-                    let occupied = state.info.names[index].is_some();
+                    let name = state.info.names.get(index).and_then(Option::as_deref);
+                    if !slot_matches_search(index, name, needle) {
+                        continue;
+                    }
+                    shown += 1;
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("{:>2}", index + 1)).monospace());
-                        let draft = self.names.entry((library, index)).or_default();
-                        ui.add_enabled(
-                            occupied && self.rollback.is_some(),
-                            egui::TextEdit::singleline(draft).desired_width(260.0),
+                        ui.set_min_height(24.0);
+                        ui.label(
+                            RichText::new(format!("{:>2}", index + 1))
+                                .monospace()
+                                .color(theme::DIM),
                         );
-                        if occupied
+                        let selected = selector
+                            .and_then(|(_, _, current)| current.as_str())
+                            .zip(name)
+                            .is_some_and(|(current, name)| current == name)
+                            || (selector.is_none() && managed == index + 1);
+                        let text = match name {
+                            Some(name) => RichText::new(name),
+                            None => RichText::new("Empty slot").italics().color(theme::DIM),
+                        };
+                        if ui.selectable_label(selected, text).clicked() {
+                            chose = Some(index);
+                        }
+                        if name.is_none()
                             && ui
                                 .add_enabled(
-                                    self.rollback.is_some() && !draft.trim().is_empty(),
-                                    egui::Button::new("Rename"),
+                                    self.rollback.is_some(),
+                                    egui::Button::new("Import…").min_size(egui::vec2(68.0, 20.0)),
                                 )
+                                .on_disabled_hover_text("automatic backup must be ready first")
                                 .clicked()
                         {
-                            let _ = self.tx.send(Cmd::Rename {
-                                library,
-                                index,
-                                name: draft.trim().into(),
-                            });
-                        }
-                        if library == Library::Presets
-                            && ui
-                                .add_enabled(occupied, egui::Button::new("Select"))
-                                .clicked()
-                        {
-                            let _ = self.tx.send(Cmd::SelectPreset(index));
-                        }
-                        if ui
-                            .add_enabled(occupied, egui::Button::new("Export…"))
-                            .clicked()
-                        {
-                            let stem = sanitise(if draft.is_empty() { "slot" } else { draft });
-                            if let Some(file) = rfd::FileDialog::new()
-                                .set_file_name(format!("{stem}.{}", library.extension()))
-                                .save_file()
-                            {
-                                let _ = self.tx.send(Cmd::Export {
-                                    library,
-                                    index,
-                                    file,
-                                });
-                            }
-                        }
-                        if state.info.movable {
-                            if ui
-                                .add_enabled(
-                                    self.rollback.is_some() && index > 0,
-                                    egui::Button::new("↑"),
-                                )
-                                .clicked()
-                            {
-                                let _ = self.tx.send(Cmd::Move {
-                                    library,
-                                    from: index,
-                                    to: index - 1,
-                                });
-                            }
-                            if ui
-                                .add_enabled(
-                                    self.rollback.is_some() && index + 1 < state.info.count,
-                                    egui::Button::new("↓"),
-                                )
-                                .clicked()
-                            {
-                                let _ = self.tx.send(Cmd::Move {
-                                    library,
-                                    from: index,
-                                    to: index + 1,
-                                });
-                            }
-                        }
-                        if ui
-                            .add_enabled(
-                                occupied && self.rollback.is_some(),
-                                egui::Button::new("Clear"),
-                            )
-                            .clicked()
-                        {
-                            self.confirmation = Some(Confirmation {
-                                question: format!(
-                                    "Clear {} slot {} ({draft})?",
-                                    library.title(),
-                                    index + 1
-                                ),
-                                command: Cmd::Clear { library, index },
-                            });
+                            import = Some(index);
                         }
                     });
                 }
             });
+        if shown == 0 {
+            ui.label(RichText::new("No slots match this search.").color(theme::DIM));
+        }
+        if let Some(index) = chose {
+            if self.slot_renaming != Some((library, index)) {
+                self.slot_renaming = None;
+            }
+            self.target_slots.insert(library, index + 1);
+            if let (Some((path, description, current)), Some(name)) = (
+                selector,
+                state.info.names.get(index).and_then(Option::as_deref),
+            ) {
+                let value = Value::String(name.to_owned());
+                if description.validate_value(&value).is_ok() && value != *current {
+                    let _ = self.tx.send(Cmd::SetNode {
+                        path: path.clone(),
+                        description: Box::new(description.clone()),
+                        before: current.clone(),
+                        value: value.clone(),
+                        persistent: false,
+                    });
+                    self.drafts.insert(path.to_string(), value);
+                    self.recompute_dirty();
+                }
+            }
+        }
+        if let Some(index) = import {
+            self.import_into_slot(state, index);
+        }
     }
 
-    fn stereo_ir_ui(&mut self, ui: &mut egui::Ui, count: usize) {
-        ui.horizontal(|ui| {
-            ui.label("Stereo pair L/R");
-            ui.add(egui::DragValue::new(&mut self.stereo_left).range(1..=count));
-            ui.add(egui::DragValue::new(&mut self.stereo_right).range(1..=count));
-            if ui
-                .add_enabled(self.rollback.is_some(), egui::Button::new("Import stereo…"))
-                .clicked()
-            {
-                if let Some(file) = rfd::FileDialog::new()
-                    .add_filter("WAV", &["wav"])
-                    .pick_file()
-                {
-                    let name = if self.import_name.trim().is_empty() {
-                        file.file_stem()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("Stereo IR")
-                            .to_owned()
-                    } else {
-                        self.import_name.trim().to_owned()
-                    };
-                    self.confirmation = Some(Confirmation {
-                        question: format!(
-                            "Import stereo IR into slots {} and {}?",
-                            self.stereo_left, self.stereo_right
-                        ),
-                        command: Cmd::ImportStereo {
-                            left: self.stereo_left.saturating_sub(1),
-                            right: self.stereo_right.saturating_sub(1),
-                            name,
-                            file,
-                        },
-                    });
-                }
-            }
-            if ui.button("Export stereo…").clicked() {
-                if let Some(file) = rfd::FileDialog::new()
-                    .set_file_name("stereo-ir.wav")
-                    .save_file()
-                {
-                    let _ = self.tx.send(Cmd::ExportStereo {
-                        left: self.stereo_left.saturating_sub(1),
-                        right: self.stereo_right.saturating_sub(1),
+    fn import_into_slot(&mut self, state: &LibraryState, index: usize) {
+        let library = state.library;
+        let label = if library == Library::Irs {
+            "WAV impulse response"
+        } else {
+            "NAM model"
+        };
+        let Some(file) = rfd::FileDialog::new()
+            .add_filter(label, &[library.extension()])
+            .pick_file()
+        else {
+            return;
+        };
+        let name = file
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Imported")
+            .to_owned();
+
+        let (command, targets) = if library == Library::Irs {
+            let read = std::fs::read(&file)
+                .map_err(|error| format!("Could not read {}: {error}", file.display()))
+                .and_then(|bytes| {
+                    let wav = voidx_client::ir::Wav::parse(&bytes).map_err(|e| e.to_string())?;
+                    let channels = wav
+                        .device_blobs(state.info.size)
+                        .map_err(|e| e.to_string())?
+                        .len();
+                    Ok(channels)
+                });
+            match read.and_then(|channels| ir_import_targets(channels, index, state.info.count)) {
+                Ok(targets) if targets.len() == 1 => (
+                    Cmd::Import {
+                        library,
+                        index,
+                        name,
                         file,
-                    });
+                    },
+                    targets,
+                ),
+                Ok(targets) => (
+                    Cmd::ImportStereo {
+                        left: targets[0],
+                        right: targets[1],
+                        name,
+                        file,
+                    },
+                    targets,
+                ),
+                Err(error) => {
+                    self.status = error;
+                    return;
                 }
             }
-        });
+        } else {
+            (
+                Cmd::Import {
+                    library,
+                    index,
+                    name,
+                    file,
+                },
+                vec![index],
+            )
+        };
+
+        let occupied = targets
+            .iter()
+            .filter(|&&slot| state.info.names.get(slot).is_some_and(Option::is_some))
+            .count();
+        if occupied > 0 {
+            let slots = targets
+                .iter()
+                .map(|slot| (slot + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(" and ");
+            self.confirmation = Some(Confirmation {
+                question: format!(
+                    "Replace {occupied} occupied {} slot(s) at {slots}? The automatic backup remains available.",
+                    library.title()
+                ),
+                command,
+            });
+        } else {
+            let _ = self.tx.send(command);
+        }
     }
 
     fn backup_ui(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
@@ -2276,6 +2336,29 @@ fn node_matches_search(path: &str, description: &NodeDescription, needle: &str) 
             .desc
             .as_deref()
             .is_some_and(|desc| desc.to_ascii_lowercase().contains(needle))
+}
+
+fn slot_matches_search(index: usize, name: Option<&str>, needle: &str) -> bool {
+    needle.is_empty()
+        || (index + 1).to_string().contains(needle)
+        || name
+            .unwrap_or("empty slot")
+            .to_ascii_lowercase()
+            .contains(needle)
+}
+
+fn ir_import_targets(channels: usize, start: usize, count: usize) -> Result<Vec<usize>, String> {
+    match channels {
+        1 if start < count => Ok(vec![start]),
+        2 if start + 1 < count => Ok(vec![start, start + 1]),
+        2 => Err(format!(
+            "A stereo IR needs two adjacent slots; slot {} is the last slot",
+            start + 1
+        )),
+        channels => Err(format!(
+            "PRO IR import does not support {channels} channels"
+        )),
+    }
 }
 
 fn node_label(path: &NodePath, description: &NodeDescription) -> String {
@@ -4034,6 +4117,26 @@ root\\app\\ir\\on_off:{\"value\":\"OFF\"}\r\n";
         };
         assert_eq!(unique_slot_name(&list, 2, "Clean"), "Clean 3");
         assert_eq!(unique_slot_name(&list, 0, "Clean"), "Clean");
+    }
+
+    #[test]
+    fn slot_searches_cover_numbers_names_and_empty_destinations() {
+        assert!(slot_matches_search(22, Some("British Lead"), "23"));
+        assert!(slot_matches_search(22, Some("British Lead"), "lead"));
+        assert!(slot_matches_search(22, None, "empty"));
+        assert!(!slot_matches_search(22, None, "lead"));
+    }
+
+    #[test]
+    fn stereo_ir_import_owns_the_adjacent_slot() {
+        assert_eq!(ir_import_targets(1, 9, 60).unwrap(), vec![9]);
+        assert_eq!(ir_import_targets(2, 9, 60).unwrap(), vec![9, 10]);
+        assert!(ir_import_targets(2, 59, 60)
+            .unwrap_err()
+            .contains("two adjacent slots"));
+        assert!(ir_import_targets(3, 9, 60)
+            .unwrap_err()
+            .contains("does not support 3 channels"));
     }
 
     #[test]
