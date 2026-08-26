@@ -384,7 +384,7 @@ impl Encoder {
             Value::Bool(true) => self.buf.push(0xc3),
             Value::UInt(u) => self.uint(*u),
             Value::WideInt(i, width) => {
-                let width = integer_width(*width);
+                let width = signed_width(*i, *width);
                 self.buf.push(match width {
                     1 => 0xd0,
                     2 => 0xd1,
@@ -394,7 +394,7 @@ impl Encoder {
                 self.buf.extend_from_slice(&i.to_be_bytes()[8 - width..]);
             }
             Value::Wide(u, width) => {
-                let width = integer_width(*width);
+                let width = unsigned_width(*u, *width);
                 self.buf.push(match width {
                     1 => 0xcc,
                     2 => 0xcd,
@@ -529,6 +529,32 @@ fn integer_width(width: u8) -> usize {
     }
 }
 
+fn signed_width(value: i64, requested: u8) -> usize {
+    let needed = if i8::try_from(value).is_ok() {
+        1
+    } else if i16::try_from(value).is_ok() {
+        2
+    } else if i32::try_from(value).is_ok() {
+        4
+    } else {
+        8
+    };
+    integer_width(requested).max(needed)
+}
+
+fn unsigned_width(value: u64, requested: u8) -> usize {
+    let needed = if u8::try_from(value).is_ok() {
+        1
+    } else if u16::try_from(value).is_ok() {
+        2
+    } else if u32::try_from(value).is_ok() {
+        4
+    } else {
+        8
+    };
+    integer_width(requested).max(needed)
+}
+
 /// Build a map from integer-keyed pairs - the shape nearly every request takes.
 #[macro_export]
 macro_rules! msgmap {
@@ -635,6 +661,20 @@ mod tests {
             assert_eq!(unsigned[0], 0xcf);
             assert_eq!(Decoder::new(&unsigned).value().unwrap().as_i64(), Some(7));
         }
+    }
+
+    #[test]
+    fn undersized_preserved_integer_widths_are_promoted() {
+        let signed = Encoder::encode(&Value::WideInt(300, 1));
+        assert_eq!(signed[0], 0xd1);
+        assert_eq!(Decoder::new(&signed).value().unwrap().as_i64(), Some(300));
+
+        let unsigned = Encoder::encode(&Value::Wide(u64::from(u32::MAX) + 1, 2));
+        assert_eq!(unsigned[0], 0xcf);
+        assert_eq!(
+            Decoder::new(&unsigned).value().unwrap(),
+            Value::Wide(u64::from(u32::MAX) + 1, 8)
+        );
     }
 
     #[test]
