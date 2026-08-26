@@ -126,6 +126,34 @@ impl LibraryLookup {
     }
 }
 
+/// Draw the application version identically in every device adapter's status
+/// bar. Device and firmware labels vary; TonePush itself does not.
+fn version_label_ui(ui: &mut egui::Ui, update_available: Option<&str>) {
+    let (text, hover, url) = match update_available {
+        Some(tag) => (
+            RichText::new(format!("TonePush {} · {tag} available", update::VERSION))
+                .small()
+                .color(theme::ACCENT),
+            "A newer TonePush release is available. Click to open it.".to_owned(),
+            update::RELEASES,
+        ),
+        None => (
+            RichText::new(format!("TonePush {}", update::VERSION))
+                .small()
+                .color(theme::DIM),
+            format!("TonePush {} · click for the releases page", update::VERSION),
+            update::RELEASES,
+        ),
+    };
+    if ui
+        .add(egui::Label::new(text).sense(egui::Sense::click()))
+        .on_hover_text(hover)
+        .clicked()
+    {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+    }
+}
+
 /// A sign-in waiting on somebody, somewhere else.
 ///
 /// The code is on screen so it can be checked against the page, and the URL is
@@ -1493,6 +1521,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.drain_events();
         self.pro.drain();
+        self.poll_update_check();
         for (name, bytes, replace) in self.pro.take_library_documents() {
             if replace {
                 let updated = library::named(&name)
@@ -1551,7 +1580,7 @@ impl eframe::App for App {
         }
         if pro_active {
             self.pro.top_bar(ui);
-            self.pro.status_bar(ui);
+            self.pro.status_bar(ui, self.update_available.as_deref());
             // This is the exact TonePush library surface used by HX devices:
             // local Tones, ordered Setlists, and Cloud all occupy the same
             // shared state and the same widgets.
@@ -1892,9 +1921,7 @@ impl App {
     /// release exists the label picks up the accent and gains a clause, which
     /// is enough - a modal on startup would be an editor interrupting a person
     /// to talk about itself.
-    fn version_label(&mut self, ui: &mut egui::Ui) {
-        // The answer arrives on its own schedule, and the receiver is dropped
-        // once it has spoken or hung up, so this costs nothing thereafter.
+    fn poll_update_check(&mut self) {
         if let Some(rx) = &self.update_check {
             match rx.try_recv() {
                 Ok(tag) => {
@@ -1905,30 +1932,10 @@ impl App {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
+    }
 
-        let (text, hover, url) = match &self.update_available {
-            Some(tag) => (
-                RichText::new(format!("TonePush {} · {tag} available", update::VERSION))
-                    .small()
-                    .color(theme::ACCENT),
-                "A newer TonePush release is available. Click to open it.".to_owned(),
-                update::RELEASES,
-            ),
-            None => (
-                RichText::new(format!("TonePush {}", update::VERSION))
-                    .small()
-                    .color(theme::DIM),
-                format!("TonePush {} · click for the releases page", update::VERSION),
-                update::RELEASES,
-            ),
-        };
-        if ui
-            .add(egui::Label::new(text).sense(egui::Sense::click()))
-            .on_hover_text(hover)
-            .clicked()
-        {
-            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-        }
+    fn version_label(&mut self, ui: &mut egui::Ui) {
+        version_label_ui(ui, self.update_available.as_deref());
     }
 
     /// The editing keys every editor answers to. Skipped while something has

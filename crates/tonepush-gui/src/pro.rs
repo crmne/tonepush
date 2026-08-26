@@ -185,7 +185,10 @@ enum Evt {
     ForgetPresetHashes,
     SetlistRead(Vec<(String, Option<Vec<u8>>)>),
     Auditioning(Option<i64>),
-    Guarded(PathBuf),
+    Guarded {
+        path: PathBuf,
+        preset_hashes: BTreeMap<usize, String>,
+    },
     History {
         undo: usize,
         redo: usize,
@@ -382,8 +385,12 @@ impl Panel {
                     self.captured_setlists.push(slots);
                 }
                 Ok(Evt::Auditioning(key)) => self.audition_events.push(key),
-                Ok(Evt::Guarded(path)) => {
+                Ok(Evt::Guarded {
+                    path,
+                    preset_hashes,
+                }) => {
                     self.rollback = Some(path);
+                    self.preset_hashes = preset_hashes;
                     self.working = None;
                     self.status.clear();
                 }
@@ -766,7 +773,7 @@ impl Panel {
         }
     }
 
-    pub(crate) fn status_bar(&mut self, root: &mut egui::Ui) {
+    pub(crate) fn status_bar(&mut self, root: &mut egui::Ui, update_available: Option<&str>) {
         let snapshot = self.snapshot.clone();
         processor::status_bar(root, "pro_status", |ui| {
             ui.add_space(8.0);
@@ -808,6 +815,7 @@ impl Panel {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
+                crate::version_label_ui(ui, update_available);
                 let guard = if self.rollback.is_some() {
                     "Automatic backup ready"
                 } else {
@@ -2981,12 +2989,16 @@ impl Worker {
             }
             Cmd::UseRollback(path) => {
                 let bundle = backup::open_verified(&path)?;
+                let preset_hashes = preset_hashes_from_bundle(&bundle)?;
                 let device = self.device()?;
                 let rollback = bundle.arm(device)?;
                 device.enable_writes()?;
                 self.rollback = Some(rollback);
                 self.rollback_path = Some(path.clone());
-                self.send(Evt::Guarded(path));
+                self.send(Evt::Guarded {
+                    path,
+                    preset_hashes,
+                });
                 Ok(())
             }
             Cmd::SavePreset(name) => {
@@ -3319,10 +3331,13 @@ impl Worker {
         // is important, but it should not make a healthy pedal look absent
         // while it runs: publish the live editor first, then unlock writes.
         let guarded = self.device.as_mut().and_then(latest_matching_rollback);
-        if let Some((path, rollback)) = guarded {
+        if let Some((path, rollback, preset_hashes)) = guarded {
             self.rollback = Some(rollback);
             self.rollback_path = Some(path.clone());
-            self.send(Evt::Guarded(path));
+            self.send(Evt::Guarded {
+                path,
+                preset_hashes,
+            });
         } else {
             self.rollback = None;
             self.rollback_path = None;
@@ -3412,10 +3427,15 @@ impl Worker {
             };
             let _ = events.send(Evt::Working { what, progress });
         })?;
-        let rollback = backup::open_verified(path)?.arm(self.device()?)?;
+        let bundle = backup::open_verified(path)?;
+        let preset_hashes = preset_hashes_from_bundle(&bundle)?;
+        let rollback = bundle.arm(self.device()?)?;
         self.rollback = Some(rollback);
         self.rollback_path = Some(path.to_owned());
-        self.send(Evt::Guarded(path.to_owned()));
+        self.send(Evt::Guarded {
+            path: path.to_owned(),
+            preset_hashes,
+        });
         Ok(())
     }
 
@@ -3759,16 +3779,54 @@ impl Worker {
 /// Reuse the newest complete backup that still proves equal to this pedal.
 /// This gives ordinary Save/Send interactions the same immediacy as HX while
 /// retaining the PRO rule that a persistent write never starts unguarded.
-fn latest_matching_rollback(device: &mut Device<SerialLink>) -> Option<(PathBuf, ArmedRollback)> {
+fn latest_matching_rollback(
+    device: &mut Device<SerialLink>,
+) -> Option<(PathBuf, ArmedRollback, BTreeMap<usize, String>)> {
     for path in backup_candidates()? {
         let Ok(bundle) = backup::open_verified(&path) else {
             continue;
         };
+        let Ok(preset_hashes) = preset_hashes_from_bundle(&bundle) else {
+            continue;
+        };
         if let Ok(rollback) = bundle.arm(device) {
-            return Some((path, rollback));
+            return Some((path, rollback, preset_hashes));
         }
     }
     None
+}
+
+/// The rollback already owns every verified device byte. Convert its padded
+/// preset blobs to the same portable bytes the local library stores, so PRO
+/// preset rows can use the exact HX three-state comparison without another
+/// serial read.
+fn preset_hashes_from_bundle(
+    bundle: &backup::VerifiedBundle,
+) -> WorkResult<BTreeMap<usize, String>> {
+    let list = bundle.list(Library::Presets.path()).ok_or_else(|| {
+        WorkError::Other("verified backup has no StompStation preset library".into())
+    })?;
+    let mut hashes = BTreeMap::new();
+    for slot in &list.slots {
+        if slot.name.is_none() {
+            continue;
+        }
+        let blob = bundle
+            .blob(Library::Presets.path(), slot.index)
+            .ok_or_else(|| {
+                WorkError::Other(format!(
+                    "verified backup has no bytes for preset slot {}",
+                    slot.index + 1
+                ))
+            })?;
+        hashes.insert(slot.index, preset_blob_hash(blob)?);
+    }
+    Ok(hashes)
+}
+
+fn preset_blob_hash(blob: &[u8]) -> WorkResult<String> {
+    let bytes = export_blob(Library::Presets, blob, blob.len())?;
+    Ok(crate::library::hash_of(&bytes))
 }
 
 fn latest_verified_backup(identity: &Identity) -> Option<(PathBuf, backup::VerifiedBundle)> {
@@ -4137,6 +4195,22 @@ root\\app\\ir\\on_off:{\"value\":\"OFF\"}\r\n";
         assert!(ir_import_targets(3, 9, 60)
             .unwrap_err()
             .contains("does not support 3 channels"));
+    }
+
+    #[test]
+    fn padded_device_preset_hashes_match_portable_library_objects() {
+        let portable = b"root\\app\\amp\\gain:{\"value\":42.0}";
+        let mut device = portable.to_vec();
+        device.resize(16_384, 0);
+        let Ok(device_hash) = preset_blob_hash(&device) else {
+            panic!("valid padded preset should hash")
+        };
+
+        assert_eq!(
+            device_hash,
+            crate::library::hash_of(portable),
+            "sync compares the exact portable bytes kept by the local library"
+        );
     }
 
     #[test]
