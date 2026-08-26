@@ -659,9 +659,14 @@ pub fn read_setlist_file(bytes: &[u8]) -> Result<Backup, Error> {
     let compressed = base64(encoded)
         .ok_or_else(|| Error::Backup("the setlist file's payload is not base64".into()))?;
     const MAX_SETLIST_LEN: u64 = 64 * 1024 * 1024;
-    let declared = wrapper
-        .pointer("/compression/decompressed_size")
-        .and_then(Value::as_u64);
+    let optional_unsigned = |pointer: &str, name: &str| match wrapper.pointer(pointer) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| Error::Backup(format!("the setlist file's {name} is not valid"))),
+    };
+    let declared = optional_unsigned("/compression/decompressed_size", "decompressed size")?;
     let limit = declared.unwrap_or(MAX_SETLIST_LEN);
     if limit > MAX_SETLIST_LEN {
         return Err(Error::Backup(format!(
@@ -683,10 +688,7 @@ pub fn read_setlist_file(bytes: &[u8]) -> Result<Backup, Error> {
             )));
         }
     }
-    if let Some(expected) = wrapper
-        .pointer("/compression/crc32")
-        .and_then(Value::as_u64)
-    {
+    if let Some(expected) = optional_unsigned("/compression/crc32", "checksum")? {
         let expected = u32::try_from(expected)
             .map_err(|_| Error::Backup("the setlist file's checksum is out of range".into()))?;
         let got = crc32(&raw);
@@ -865,6 +867,20 @@ mod editor_file_tests {
         // Drop a chunk out of the middle of the payload.
         let cut = text.replacen("eNrs", "eNr", 1);
         assert!(read_setlist_file(cut.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn malformed_setlist_compression_metadata_is_refused() {
+        let Some(bytes) = capture("HX Stomp.hls") else {
+            return;
+        };
+        let mut wrapper: Value = serde_json::from_slice(&bytes).unwrap();
+        wrapper["compression"]["decompressed_size"] = json!("many");
+        assert!(read_setlist_file(&serde_json::to_vec(&wrapper).unwrap()).is_err());
+
+        let mut wrapper: Value = serde_json::from_slice(&bytes).unwrap();
+        wrapper["compression"]["crc32"] = json!(-1);
+        assert!(read_setlist_file(&serde_json::to_vec(&wrapper).unwrap()).is_err());
     }
 
     /// A `.fav` holds one block, and an amp brings its cab.
