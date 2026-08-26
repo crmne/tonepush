@@ -1123,11 +1123,18 @@ impl Preset {
 
     /// Drop a previously copied slot into `position`.
     ///
-    /// Returns false if the position does not exist. The slot keeps whatever
-    /// kind it was given, so pasting a block over an input is refused: the
-    /// endpoints are fixtures of the topology, not slots you can fill.
+    /// Returns false if either side is not an effect/empty position. Inputs,
+    /// outputs and junctions are fixtures of the topology, not slots that can
+    /// be moved or filled.
     pub fn paste_slot(&mut self, position: usize, slot: &Value) -> bool {
         if !slot_is_well_formed(slot) {
+            return false;
+        }
+        let source_kind = slot
+            .get(key::KIND)
+            .and_then(Value::as_i64)
+            .map(Kind::from_wire);
+        if !matches!(source_kind, Some(Kind::Block) | Some(Kind::Empty)) {
             return false;
         }
         let kind = self.slots.get(position).map(|s| s.kind);
@@ -2502,6 +2509,26 @@ mod tests {
 
         assert!(!preset.paste_slot(input, &block));
         assert_eq!(preset.slots[input].kind, Kind::Input, "the input survived");
+    }
+
+    #[test]
+    fn a_junction_cannot_be_pasted_over_a_block_slot() {
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+        let split = preset
+            .slots
+            .iter()
+            .position(|slot| slot.kind == Kind::Split)
+            .expect("a split junction");
+        let empty = preset
+            .slots
+            .iter()
+            .position(|slot| slot.kind == Kind::Empty)
+            .expect("an empty block slot");
+        let junction = preset.copy_slot(split).unwrap();
+        let before = preset.copy_slot(empty).unwrap();
+
+        assert!(!preset.paste_slot(empty, &junction));
+        assert_eq!(preset.copy_slot(empty), Some(before));
     }
 
     #[test]
