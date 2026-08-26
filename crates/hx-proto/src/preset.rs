@@ -1272,10 +1272,23 @@ fn value_array_is_well_formed(value: &Value) -> bool {
     let Some(Value::Array(items)) = value.get(key::ARRAY_VALUES) else {
         return false;
     };
-    items.iter().all(|item| match item {
-        Value::Bool(_) => true,
-        other => other.as_f32().is_some_and(f32::is_finite),
-    })
+    let count_matches = value.get(2).is_none_or(|count| {
+        count.as_i64().and_then(|count| usize::try_from(count).ok()) == Some(items.len())
+    });
+    // Key 3 is usually the same count, but is deliberately one short for a
+    // few model families. It may not claim more values than the array holds.
+    let secondary_count_fits = value.get(3).is_none_or(|count| {
+        count
+            .as_i64()
+            .and_then(|count| usize::try_from(count).ok())
+            .is_some_and(|count| count <= items.len())
+    });
+    count_matches
+        && secondary_count_fits
+        && items.iter().all(|item| match item {
+            Value::Bool(_) => true,
+            other => other.as_f32().is_some_and(f32::is_finite),
+        })
 }
 
 fn model_number(body: &Value) -> Option<u32> {
@@ -2313,6 +2326,18 @@ mod tests {
             .and_then(|slot| slot.at_mut(&[key::BODY, key::VALUES, key::ARRAY_VALUES]))
             .unwrap() = Value::Array(vec![Value::Str("not a parameter".into())]);
         assert!(Preset::parse(&malformed_values.encode()).is_none());
+
+        let mut stale_value_count = Preset::parse(&sample()).unwrap();
+        *stale_value_count
+            .tone
+            .at_mut(&[key::PATH, key::SLOTS])
+            .and_then(|slots| match slots {
+                Value::Array(slots) => slots.first_mut(),
+                _ => None,
+            })
+            .and_then(|slot| slot.at_mut(&[key::BODY, key::VALUES, 2]))
+            .unwrap() = Value::Int(99);
+        assert!(Preset::parse(&stale_value_count.encode()).is_none());
 
         let mut missing_model = Preset::parse(&sample()).unwrap();
         *missing_model
