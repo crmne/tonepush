@@ -176,13 +176,14 @@ pub struct Grid {
     /// menu can be drawn inside the cell where egui wants it without the table
     /// having to borrow the app that owns the actions.
     pub menu: Vec<String>,
-    /// Said instead of an empty grid of rows. The headers still show, because a
-    /// table with no rows should still say what it would hold.
+    /// Said before the optional cue icon when there are no rows. The headers
+    /// still show, because an empty table should still say what it would hold.
     pub nothing_yet: &'static str,
-    /// The exact interface glyph an empty-state instruction refers to. Showing
-    /// it beside the sentence is clearer than asking somebody to translate an
-    /// icon name and then hunt for the matching shape elsewhere.
+    /// The exact interface glyph an empty-state instruction refers to.
     pub nothing_icon: Option<theme::Icon>,
+    /// The rest of the sentence after [`Self::nothing_icon`], allowing the
+    /// actual glyph to sit where its name would otherwise have to be.
+    pub nothing_after_icon: &'static str,
     /// How tall a row is. Zero means [`ROW_HEIGHT`], which is a line of text; a
     /// table with knobs in it needs the room a knob takes.
     pub row_height: f32,
@@ -270,11 +271,13 @@ pub fn show(ui: &mut Ui, id: &str, grid: &mut Grid) -> Did {
         draw_headers(ui, grid);
         ui.add_space(10.0);
         ui.horizontal(|ui| {
+            ui.label(RichText::new(grid.nothing_yet).color(theme::DIM));
             if let Some(icon) = grid.nothing_icon {
                 theme::place_enabled(ui, icon, theme::Sync::Absent, false);
-                ui.add_space(2.0);
+                if !grid.nothing_after_icon.is_empty() {
+                    ui.label(RichText::new(grid.nothing_after_icon).color(theme::DIM));
+                }
             }
-            ui.label(RichText::new(grid.nothing_yet).color(theme::DIM));
         });
         return Did::default();
     }

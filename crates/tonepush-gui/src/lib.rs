@@ -4425,9 +4425,9 @@ impl App {
             sticky: 1,
             sort: self.lib_setlist_sort,
             menu: vec!["Remove this setlist".to_owned()],
-            nothing_yet: "No setlists yet. Find this computer icon in the SETLIST header above \
-                          and press it to save the whole pedal as one.",
+            nothing_yet: "No setlists yet. Click",
             nothing_icon: Some(theme::Icon::Computer),
+            nothing_after_icon: "in the SETLIST header to save one.",
             ..Default::default()
         };
         for &index in &rows {
@@ -4943,9 +4943,9 @@ impl App {
             } else {
                 "Delete".to_owned()
             }],
-            nothing_yet: "No tones yet. Find this computer icon beside any preset above and \
-                          press it to save that preset locally.",
+            nothing_yet: "No tones yet. Click",
             nothing_icon: Some(theme::Icon::Computer),
+            nothing_after_icon: "beside a preset to save it.",
             ..Default::default()
         };
         for &i in &rows {
