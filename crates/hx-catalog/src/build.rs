@@ -338,7 +338,10 @@ fn build_slot(node: &Json, cab: Option<&Json>, catalog: &Catalog) -> Result<Valu
         None => None,
     };
 
-    let enabled = node.get("@enabled").and_then(Json::as_bool).unwrap_or(true);
+    let enabled = match node.get("@enabled") {
+        Some(value) => value.as_bool().ok_or("@enabled is not a boolean value")?,
+        None => true,
+    };
     let type_tag = catalog
         .type_tag(model, paired.is_some())
         .ok_or_else(|| format!("no engine class for {symbol_name}"))?;
@@ -550,6 +553,18 @@ mod tests {
 
         let wrong_container = serde_json::json!({ "@unnamed": 0.5 });
         assert!(values_for(symbol, &wrong_container, &catalog).is_err());
+    }
+
+    #[test]
+    fn document_building_refuses_a_malformed_bypass_flag() {
+        let Some(catalog) = crate::tests::catalog() else {
+            return;
+        };
+        let node = serde_json::json!({
+            "@model": "HD2_DistScream808Mono",
+            "@enabled": "yes"
+        });
+        assert!(build_slot(&node, None, &catalog).is_err());
     }
 
     #[test]
