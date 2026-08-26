@@ -72,7 +72,22 @@ pub(crate) fn catalog(dir: &Path) -> Result<Catalog, Error> {
 
 /// The symbol table, whose position in the file is the device's model number.
 fn symbols(dir: &Path, models: &HashMap<String, Model>) -> Result<Vec<Symbol>, Error> {
-    let raw: Vec<RawSymbol> = read(&dir.join("Helix.sym"))?;
+    let path = dir.join("Helix.sym");
+    let raw: Vec<RawSymbol> = read(&path)?;
+    for (number, symbol) in raw.iter().enumerate() {
+        if symbol.symbol.is_empty() {
+            return Err(Error::Invalid {
+                path,
+                reason: format!("symbol {number} has no name"),
+            });
+        }
+        if symbol.parameters.iter().any(String::is_empty) {
+            return Err(Error::Invalid {
+                path,
+                reason: format!("symbol {} has an unnamed parameter", symbol.symbol),
+            });
+        }
+    }
     Ok(raw
         .into_iter()
         .enumerate()
@@ -134,7 +149,46 @@ fn artwork(raw: &RawCatalog) -> HashMap<String, String> {
 }
 
 fn categories(dir: &Path, models: &HashMap<String, Model>) -> Result<Vec<Category>, Error> {
-    let raw: RawCatalog = read(&dir.join("HX_ModelCatalog.json"))?;
+    let path = dir.join("HX_ModelCatalog.json");
+    let raw: RawCatalog = read(&path)?;
+    let mut ids = std::collections::HashSet::new();
+    for category in &raw.categories {
+        if category.name.is_empty() {
+            return Err(Error::Invalid {
+                path,
+                reason: format!("category {} has no name", category.id),
+            });
+        }
+        if !ids.insert(category.id) {
+            return Err(Error::Invalid {
+                path,
+                reason: format!("category id {} is duplicated", category.id),
+            });
+        }
+        let colour = category.color.strip_prefix("0x").unwrap_or(&category.color);
+        if !colour.is_empty()
+            && (colour.len() != 6 || !colour.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err(Error::Invalid {
+                path,
+                reason: format!("category {} has an invalid colour", category.name),
+            });
+        }
+        if category.models.iter().any(|model| model.id.is_empty()) {
+            return Err(Error::Invalid {
+                path,
+                reason: format!("category {} contains an unnamed model", category.name),
+            });
+        }
+        for shelf in &category.subcategories {
+            if shelf.name.is_empty() || shelf.models.iter().any(|model| model.id.is_empty()) {
+                return Err(Error::Invalid {
+                    path,
+                    reason: format!("category {} contains an invalid shelf", category.name),
+                });
+            }
+        }
+    }
     let mut categories: Vec<Category> = raw
         .categories
         .into_iter()
@@ -556,6 +610,29 @@ mod tests {
                 assert!(reason.contains("no models"), "{reason}");
             }
             _ => panic!("an empty catalog should be reported"),
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn malformed_catalog_indexes_are_rejected() {
+        let dir = scratch("bad-index");
+        std::fs::write(
+            dir.join("HX_ModelCatalog.json"),
+            r#"{"categories":[{"id":11,"name":"Amp","color":"blue","models":[{"id":"Amp"}]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("HelixControls.json"), b"{}").unwrap();
+        std::fs::write(dir.join("Helix.sym"), r#"[{"symbol":"Amp"}]"#).unwrap();
+        std::fs::write(dir.join("amp.models"), r#"[{"symbolicID":"Amp"}]"#).unwrap();
+
+        match catalog(&dir) {
+            Err(Error::Invalid { path, reason }) => {
+                assert_eq!(path, dir.join("HX_ModelCatalog.json"));
+                assert!(reason.contains("colour"), "{reason}");
+            }
+            _ => panic!("a malformed catalog index should be reported"),
         }
 
         let _ = std::fs::remove_dir_all(dir);
