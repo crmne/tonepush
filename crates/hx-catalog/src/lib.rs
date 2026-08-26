@@ -29,7 +29,7 @@ pub use hxb::{
     Container, Favourite, NewBackup,
 };
 pub use inspect::{inspect, ChainContent, OutputTarget, Tone, ToneBlock};
-pub use write::{to_hlx, Written};
+pub use write::{to_hlx, to_hlx_for_device, Written};
 
 /// The key of HX Edit's footswitch LED colour list, for [`Catalog::menu`].
 /// Index 0 is Auto Color, which the protocol reaches by its own opcode.

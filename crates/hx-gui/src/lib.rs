@@ -3124,13 +3124,19 @@ impl App {
                 return;
             }
         };
+        let profile = hx_proto::PROFILES
+            .iter()
+            .find(|profile| profile.device_id == device)
+            .expect("hxb_metadata returns a recognised device profile");
         let tones: Vec<(String, Option<serde_json::Value>)> = presets
             .into_iter()
             .map(|(name, bytes)| {
                 let tone = bytes
                     .and_then(|b| hx_proto::preset::Preset::parse(&b))
                     .map(|p| {
-                        hx_catalog::to_hlx(&p, catalog, &name).document["data"]["tone"].clone()
+                        hx_catalog::to_hlx_for_device(&p, catalog, profile, &name).document["data"]
+                            ["tone"]
+                            .clone()
                     });
                 (name, tone)
             })

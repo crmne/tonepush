@@ -30,6 +30,7 @@
 use serde_json::{json, Map, Value};
 
 use hx_proto::preset::{Kind as SlotKind, Preset};
+use hx_proto::{DeviceProfile, HX_EFFECTS, HX_STOMP, HX_STOMP_XL};
 
 use crate::Catalog;
 
@@ -62,11 +63,32 @@ impl Written {
 /// carries - with its `@model`, `@enabled` and parameters. See the module docs
 /// for the shape this produces and why.
 pub fn to_hlx(preset: &Preset, catalog: &Catalog, name: &str) -> Written {
+    let endpoints = if preset.layout().paths.len() > 1 {
+        EndpointFamily::Helix
+    } else {
+        EndpointFamily::Stomp
+    };
+    write_hlx(preset, catalog, name, endpoints)
+}
+
+/// Serialise a [`Preset`] using the endpoint models for `device`.
+///
+/// Prefer this entry point when the source is a live session or a backup whose
+/// manifest identifies the hardware. [`to_hlx`] remains useful for standalone
+/// `.hxpreset` documents, where two DSP arrays are enough to identify the
+/// full-size Helix endpoint family and a single path retains the historical HX
+/// Stomp default.
+pub fn to_hlx_for_device(
+    preset: &Preset,
+    catalog: &Catalog,
+    device: &DeviceProfile,
+    name: &str,
+) -> Written {
+    write_hlx(preset, catalog, name, EndpointFamily::for_device(device))
+}
+
+fn write_hlx(preset: &Preset, catalog: &Catalog, name: &str, endpoints: EndpointFamily) -> Written {
     let mut skipped = Vec::new();
-    // Endpoint symbols carry the device in their name. Nothing in the document
-    // says which device it came from, so an HX Stomp is assumed - the only one
-    // this program has ever been run against.
-    let device = "HelixStomp";
 
     // One JSON object per DSP path, plus a running blockN counter for each. A
     // new path opens at every input, the way `Preset::layout` reads them; dsp0
@@ -148,10 +170,10 @@ pub fn to_hlx(preset: &Preset, catalog: &Catalog, name: &str) -> Written {
             continue;
         };
         if dsp_path.input.is_some() {
-            dsp.insert("inputA".into(), endpoint(device, true, false));
+            dsp.insert("inputA".into(), endpoint(endpoints, index, true, false));
         }
         if dsp_path.output.is_some() {
-            dsp.insert("outputA".into(), endpoint(device, false, false));
+            dsp.insert("outputA".into(), endpoint(endpoints, index, false, false));
         }
         // A split and a join come as a pair, and each carries where it attaches
         // to the main line - which block the fork sits before.
@@ -188,8 +210,8 @@ pub fn to_hlx(preset: &Preset, catalog: &Catalog, name: &str) -> Written {
                 ),
             );
             // The lower branch has its own input and output endpoints.
-            dsp.insert("inputB".into(), endpoint(device, true, false));
-            dsp.insert("outputB".into(), endpoint(device, false, true));
+            dsp.insert("inputB".into(), endpoint(endpoints, index, true, false));
+            dsp.insert("outputB".into(), endpoint(endpoints, index, false, true));
         }
     }
 
@@ -288,17 +310,41 @@ pub fn to_hlx(preset: &Preset, catalog: &Catalog, name: &str) -> Written {
     Written { document, skipped }
 }
 
-/// An input or output node. The endpoint symbols carry the device - an HX Stomp
-/// writes `HelixStomp_…`.
+#[derive(Clone, Copy)]
+enum EndpointFamily {
+    Stomp,
+    Effects,
+    Helix,
+}
+
+impl EndpointFamily {
+    fn for_device(device: &DeviceProfile) -> Self {
+        if device.device_id == HX_STOMP.device_id || device.device_id == HX_STOMP_XL.device_id {
+            Self::Stomp
+        } else if device.device_id == HX_EFFECTS.device_id {
+            Self::Effects
+        } else {
+            Self::Helix
+        }
+    }
+}
+
+/// An input or output node. The endpoint symbols carry the device family, and
+/// full-size Helix hardware gives each DSP input a distinct model.
 ///
 /// The A output is the main pair and the B output is the send, on every one of
 /// the 97 presets HX Edit wrote in the backup this was checked against. Where an
 /// output is *pointed* is a separate field this does not carry yet.
-fn endpoint(device: &str, input: bool, send: bool) -> Value {
-    let model = match (input, send) {
-        (true, _) => format!("{device}_AppDSPFlowInput"),
-        (false, false) => format!("{device}_AppDSPFlowOutputMain"),
-        (false, true) => format!("{device}_AppDSPFlowOutputSend"),
+fn endpoint(family: EndpointFamily, path: usize, input: bool, send: bool) -> Value {
+    let model = match (family, input, send) {
+        (EndpointFamily::Stomp, true, _) => "HelixStomp_AppDSPFlowInput",
+        (EndpointFamily::Stomp, false, false) => "HelixStomp_AppDSPFlowOutputMain",
+        (EndpointFamily::Stomp, false, true) => "HelixStomp_AppDSPFlowOutputSend",
+        (EndpointFamily::Effects, true, _) => "HelixFx_AppDSPFlowInput",
+        (EndpointFamily::Effects, false, _) => "HelixFx_AppDSPFlowOutput",
+        (EndpointFamily::Helix, true, _) if path == 0 => "HD2_AppDSPFlow1Input",
+        (EndpointFamily::Helix, true, _) => "HD2_AppDSPFlow2Input",
+        (EndpointFamily::Helix, false, _) => "HD2_AppDSPFlowOutput",
     };
     json!({ "@model": model })
 }
@@ -460,6 +506,7 @@ mod tests {
 
     // Slot kinds on the wire.
     const INPUT: i64 = 0;
+    const OUTPUT: i64 = 1;
     const BLOCK: i64 = 6;
 
     fn values(vals: &[f32]) -> Value {
@@ -469,6 +516,11 @@ mod tests {
     /// An input slot, which opens a DSP path but carries no block.
     fn input() -> Value {
         msgmap! { KIND => Value::Int(INPUT) }
+    }
+
+    /// An output slot, which closes a DSP path but carries no block.
+    fn output() -> Value {
+        msgmap! { KIND => Value::Int(OUTPUT) }
     }
 
     /// A block slot holding `model`, optionally with a cab riding in the same
@@ -528,9 +580,9 @@ mod tests {
                 SNAPSHOT_VALID => Value::Bool(true),
                 SNAPSHOT_SLOTS => Value::Array(
                     (0..slot_count)
-                        .map(|slot| Value::Array(vec![
+                        .map(|_| Value::Array(vec![
                             Value::Bool(false),
-                            Value::Bool(slot % 2 == 1),
+                            Value::Bool(true),
                         ]))
                         .collect(),
                 ),
@@ -647,8 +699,13 @@ mod tests {
             vec![
                 input(),
                 block(amp, Some(cab), &[0.5, 0.5], &[0.5, 0.5], true),
+                output(),
             ],
-            vec![input(), block(101, None, &[0.2, 0.3, 0.4], &[], true)],
+            vec![
+                input(),
+                block(101, None, &[0.2, 0.3, 0.4], &[], true),
+                output(),
+            ],
         );
 
         let written = to_hlx(&preset, &catalog, "Two DSPs");
@@ -660,12 +717,14 @@ mod tests {
         let dsp0 = written.document.pointer("/data/tone/dsp0").unwrap();
         let dsp1 = written.document.pointer("/data/tone/dsp1").unwrap();
         let dsp0 = dsp0.as_object().unwrap();
+        let dsp1 = dsp1.as_object().unwrap();
         assert!(dsp0.contains_key("block0"), "the amp");
         assert!(dsp0.contains_key("cab0"), "and its cab, split apart");
-        assert!(
-            dsp1.as_object().unwrap().contains_key("block0"),
-            "the second path's effect"
-        );
+        assert!(dsp1.contains_key("block0"), "the second path's effect");
+        assert_eq!(dsp0["inputA"]["@model"], "HD2_AppDSPFlow1Input");
+        assert_eq!(dsp1["inputA"]["@model"], "HD2_AppDSPFlow2Input");
+        assert_eq!(dsp0["outputA"]["@model"], "HD2_AppDSPFlowOutput");
+        assert_eq!(dsp1["outputA"]["@model"], "HD2_AppDSPFlowOutput");
         assert_eq!(
             written.document["data"]["tone"]["snapshot0"]["blocks"]["dsp0"]["block0"],
             true
@@ -688,6 +747,37 @@ mod tests {
             .find(|b| b.path == 1)
             .expect("a dsp1 block");
         assert_eq!(second.model_number, 101);
+    }
+
+    #[test]
+    fn explicit_device_profiles_select_their_endpoint_family() {
+        assert_eq!(
+            endpoint(
+                EndpointFamily::for_device(&hx_proto::HX_STOMP_XL),
+                0,
+                false,
+                true,
+            )["@model"],
+            "HelixStomp_AppDSPFlowOutputSend"
+        );
+        assert_eq!(
+            endpoint(
+                EndpointFamily::for_device(&hx_proto::HX_EFFECTS),
+                0,
+                true,
+                false,
+            )["@model"],
+            "HelixFx_AppDSPFlowInput"
+        );
+        assert_eq!(
+            endpoint(
+                EndpointFamily::for_device(&hx_proto::HELIX_LT),
+                1,
+                true,
+                false,
+            )["@model"],
+            "HD2_AppDSPFlow2Input"
+        );
     }
 
     #[test]

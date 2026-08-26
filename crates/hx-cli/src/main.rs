@@ -1605,6 +1605,11 @@ fn export_hxb(bundle: &std::path::Path, output: &std::path::Path) -> Result<()> 
         .context("writing an .hxb needs HX Edit's catalog to name models")?;
     let (manifest, saved, globals) = hx_usb::backup::for_export(bundle)
         .with_context(|| format!("reading the TonePush backup {bundle:?}"))?;
+    let (device, device_version, captured) = hx_usb::backup::hxb_metadata(&manifest)?;
+    let profile = hx_proto::PROFILES
+        .iter()
+        .find(|profile| profile.device_id == device)
+        .context("the backup names an unsupported device")?;
 
     // Each slot: its name, and its tone as the symbolic JSON HX Edit stores.
     let mut presets = Vec::with_capacity(manifest.presets.len());
@@ -1612,12 +1617,12 @@ fn export_hxb(bundle: &std::path::Path, output: &std::path::Path) -> Result<()> 
         let tone = bytes.map(|bytes| {
             let preset = hx_proto::preset::Preset::parse(&bytes)
                 .expect("backup::for_export validates preset documents");
-            hx_catalog::to_hlx(&preset, &catalog, &name).document["data"]["tone"].clone()
+            hx_catalog::to_hlx_for_device(&preset, &catalog, profile, &name).document["data"]
+                ["tone"]
+                .clone()
         });
         presets.push((name, tone));
     }
-
-    let (device, device_version, captured) = hx_usb::backup::hxb_metadata(&manifest)?;
 
     let bytes = hx_catalog::write_backup(&hx_catalog::NewBackup {
         setlist: manifest
