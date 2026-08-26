@@ -435,6 +435,7 @@ mod tests {
     const BODY: i64 = 20;
     const PATH: i64 = 0;
     const SLOTS: i64 = 22;
+    const SNAPSHOT_SECTION: i64 = 10;
     const MODEL_REF: i64 = 24;
     const MODEL: i64 = 25;
     const PAIRED_MODEL: i64 = 26;
@@ -490,6 +491,13 @@ mod tests {
             .tone
             .get_mut(PATH)
             .expect("the template has a path") = msgmap! { SLOTS => Value::Array(slots) };
+        // The template's snapshot states are indexed by its original slots.
+        // Once the synthetic chain changes that count, carrying them through
+        // would leave a structurally stale preset rather than a useful fixture.
+        *template
+            .tone
+            .get_mut(SNAPSHOT_SECTION)
+            .expect("the template has a snapshot section") = Value::Nil;
         Preset::parse(&template.encode()).expect("the synthetic blob parses")
     }
 
