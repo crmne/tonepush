@@ -13,7 +13,7 @@ use hx_proto::msgpack::Value;
 use hx_proto::rpc::Message;
 use hx_proto::{rpc, ChannelId, DeviceProfile, Preset};
 
-use crate::{checksum, decode_message, non_negative, Error, Result, Session};
+use crate::{checksum, decode_message, non_negative, preset_index, Error, Result, Session};
 
 fn block_param(block: i64, param: i64) -> Result<()> {
     non_negative(block, "block")?;
@@ -571,7 +571,7 @@ impl Session {
     /// permanent, and it is HX Edit's File > Save Preset.
     pub fn save_preset(&mut self, setlist: i64, index: i64, name: &str) -> Result<()> {
         non_negative(setlist, "setlist")?;
-        non_negative(index, "preset index")?;
+        preset_index(&self.profile, index)?;
         self.command(
             ChannelId::DATA,
             rpc::op::SAVE_PRESET,
@@ -669,7 +669,7 @@ impl Session {
     /// [`settle_flash`]: Self::settle_flash
     pub fn rename_preset(&mut self, setlist: i64, index: i64, name: &str) -> Result<()> {
         non_negative(setlist, "setlist")?;
-        non_negative(index, "preset index")?;
+        preset_index(&self.profile, index)?;
         self.command(
             ChannelId::DATA,
             rpc::op::RENAME_PRESET,
@@ -1257,6 +1257,14 @@ mod validation_tests {
         assert!(block_param(0, 0).is_ok());
         assert!(block_param(-1, 0).is_err());
         assert!(block_param(0, -1).is_err());
+    }
+
+    #[test]
+    fn preset_indexes_are_checked_against_the_device_profile() {
+        assert!(preset_index(&hx_proto::HX_STOMP, 0).is_ok());
+        assert!(preset_index(&hx_proto::HX_STOMP, 125).is_ok());
+        assert!(preset_index(&hx_proto::HX_STOMP, -1).is_err());
+        assert!(preset_index(&hx_proto::HX_STOMP, 126).is_err());
     }
 
     #[test]

@@ -36,6 +36,18 @@ fn non_negative(value: i64, name: &str) -> Result<()> {
     Ok(())
 }
 
+fn preset_index(profile: &DeviceProfile, index: i64) -> Result<()> {
+    non_negative(index, "preset index")?;
+    if index >= i64::from(profile.presets) {
+        return Err(Error::Protocol(format!(
+            "{} preset index must be 0 to {}; got {index}",
+            profile.name,
+            profile.presets.saturating_sub(1)
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("no supported HX device found")]
@@ -950,7 +962,7 @@ impl Session {
     /// signal is the device reporting the requested index as current.
     pub fn select_preset(&mut self, setlist: i64, index: i64) -> Result<()> {
         non_negative(setlist, "setlist")?;
-        non_negative(index, "preset index")?;
+        preset_index(&self.profile, index)?;
         self.command_deferred(
             ChannelId::DATA,
             rpc::op::SELECT_PRESET,
@@ -1012,7 +1024,7 @@ impl Session {
     /// values, bypasses, tempo and snapshots alike.
     pub fn read_preset_at(&mut self, setlist: i64, index: i64) -> Result<Option<Preset>> {
         non_negative(setlist, "setlist")?;
-        non_negative(index, "preset index")?;
+        preset_index(&self.profile, index)?;
         let v = self.request(
             ChannelId::DATA,
             rpc::op::FETCH_PRESET,
@@ -1052,7 +1064,7 @@ impl Session {
         preset: &Preset,
     ) -> Result<()> {
         non_negative(setlist, "setlist")?;
-        non_negative(index, "preset index")?;
+        preset_index(&self.profile, index)?;
         self.request(
             ChannelId::DATA,
             rpc::op::WRITE_SLOT_NAMED,
@@ -1071,7 +1083,7 @@ impl Session {
     /// nothing for.
     pub fn clear_preset_at(&mut self, setlist: i64, index: i64) -> Result<()> {
         non_negative(setlist, "setlist")?;
-        non_negative(index, "preset index")?;
+        preset_index(&self.profile, index)?;
         self.request(
             ChannelId::DATA,
             rpc::op::CLEAR_SLOT,
