@@ -221,6 +221,8 @@ fn read_block(
     bypass: Bypass,
 ) {
     let Some(symbol) = block.get("@model").and_then(|v| v.as_str()) else {
+        plan.skipped
+            .push(format!("block{position}: no valid @model"));
         return;
     };
     // The same resolution the document builder uses. HX Edit writes the *shared*
@@ -671,5 +673,22 @@ mod tests {
             .steps
             .iter()
             .any(|step| matches!(step, Step::Enabled { .. })));
+    }
+
+    #[test]
+    fn reports_a_missing_model_from_a_tone_file() {
+        let Some(catalog) = catalog() else { return };
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": { "@enabled": true }
+            }}}
+        });
+
+        let plan = plan(&json, &catalog).unwrap();
+        assert!(plan.steps.is_empty());
+        assert!(plan
+            .skipped
+            .iter()
+            .any(|why| why.contains("block0") && why.contains("@model")));
     }
 }
