@@ -119,6 +119,18 @@ fn validated_preset_document(preset: &Preset) -> Result<Vec<u8>> {
         .ok_or_else(|| Error::Protocol("the document to write does not re-parse".into()))
 }
 
+fn decode_stored_preset(value: &Value) -> Result<Option<Preset>> {
+    if matches!(value, Value::Nil) {
+        return Ok(None);
+    }
+    let blob = value
+        .as_raw()
+        .ok_or_else(|| Error::Protocol("stored-preset response was not a blob or nil".into()))?;
+    Preset::parse(blob)
+        .map(Some)
+        .ok_or_else(|| Error::Protocol("preset blob was not an l6-helix document".into()))
+}
+
 /// A device found on the bus.
 #[derive(Debug, Clone)]
 pub struct Found {
@@ -1092,12 +1104,7 @@ impl Session {
                 rpc::key::ARGS => Value::Int(2),
             },
         )?;
-        let Some(blob) = v.as_raw() else {
-            return Ok(None);
-        };
-        Preset::parse(blob)
-            .map(Some)
-            .ok_or_else(|| Error::Protocol("preset blob was not an l6-helix document".into()))
+        decode_stored_preset(&v)
     }
 
     /// Write a document straight into a slot, naming it.
@@ -1375,6 +1382,18 @@ mod tests {
             validated_preset_document(&preset),
             Err(Error::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn only_nil_means_an_empty_stored_preset() {
+        assert!(decode_stored_preset(&Value::Nil).unwrap().is_none());
+        assert!(decode_stored_preset(&Value::Bool(false)).is_err());
+        assert!(decode_stored_preset(&Value::Map(Vec::new())).is_err());
+
+        let bytes = include_bytes!("../../hx-proto/tests/preset.bin").to_vec();
+        assert!(decode_stored_preset(&Value::Bin(bytes, 2))
+            .unwrap()
+            .is_some());
     }
 
     #[test]
