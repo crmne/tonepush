@@ -265,6 +265,8 @@ mod key {
 
     /// Model reference on an effect slot.
     pub const MODEL_REF: i64 = 24;
+    /// Whether the model reference names a second model in the same slot.
+    pub const HAS_PAIRED: i64 = 23;
     /// Model number within a model reference.
     pub const MODEL: i64 = 25;
     /// Second model in the same slot, or -1 when the slot holds only one.
@@ -1450,14 +1452,23 @@ fn slot_is_well_formed(raw: &Value) -> bool {
     {
         return false;
     }
-    if let Some(paired) = body
-        .get(key::MODEL_REF)
-        .and_then(|reference| reference.get(key::PAIRED_MODEL))
-    {
-        let Some(paired) = paired.as_i64() else {
+    if let Some(reference) = body.get(key::MODEL_REF) {
+        if !matches!(reference, Value::Map(_)) {
             return false;
+        }
+        let paired = match reference.get(key::PAIRED_MODEL) {
+            Some(value) => match value.as_i64() {
+                Some(paired) if paired == -1 || u32::try_from(paired).is_ok() => Some(paired),
+                _ => return false,
+            },
+            None => None,
         };
-        if paired != -1 && u32::try_from(paired).is_err() {
+        let has_paired = match reference.get(key::HAS_PAIRED) {
+            Some(Value::Bool(flag)) => Some(*flag),
+            Some(_) => return false,
+            None => None,
+        };
+        if matches!((has_paired, paired), (Some(flag), Some(model)) if flag != (model >= 0)) {
             return false;
         }
     }
@@ -2844,6 +2855,19 @@ mod tests {
             .and_then(|slot| slot.at_mut(&[key::BODY, key::MODEL_REF, key::PAIRED_MODEL]))
             .unwrap() = Value::Int(i64::MAX);
         assert!(Preset::parse(&malformed_pair.encode()).is_none());
+
+        let paired_flag = |value: Value| {
+            let mut preset = Preset::parse(FIXTURE).unwrap();
+            let block = preset.blocks().next().unwrap().0;
+            *preset
+                .slot_body_mut(block)
+                .and_then(|body| body.get_mut(key::MODEL_REF))
+                .and_then(|reference| reference.get_mut(key::HAS_PAIRED))
+                .unwrap() = value;
+            preset.encode()
+        };
+        assert!(Preset::parse(&paired_flag(Value::Str("yes".into()))).is_none());
+        assert!(Preset::parse(&paired_flag(Value::Bool(true))).is_none());
 
         let mut trailing = FIXTURE.to_vec();
         trailing.push(0xc0);
