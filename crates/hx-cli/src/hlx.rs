@@ -225,6 +225,14 @@ fn read_block(
             .push(format!("block{position}: no valid @model"));
         return;
     };
+    if block
+        .get("@stereo")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        plan.skipped
+            .push(format!("block{position}: @stereo is not a boolean value"));
+        return;
+    }
     // The same resolution the document builder uses. HX Edit writes the *shared*
     // model id - `HD2_ReverbPlate` - where the firmware has a mono symbol and a
     // stereo one, each with its own wire number. An exact match on the symbol
@@ -690,5 +698,25 @@ mod tests {
             .skipped
             .iter()
             .any(|why| why.contains("block0") && why.contains("@model")));
+    }
+
+    #[test]
+    fn reports_a_malformed_stereo_flag_from_a_tone_file() {
+        let Some(catalog) = catalog() else { return };
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": {
+                    "@model": "HD2_DistScream808",
+                    "@stereo": "wide"
+                }
+            }}}
+        });
+
+        let plan = plan(&json, &catalog).unwrap();
+        assert!(plan.steps.is_empty());
+        assert!(plan
+            .skipped
+            .iter()
+            .any(|why| why.contains("@stereo") && why.contains("not a boolean")));
     }
 }
