@@ -640,12 +640,7 @@ impl Session {
             rpc::op::TEMPO_IS_EXTERNAL,
             hx_proto::msgmap! {},
         )?;
-        Ok(v.get(rpc::key::IN_EFFECT)
-            .and_then(|e| match e {
-                Value::Bool(b) => Some(*b),
-                _ => None,
-            })
-            .unwrap_or(false))
+        decode_external_tempo(&v)
     }
 
     /// Point an input or output somewhere else - opcode 42, `{98: slot, 51:
@@ -1207,6 +1202,13 @@ fn decode_ir_samples(bytes: &[u8]) -> Result<Vec<f32>> {
     Ok(samples)
 }
 
+fn decode_external_tempo(value: &Value) -> Result<bool> {
+    value
+        .get(rpc::key::IN_EFFECT)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| Error::Protocol("the external-clock reply has no valid flag".into()))
+}
+
 fn decode_favourites(value: Value) -> Result<Vec<(i64, String)>> {
     let Value::Array(entries) = value else {
         return Err(Error::Protocol(
@@ -1290,6 +1292,17 @@ mod validation_tests {
         assert!(decode_ir_samples(&[0, 1, 2]).is_err());
         assert!(decode_ir_samples(&f32::NAN.to_le_bytes()).is_err());
         assert!(decode_ir_samples(&[]).is_err());
+    }
+
+    #[test]
+    fn malformed_external_clock_replies_are_not_reported_as_internal() {
+        let external = hx_proto::msgmap! { rpc::key::IN_EFFECT => Value::Bool(true) };
+        assert!(decode_external_tempo(&external).unwrap());
+        assert!(decode_external_tempo(&Value::Nil).is_err());
+        assert!(
+            decode_external_tempo(&hx_proto::msgmap! { rpc::key::IN_EFFECT => Value::Int(0) })
+                .is_err()
+        );
     }
 
     #[test]
