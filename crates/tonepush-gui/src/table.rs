@@ -179,6 +179,10 @@ pub struct Grid {
     /// Said instead of an empty grid of rows. The headers still show, because a
     /// table with no rows should still say what it would hold.
     pub nothing_yet: &'static str,
+    /// The exact interface glyph an empty-state instruction refers to. Showing
+    /// it beside the sentence is clearer than asking somebody to translate an
+    /// icon name and then hunt for the matching shape elsewhere.
+    pub nothing_icon: Option<theme::Icon>,
     /// How tall a row is. Zero means [`ROW_HEIGHT`], which is a line of text; a
     /// table with knobs in it needs the room a knob takes.
     pub row_height: f32,
@@ -265,7 +269,13 @@ pub fn show(ui: &mut Ui, id: &str, grid: &mut Grid) -> Did {
         // does not say what it is for.
         draw_headers(ui, grid);
         ui.add_space(10.0);
-        ui.label(RichText::new(grid.nothing_yet).color(theme::DIM));
+        ui.horizontal(|ui| {
+            if let Some(icon) = grid.nothing_icon {
+                theme::place_enabled(ui, icon, theme::Sync::Absent, false);
+                ui.add_space(2.0);
+            }
+            ui.label(RichText::new(grid.nothing_yet).color(theme::DIM));
+        });
         return Did::default();
     }
 
