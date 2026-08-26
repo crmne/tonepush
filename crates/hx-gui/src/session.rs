@@ -1523,10 +1523,11 @@ impl Worker {
         Ok(())
     }
 
-    /// Ask the device without reporting a refusal: for requests that will be
-    /// retried, where the first no is pacing rather than an answer.
+    /// Ask the device without reporting a complete refusal: for requests that
+    /// will be retried, where the first no is pacing rather than an answer.
+    /// Transport loss is still reported and drops the session before a retry.
     fn quietly<T>(&mut self, f: impl FnOnce(&mut hx_usb::Session) -> hx_usb::Result<T>) -> bool {
-        self.device.as_mut().is_some_and(|d| f(d).is_ok())
+        self.try_optional_on_device(f).is_some()
     }
 
     /// Write a whole preset document over the loaded one.
