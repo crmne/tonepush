@@ -29,6 +29,13 @@ type Endpoints = (
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+fn non_negative(value: i64, name: &str) -> Result<()> {
+    if value < 0 {
+        return Err(Error::Protocol(format!("{name} cannot be negative")));
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("no supported HX device found")]
@@ -942,6 +949,8 @@ impl Session {
     /// setlist wedged a unit exactly that way. The one honest completion
     /// signal is the device reporting the requested index as current.
     pub fn select_preset(&mut self, setlist: i64, index: i64) -> Result<()> {
+        non_negative(setlist, "setlist")?;
+        non_negative(index, "preset index")?;
         self.command_deferred(
             ChannelId::DATA,
             rpc::op::SELECT_PRESET,
@@ -1002,6 +1011,8 @@ impl Session {
     /// which shifts every section offset - but the tone is the same, blocks,
     /// values, bypasses, tempo and snapshots alike.
     pub fn read_preset_at(&mut self, setlist: i64, index: i64) -> Result<Option<Preset>> {
+        non_negative(setlist, "setlist")?;
+        non_negative(index, "preset index")?;
         let v = self.request(
             ChannelId::DATA,
             rpc::op::FETCH_PRESET,
@@ -1040,6 +1051,8 @@ impl Session {
         name: &str,
         preset: &Preset,
     ) -> Result<()> {
+        non_negative(setlist, "setlist")?;
+        non_negative(index, "preset index")?;
         self.request(
             ChannelId::DATA,
             rpc::op::WRITE_SLOT_NAMED,
@@ -1057,6 +1070,8 @@ impl Session {
     /// Empty a slot, the way HX Edit's restore blanks the slots a backup holds
     /// nothing for.
     pub fn clear_preset_at(&mut self, setlist: i64, index: i64) -> Result<()> {
+        non_negative(setlist, "setlist")?;
+        non_negative(index, "preset index")?;
         self.request(
             ChannelId::DATA,
             rpc::op::CLEAR_SLOT,

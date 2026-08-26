@@ -13,14 +13,7 @@ use hx_proto::msgpack::Value;
 use hx_proto::rpc::Message;
 use hx_proto::{rpc, ChannelId, DeviceProfile, Preset};
 
-use crate::{checksum, decode_message, Error, Result, Session};
-
-fn non_negative(value: i64, name: &str) -> Result<()> {
-    if value < 0 {
-        return Err(Error::Protocol(format!("{name} cannot be negative")));
-    }
-    Ok(())
-}
+use crate::{checksum, decode_message, non_negative, Error, Result, Session};
 
 fn block_param(block: i64, param: i64) -> Result<()> {
     non_negative(block, "block")?;
@@ -127,6 +120,7 @@ fn carried(item: &Value) -> Option<Carried> {
 impl Session {
     /// Every preset in a setlist, in order.
     pub fn presets(&mut self, setlist: i64) -> Result<Vec<String>> {
+        non_negative(setlist, "setlist")?;
         let result = self.request(
             ChannelId::CONTROL,
             rpc::op::LIST_PRESETS,
@@ -241,6 +235,7 @@ impl Session {
     /// [`crate::ir::prepare`] performs it before an ordinary WAV is uploaded.
     /// `None` is an empty slot.
     pub fn read_ir(&mut self, slot: i64) -> Result<Option<(String, Vec<f32>)>> {
+        non_negative(slot, "impulse response slot")?;
         self.bootstrap()?;
         let descriptor = self.request(
             ChannelId::CONTROL,
@@ -270,6 +265,7 @@ impl Session {
 
     /// Rename an impulse response slot, leaving its samples alone.
     pub fn rename_ir(&mut self, slot: i64, name: &str) -> Result<()> {
+        non_negative(slot, "impulse response slot")?;
         self.bootstrap()?;
         self.command(
             ChannelId::CONTROL,
@@ -301,6 +297,8 @@ impl Session {
     /// choose "save as favourite", and it reads the block itself - there is
     /// nothing to send but where it is and what to call it.
     pub fn save_favourite(&mut self, block: i64, index: i64, name: &str) -> Result<()> {
+        non_negative(block, "block")?;
+        non_negative(index, "favourite index")?;
         self.bootstrap()?;
         self.command(
             ChannelId::CONTROL,
@@ -318,6 +316,7 @@ impl Session {
 
     /// Rename a favourite.
     pub fn rename_favourite(&mut self, index: i64, name: &str) -> Result<()> {
+        non_negative(index, "favourite index")?;
         self.command(
             ChannelId::DATA,
             rpc::op::RENAME_FAVOURITE,
@@ -332,6 +331,7 @@ impl Session {
 
     /// Forget a favourite.
     pub fn clear_favourite(&mut self, index: i64) -> Result<()> {
+        non_negative(index, "favourite index")?;
         self.command(
             ChannelId::DATA,
             rpc::op::CLEAR_FAVOURITE,
@@ -570,6 +570,8 @@ impl Session {
     /// preset and the change is gone. This is the operation that makes an edit
     /// permanent, and it is HX Edit's File > Save Preset.
     pub fn save_preset(&mut self, setlist: i64, index: i64, name: &str) -> Result<()> {
+        non_negative(setlist, "setlist")?;
+        non_negative(index, "preset index")?;
         self.command(
             ChannelId::DATA,
             rpc::op::SAVE_PRESET,
@@ -587,6 +589,7 @@ impl Session {
 
     /// Read one device object - a global setting, by numeric id.
     pub fn object(&mut self, id: i64) -> Result<Value> {
+        non_negative(id, "object id")?;
         let v = self.request(
             ChannelId::DATA,
             rpc::op::FETCH_OBJECT,
@@ -665,6 +668,8 @@ impl Session {
     ///
     /// [`settle_flash`]: Self::settle_flash
     pub fn rename_preset(&mut self, setlist: i64, index: i64, name: &str) -> Result<()> {
+        non_negative(setlist, "setlist")?;
+        non_negative(index, "preset index")?;
         self.command(
             ChannelId::DATA,
             rpc::op::RENAME_PRESET,
@@ -1144,6 +1149,7 @@ impl Session {
 
     /// Fetch an object by id.
     pub fn fetch(&mut self, id: i64) -> Result<Value> {
+        non_negative(id, "object id")?;
         self.request(
             ChannelId::DATA,
             rpc::op::FETCH_OBJECT,
