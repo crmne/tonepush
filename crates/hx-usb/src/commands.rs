@@ -109,20 +109,92 @@ pub struct Carried {
 }
 
 /// One entry of a switch's assignment list.
-fn carried(item: &Value) -> Option<Carried> {
-    let target = item.get(rpc::key::SWITCH_TARGET)?;
-    Some(Carried {
-        block: target.get(rpc::key::BLOCK).and_then(|v| v.as_i64())?,
-        name: target
-            .get(rpc::key::NAME)
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned(),
-        colour: item.get(rpc::key::LED_COLOUR).and_then(|v| v.as_i64()),
-        enabled: item
-            .get(rpc::key::ENABLED)
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
+fn carried(item: &Value, position: usize) -> Result<Carried> {
+    let invalid = |field: &str| {
+        Error::Protocol(format!(
+            "footswitch assignment {position} has no valid {field}"
+        ))
+    };
+    let target = item
+        .get(rpc::key::SWITCH_TARGET)
+        .ok_or_else(|| invalid("target"))?;
+    let block = target
+        .get(rpc::key::BLOCK)
+        .and_then(Value::as_i64)
+        .filter(|block| *block >= 0)
+        .ok_or_else(|| invalid("block"))?;
+    let name = target
+        .get(rpc::key::NAME)
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| invalid("name"))?;
+    let colour = optional_non_negative_integer(item, rpc::key::LED_COLOUR)
+        .ok_or_else(|| invalid("colour"))?;
+    let enabled = item
+        .get(rpc::key::ENABLED)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| invalid("enabled flag"))?;
+    Ok(Carried {
+        block,
+        name: name.to_owned(),
+        colour,
+        enabled,
+    })
+}
+
+fn optional_non_negative_integer(value: &Value, key: i64) -> Option<Option<i64>> {
+    match value.get(key) {
+        None | Some(Value::Nil) => Some(None),
+        Some(value) => value.as_i64().filter(|number| *number >= 0).map(Some),
+    }
+}
+
+fn optional_string(value: &Value, key: i64) -> Option<Option<String>> {
+    match value.get(key) {
+        None | Some(Value::Nil) => Some(None),
+        Some(Value::Str(text)) => Some(Some(text.clone())),
+        Some(_) => None,
+    }
+}
+
+fn decode_switch(switch: u8, reply: &Value) -> Result<Switch> {
+    let expected = i64::from(switch) - 1;
+    let answered = reply
+        .get(rpc::key::SWITCH)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| Error::Protocol("footswitch reply has no valid switch index".into()))?;
+    if answered != expected {
+        return Err(Error::Protocol(format!(
+            "footswitch {switch} reply identifies zero-based switch {answered}"
+        )));
+    }
+    let momentary = reply
+        .get(rpc::key::MOMENTARY)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| Error::Protocol("footswitch reply has no valid momentary flag".into()))?;
+    let label = optional_string(reply, rpc::key::NAME)
+        .ok_or_else(|| Error::Protocol("footswitch reply has an invalid label".into()))?;
+    let colour = optional_non_negative_integer(reply, rpc::key::LED_COLOUR)
+        .ok_or_else(|| Error::Protocol("footswitch reply has an invalid colour".into()))?;
+    let carries = match reply.get(rpc::key::SWITCH_ASSIGNED) {
+        None | Some(Value::Nil) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .map(|(position, item)| carried(item, position))
+            .collect::<Result<_>>()?,
+        Some(_) => {
+            return Err(Error::Protocol(
+                "footswitch reply has an invalid assignment list".into(),
+            ));
+        }
+    };
+    Ok(Switch {
+        switch,
+        momentary,
+        label,
+        colour,
+        carries,
     })
 }
 
@@ -957,23 +1029,7 @@ impl Session {
                 rpc::key::SWITCH => Value::Int(i64::from(switch)),
             },
         )?;
-        let carries = match reply.get(rpc::key::SWITCH_ASSIGNED) {
-            Some(Value::Array(items)) => items.iter().filter_map(carried).collect(),
-            _ => Vec::new(),
-        };
-        Ok(Switch {
-            switch,
-            momentary: reply
-                .get(rpc::key::MOMENTARY)
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            label: reply
-                .get(rpc::key::NAME)
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            colour: reply.get(rpc::key::LED_COLOUR).and_then(|v| v.as_i64()),
-            carries,
-        })
+        decode_switch(switch, &reply)
     }
 
     /// Every footswitch a device has, in order.
@@ -1303,6 +1359,76 @@ mod validation_tests {
             decode_external_tempo(&hx_proto::msgmap! { rpc::key::IN_EFFECT => Value::Int(0) })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn footswitch_replies_are_decoded_without_hiding_bad_assignments() {
+        let unassigned = hx_proto::msgmap! {
+            rpc::key::SWITCH => Value::Int(0),
+            rpc::key::MOMENTARY => Value::Bool(false),
+            rpc::key::NAME => Value::Nil,
+            rpc::key::LED_COLOUR => Value::Nil,
+            rpc::key::SWITCH_ASSIGNED => Value::Nil,
+        };
+        assert_eq!(
+            decode_switch(1, &unassigned).unwrap(),
+            Switch {
+                switch: 1,
+                momentary: false,
+                label: None,
+                colour: None,
+                carries: Vec::new(),
+            }
+        );
+
+        let assigned = hx_proto::msgmap! {
+            rpc::key::SWITCH => Value::Int(1),
+            rpc::key::MOMENTARY => Value::Bool(true),
+            rpc::key::NAME => Value::Str("Drive".into()),
+            rpc::key::LED_COLOUR => Value::Int(2),
+            rpc::key::SWITCH_ASSIGNED => Value::Array(vec![hx_proto::msgmap! {
+                rpc::key::ENABLED => Value::Bool(true),
+                rpc::key::LED_COLOUR => Value::Int(0xff_00_03),
+                rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
+                    rpc::key::NAME => Value::Str("Minotaur".into()),
+                    rpc::key::BLOCK => Value::Int(4),
+                },
+            }]),
+        };
+        assert_eq!(
+            decode_switch(2, &assigned).unwrap().carries,
+            vec![Carried {
+                block: 4,
+                name: "Minotaur".into(),
+                colour: Some(0xff_00_03),
+                enabled: true,
+            }]
+        );
+
+        let wrong_index = hx_proto::msgmap! {
+            rpc::key::SWITCH => Value::Int(2),
+            rpc::key::MOMENTARY => Value::Bool(false),
+        };
+        assert!(decode_switch(1, &wrong_index).is_err());
+
+        let bad_list = hx_proto::msgmap! {
+            rpc::key::SWITCH => Value::Int(0),
+            rpc::key::MOMENTARY => Value::Bool(false),
+            rpc::key::SWITCH_ASSIGNED => Value::Bool(false),
+        };
+        assert!(decode_switch(1, &bad_list).is_err());
+
+        let bad_entry = hx_proto::msgmap! {
+            rpc::key::SWITCH => Value::Int(0),
+            rpc::key::MOMENTARY => Value::Bool(false),
+            rpc::key::SWITCH_ASSIGNED => Value::Array(vec![hx_proto::msgmap! {
+                rpc::key::ENABLED => Value::Bool(true),
+                rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
+                    rpc::key::BLOCK => Value::Int(4),
+                },
+            }]),
+        };
+        assert!(decode_switch(1, &bad_entry).is_err());
     }
 
     #[test]
