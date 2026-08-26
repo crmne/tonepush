@@ -366,7 +366,10 @@ pub struct App {
     /// pedal becomes the default scope once, without fighting a later manual
     /// choice of “All pedals”.
     library_connected_device: String,
-    /// The centered library search is the front door to TonePush discovery.
+    /// Each library view searches the collection it is currently showing.
+    tone_search: String,
+    setlist_search: String,
+    /// The Cloud query is also the server-side discovery query.
     library_search: String,
     cloud_search_due: Option<std::time::Instant>,
     cloud_searching: Option<CloudSearchJob>,
@@ -1019,6 +1022,8 @@ impl App {
             lib_showing: LibraryView::Tones,
             library_device_filter: None,
             library_connected_device: String::new(),
+            tone_search: String::new(),
+            setlist_search: String::new(),
             library_search: String::new(),
             // Public discovery is useful before anybody types or signs in.
             // Give the automatic pedal connection a moment to identify its
@@ -1319,7 +1324,12 @@ impl App {
                 Ok(Evt::Switches(switches)) => self.switches = switches,
                 Ok(Evt::Activity(line)) => self.note(line),
                 Ok(Evt::Failed(e)) => {
-                    self.status = e.clone();
+                    self.status = if self.connection == Connection::Connecting {
+                        "No supported pedal found. Check USB and close any other pedal editor."
+                            .to_owned()
+                    } else {
+                        e.clone()
+                    };
                     self.note(e);
                     if self.connection == Connection::Connecting {
                         self.connection = Connection::Offline;
@@ -1709,7 +1719,11 @@ impl App {
             // The device's name is the way in to its settings: that is
             // where you would look for them.
             let name = if self.device.is_empty() {
-                "No device".to_owned()
+                if self.connection == Connection::Connecting {
+                    "Looking for a pedal…".to_owned()
+                } else {
+                    "No device".to_owned()
+                }
             } else {
                 self.device.clone()
             };
@@ -1791,6 +1805,7 @@ impl App {
                     {
                         self.connection = Connection::Connecting;
                         self.send(Cmd::Connect);
+                        self.pro.reconnect();
                     }
                 }
             }
@@ -2341,11 +2356,7 @@ impl App {
                 // device's own button.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let live = matches!(self.connection, Connection::Online);
-                    if ui
-                        .add_enabled_ui(live, |ui| {
-                            theme::small_icon_button(ui, theme::Icon::Computer, Some(theme::DIM))
-                        })
-                        .inner
+                    if theme::place_enabled(ui, theme::Icon::Computer, theme::Sync::Absent, live)
                         .on_hover_text("keep every preset on the pedal, in order, as a setlist")
                         .clicked()
                     {
@@ -4150,6 +4161,7 @@ impl App {
             },
         );
 
+        let showing = self.lib_showing;
         let search = ui
             .scope_builder(
                 egui::UiBuilder::new()
@@ -4157,20 +4169,28 @@ impl App {
                     .max_rect(search_rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 |ui| {
+                    let (query, hint) = match showing {
+                        LibraryView::Tones => (&mut self.tone_search, "Search this library…"),
+                        LibraryView::Setlists => {
+                            (&mut self.setlist_search, "Search these setlists…")
+                        }
+                        LibraryView::Cloud => (&mut self.library_search, "Search TonePush…"),
+                    };
                     ui.add_sized(
                         search_rect.size(),
-                        egui::TextEdit::singleline(&mut self.library_search)
-                            .hint_text("Search TonePush…"),
+                        egui::TextEdit::singleline(query).hint_text(hint),
                     )
                 },
             )
             .inner;
-        if search.changed() {
-            self.show_library_view(LibraryView::Cloud);
+        if search.changed() && showing == LibraryView::Cloud {
             self.cloud_search_due =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(350));
         }
-        if search.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+        if showing == LibraryView::Cloud
+            && search.has_focus()
+            && ui.input(|input| input.key_pressed(egui::Key::Enter))
+        {
             self.cloud_search_due = Some(std::time::Instant::now());
         }
 
@@ -4337,6 +4357,10 @@ impl App {
                             // top of each other and "Put this setlist on the
                             // pedal" wrapped a word to a line.
                             .min_size(table::width_wanted(&setlist_rail_columns()))
+                            // Clamp remembered pre-split widths too. An old
+                            // full-width rail otherwise leaves the new slots
+                            // table with literally no central panel.
+                            .max_size(560.0)
                             .default_size(340.0)
                             // Not wrapped in a scroll area: the table does its
                             // own scrolling, and a virtualised table inside a
@@ -4370,11 +4394,23 @@ impl App {
     /// venue without going to a panel below. The table brings all three along.
     fn setlist_rail(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
+        let needle = self.setlist_search.trim().to_ascii_lowercase();
         let rows = self
             .lib_setlists
             .iter()
             .enumerate()
             .filter(|(_, (_, setlist))| self.setlist_in_library_scope(setlist))
+            .filter(|(_, (_, setlist))| {
+                needle.is_empty()
+                    || setlist.name.to_ascii_lowercase().contains(&needle)
+                    || setlist.venue.to_ascii_lowercase().contains(&needle)
+                    || setlist.date.to_ascii_lowercase().contains(&needle)
+                    || setlist.description.to_ascii_lowercase().contains(&needle)
+                    || setlist
+                        .slots
+                        .iter()
+                        .any(|slot| slot.name.to_ascii_lowercase().contains(&needle))
+            })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         let mut grid = table::Grid {
@@ -4853,6 +4889,7 @@ impl App {
     /// select for the inspector; double-click to open its preview.
     fn library_table(&mut self, ui: &mut egui::Ui) {
         let filter = self.lib_tag_filter.clone();
+        let needle = self.tone_search.trim().to_ascii_lowercase();
         let rows: Vec<usize> = self
             .lib_entries
             .iter()
@@ -4862,6 +4899,19 @@ impl App {
                 filter
                     .as_ref()
                     .is_none_or(|tag| entry.meta.tags.contains(tag))
+            })
+            .filter(|(_, entry)| {
+                needle.is_empty()
+                    || entry.name.to_ascii_lowercase().contains(&needle)
+                    || entry.line.to_ascii_lowercase().contains(&needle)
+                    || entry.meta.artist.to_ascii_lowercase().contains(&needle)
+                    || entry.meta.song.to_ascii_lowercase().contains(&needle)
+                    || entry
+                        .meta
+                        .genres
+                        .iter()
+                        .chain(&entry.meta.tags)
+                        .any(|value| value.to_ascii_lowercase().contains(&needle))
             })
             .map(|(i, _)| i)
             .collect();
@@ -4885,7 +4935,7 @@ impl App {
             } else {
                 "Delete".to_owned()
             }],
-            nothing_yet: "No tones yet. Press the dot beside a preset to keep it here.",
+            nothing_yet: "No tones yet. Press the computer icon beside a preset to keep it here.",
             ..Default::default()
         };
         for &i in &rows {
@@ -10932,7 +10982,10 @@ mod tests {
         app.drain_events();
 
         assert_eq!(app.connection, Connection::Offline);
-        assert_eq!(app.status, "no device");
+        assert_eq!(
+            app.status,
+            "No supported pedal found. Check USB and close any other pedal editor."
+        );
     }
 
     /// The log is unbounded input from the device, so it must not grow forever.

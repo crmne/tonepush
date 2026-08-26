@@ -1306,7 +1306,13 @@ pub fn place_enabled(ui: &mut Ui, icon: Icon, state: Sync, enabled: bool) -> Res
                 Color32::from_rgb(0x4a, 0x50, 0x5c)
             }
         }
-        Sync::Unknown => Color32::from_rgb(0x33, 0x38, 0x41),
+        Sync::Unknown => {
+            if hot {
+                TEXT
+            } else {
+                Color32::from_rgb(0x4a, 0x50, 0x5c)
+            }
+        }
     };
     if let Some((_, uri, _)) = UI_ICONS.iter().find(|(i, _, _)| *i == icon) {
         let art = Art::whole((*uri).to_owned());

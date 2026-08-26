@@ -178,6 +178,11 @@ enum Evt {
         bytes: Vec<u8>,
         target: ReadTarget,
     },
+    PresetIndexed {
+        index: usize,
+        hash: Option<String>,
+    },
+    ForgetPresetHashes,
     SetlistRead(Vec<(String, Option<Vec<u8>>)>),
     Auditioning(Option<i64>),
     Guarded(PathBuf),
@@ -314,6 +319,7 @@ impl Panel {
                     self.active = true;
                     self.online = true;
                     self.status.clear();
+                    self.preset_hashes.clear();
                     self.install_snapshot(snapshot, true);
                 }
                 Ok(Evt::Snapshot { snapshot, baseline }) => {
@@ -358,6 +364,14 @@ impl Panel {
                         }
                     }
                 }
+                Ok(Evt::PresetIndexed { index, hash }) => {
+                    if let Some(hash) = hash {
+                        self.preset_hashes.insert(index, hash);
+                    } else {
+                        self.preset_hashes.remove(&index);
+                    }
+                }
+                Ok(Evt::ForgetPresetHashes) => self.preset_hashes.clear(),
                 Ok(Evt::SetlistRead(slots)) => {
                     for (index, (name, bytes)) in slots.iter().enumerate() {
                         if let Some(bytes) = bytes {
@@ -398,6 +412,7 @@ impl Panel {
                         self.status = "StompStation PRO disconnected".into();
                     }
                     self.rollback = None;
+                    self.preset_hashes.clear();
                     self.working = None;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -477,6 +492,10 @@ impl Panel {
 
     pub(crate) fn capture_setlist(&self) {
         let _ = self.tx.send(Cmd::CaptureSetlist);
+    }
+
+    pub(crate) fn reconnect(&self) {
+        let _ = self.tx.send(Cmd::Connect);
     }
 
     pub(crate) fn send_tone(&self, index: usize, name: String, bytes: Vec<u8>) {
@@ -729,6 +748,24 @@ impl Panel {
         {
             let _ = self.tx.send(Cmd::SavePreset(self.save_name.trim().into()));
         }
+
+        if self.online && self.confirmation.is_none() {
+            let direction = ctx.input_mut(|input| {
+                if input.modifiers != Modifiers::NONE {
+                    return 0;
+                }
+                if input.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                    -1
+                } else if input.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                    1
+                } else {
+                    0
+                }
+            });
+            if let Some(index) = adjacent_occupied_preset(self.snapshot.as_ref(), direction) {
+                let _ = self.tx.send(Cmd::SelectPreset(index));
+            }
+        }
     }
 
     pub(crate) fn status_bar(&mut self, root: &mut egui::Ui) {
@@ -773,12 +810,18 @@ impl Panel {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
-                let guard = self
-                    .rollback
-                    .as_ref()
-                    .map(|path| format!("Guarded · {}", path.display()))
-                    .unwrap_or_else(|| "Live editing · Backup required for Save".into());
-                ui.label(RichText::new(guard).small().color(theme::DIM));
+                let guard = if self.rollback.is_some() {
+                    "Automatic backup ready"
+                } else {
+                    "Automatic backup required for Save"
+                };
+                let guard = ui.label(RichText::new(guard).small().color(theme::DIM));
+                if let Some(path) = &self.rollback {
+                    guard.on_hover_text(format!(
+                        "TonePush can restore persistent changes from {}",
+                        path.display()
+                    ));
+                }
                 if !self.status.is_empty() {
                     ui.separator();
                     ui.label(RichText::new(&self.status).small().color(theme::DIM));
@@ -902,13 +945,14 @@ impl Panel {
                     self.show_favorites_only = !self.show_favorites_only;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled_ui(self.online, |ui| {
-                            theme::small_icon_button(ui, theme::Icon::Computer, Some(theme::DIM))
-                        })
-                        .inner
-                        .on_hover_text("keep every preset on the pedal, in order, as a setlist")
-                        .clicked()
+                    if theme::place_enabled(
+                        ui,
+                        theme::Icon::Computer,
+                        theme::Sync::Absent,
+                        self.online,
+                    )
+                    .on_hover_text("keep every preset on the pedal, in order, as a setlist")
+                    .clicked()
                     {
                         let _ = self.tx.send(Cmd::CaptureSetlist);
                     }
@@ -967,7 +1011,12 @@ impl Panel {
                         }
                         if name.is_some() {
                             let state = self.slot_sync(index, lookup);
-                            let keep = theme::place(ui, theme::Icon::Computer, state);
+                            let keep = theme::place_enabled(
+                                ui,
+                                theme::Icon::Computer,
+                                state,
+                                self.online && !matches!(state, theme::Sync::Working),
+                            );
                             let keep = match state {
                                 theme::Sync::Absent => keep.on_hover_text("Not in your library. Keep it"),
                                 theme::Sync::Same => keep.on_hover_text("In your library"),
@@ -2251,6 +2300,26 @@ fn active_preset_index(snapshot: &Snapshot) -> Option<usize> {
         .position(|name| name.as_deref() == Some(active))
 }
 
+fn adjacent_occupied_preset(snapshot: Option<&Snapshot>, direction: i32) -> Option<usize> {
+    if direction == 0 {
+        return None;
+    }
+    let snapshot = snapshot?;
+    let presets = snapshot
+        .libraries
+        .iter()
+        .find(|state| state.library == Library::Presets)?;
+    let current = active_preset_index(snapshot)?;
+    if direction < 0 {
+        (0..current)
+            .rev()
+            .find(|&index| presets.info.names.get(index).is_some_and(Option::is_some))
+    } else {
+        ((current + 1)..presets.info.count)
+            .find(|&index| presets.info.names.get(index).is_some_and(Option::is_some))
+    }
+}
+
 fn drafts_differ(saved: &BTreeMap<String, Value>, current: &BTreeMap<String, Value>) -> bool {
     saved
         .iter()
@@ -2286,6 +2355,13 @@ fn app_groups(snapshot: &Snapshot) -> Vec<String> {
 fn editable_node(path: &str, description: &NodeDescription, value: &Value) -> bool {
     !value.is_null()
         && !path.split('\\').any(|segment| segment.starts_with('_'))
+        // `ctl1` and `ctl2` are MIDI/controller assignment modules. Their
+        // unlinked implementation fields (Source, Address and six identical
+        // Min/Max pairs) are not sound parameters and read as corrupt knobs in
+        // the normal block editor. They belong in a dedicated assignment UI.
+        && !path
+            .split('\\')
+            .any(|segment| matches!(segment, "ctl1" | "ctl2"))
         && description.item_type.is_none()
         && description.validate_value(value).is_ok()
         && matches!(
@@ -2834,6 +2910,7 @@ impl Worker {
                 self.require_guard()?;
                 self.device()?.save_preset(&name)?;
                 self.refresh(true)?;
+                self.send(Evt::ForgetPresetHashes);
                 self.send(Evt::Success(format!("Saved preset {name}")));
                 Ok(())
             }
@@ -2844,11 +2921,17 @@ impl Worker {
             } => {
                 self.require_guard()?;
                 let list = self.list(library)?;
-                self.refuse_orphan(&list, index, Some(&name))?;
-                self.device()?.rename_slot(&list, index, &name)?;
+                let device_name = unique_slot_name(&list, index, &name);
+                self.refuse_orphan(&list, index, Some(&device_name))?;
+                self.device()?.rename_slot(&list, index, &device_name)?;
                 self.refresh(false)?;
+                let suffix = if device_name != name {
+                    format!(" as {device_name} because pedal names must be unique")
+                } else {
+                    String::new()
+                };
                 self.send(Evt::Success(format!(
-                    "Renamed {} slot {}",
+                    "Renamed {} slot {}{suffix}",
                     library.title(),
                     index + 1
                 )));
@@ -2859,6 +2942,9 @@ impl Worker {
                 let list = self.list(library)?;
                 self.device()?.move_slot(&list, from, to)?;
                 self.refresh(false)?;
+                if library == Library::Presets {
+                    self.send(Evt::ForgetPresetHashes);
+                }
                 self.send(Evt::Success(format!(
                     "Moved {} slot {} to {}",
                     library.title(),
@@ -2873,6 +2959,9 @@ impl Worker {
                 self.refuse_orphan(&list, index, None)?;
                 self.device()?.clear_slot(&list, index)?;
                 self.refresh(false)?;
+                if library == Library::Presets {
+                    self.send(Evt::PresetIndexed { index, hash: None });
+                }
                 self.send(Evt::Success(format!(
                     "Cleared {} slot {}",
                     library.title(),
@@ -2889,24 +2978,32 @@ impl Worker {
             Cmd::ImportBytes { index, name, bytes } => {
                 self.require_guard()?;
                 let list = self.list(Library::Presets)?;
+                let device_name = unique_slot_name(&list, index, &name);
+                let hash = crate::library::hash_of(&bytes);
                 let blob = import_blob(Library::Presets, &bytes, list.size)?;
                 let events = self.events.clone();
                 self.device()?
-                    .write_blob(&list, index, &name, &blob, |step| {
+                    .write_blob(&list, index, &device_name, &blob, |step| {
                         if let Some(line) = upload_line(step) {
                             let _ = events.send(Evt::Progress(line));
                         }
                     })?;
                 self.refresh(false)?;
-                self.send(Evt::Success(format!(
-                    "Wrote {name} to preset slot {}",
-                    index + 1
-                )));
+                self.send(Evt::PresetIndexed {
+                    index,
+                    hash: Some(hash),
+                });
+                let message = if device_name == name {
+                    format!("Wrote {name} to preset slot {}", index + 1)
+                } else {
+                    format!("Wrote {name} to preset slot {} as {device_name}", index + 1)
+                };
+                self.send(Evt::Success(message));
                 Ok(())
             }
             Cmd::PushSetlist(slots) => {
                 self.require_guard()?;
-                let list = self.list(Library::Presets)?;
+                let mut list = self.list(Library::Presets)?;
                 for (index, tone) in slots {
                     if index >= list.count {
                         return Err(WorkError::Other(format!(
@@ -2917,20 +3014,34 @@ impl Worker {
                     }
                     match tone {
                         Some((name, bytes)) => {
+                            let device_name = unique_slot_name(&list, index, &name);
+                            let hash = crate::library::hash_of(&bytes);
                             let blob = import_blob(Library::Presets, &bytes, list.size)?;
                             let events = self.events.clone();
-                            self.device()?
-                                .write_blob(&list, index, &name, &blob, |step| {
+                            self.device()?.write_blob(
+                                &list,
+                                index,
+                                &device_name,
+                                &blob,
+                                |step| {
                                     if let Some(line) = upload_line(step) {
                                         let _ = events.send(Evt::Progress(format!(
                                             "Preset {}: {line}",
                                             index + 1
                                         )));
                                     }
-                                })?;
+                                },
+                            )?;
+                            list.names[index] = Some(device_name);
+                            self.send(Evt::PresetIndexed {
+                                index,
+                                hash: Some(hash),
+                            });
                         }
                         None if list.names.get(index).is_some_and(Option::is_some) => {
                             self.device()?.clear_slot(&list, index)?;
+                            list.names[index] = None;
+                            self.send(Evt::PresetIndexed { index, hash: None });
                         }
                         None => {}
                     }
@@ -3098,6 +3209,7 @@ impl Worker {
                 restored?;
                 self.forget_history();
                 self.refresh(true)?;
+                self.send(Evt::ForgetPresetHashes);
                 self.send(Evt::Success(format!(
                     "Restored {}; original rollback retained",
                     path.display()
@@ -3115,13 +3227,15 @@ impl Worker {
         let mut device = Device::connect(found.open()?)?;
         device.enable_writes()?;
         let snapshot = snapshot(&mut device)?;
-        let guarded = latest_matching_rollback(&mut device);
-        let can_refresh_backup =
-            guarded.is_none() && latest_verified_backup(&snapshot.identity).is_some();
+        let can_refresh_backup = latest_verified_backup(&snapshot.identity).is_some();
         let version = snapshot.identity.version.clone();
         self.device = Some(device);
         self.forget_history();
         self.send(Evt::Connected(snapshot));
+        // Matching a rollback checks flash boundaries and global settings. It
+        // is important, but it should not make a healthy pedal look absent
+        // while it runs: publish the live editor first, then unlock writes.
+        let guarded = self.device.as_mut().and_then(latest_matching_rollback);
         if let Some((path, rollback)) = guarded {
             self.rollback = Some(rollback);
             self.rollback_path = Some(path.clone());
@@ -3458,16 +3572,24 @@ impl Worker {
             WorkError::Other(format!("Could not read {}: {error}", file.display()))
         })?;
         let list = self.list(library)?;
+        let device_name = unique_slot_name(&list, index, name);
         let blob = import_blob(library, &source, list.size)?;
-        self.refuse_orphan(&list, index, Some(name))?;
+        self.refuse_orphan(&list, index, Some(&device_name))?;
         let events = self.events.clone();
         self.device()?
-            .write_blob(&list, index, name, &blob, |step| {
+            .write_blob(&list, index, &device_name, &blob, |step| {
                 if let Some(line) = upload_line(step) {
                     let _ = events.send(Evt::Progress(line));
                 }
             })?;
         self.refresh(false)?;
+        if library == Library::Presets {
+            let bytes = export_blob(library, &blob, list.size)?;
+            self.send(Evt::PresetIndexed {
+                index,
+                hash: Some(crate::library::hash_of(&bytes)),
+            });
+        }
         self.send(Evt::Success(format!(
             "Imported {} into {} slot {}",
             file.display(),
@@ -3504,15 +3626,16 @@ impl Worker {
         let source = std::fs::read(file).map_err(|error| {
             WorkError::Other(format!("Could not read {}: {error}", file.display()))
         })?;
-        let list = self.list(Library::Irs)?;
+        let mut list = self.list(Library::Irs)?;
         let blobs = voidx_client::ir::Wav::parse(&source)?.device_blobs(list.size)?;
         if blobs.len() != 2 {
             return Err(WorkError::Other(
                 "Stereo import needs a two-channel WAV".into(),
             ));
         }
-        let left_name = format!("{name} L");
-        let right_name = format!("{name} R");
+        let left_name = unique_slot_name(&list, left, &format!("{name} L"));
+        list.names[left] = Some(left_name.clone());
+        let right_name = unique_slot_name(&list, right, &format!("{name} R"));
         self.refuse_orphan(&list, left, Some(&left_name))?;
         self.refuse_orphan(&list, right, Some(&right_name))?;
         self.device()?
@@ -3624,6 +3747,50 @@ fn snapshot(device: &mut Device<SerialLink>) -> voidx_client::Result<Snapshot> {
         app: app.nodes().to_vec(),
         settings: settings.nodes().to_vec(),
     })
+}
+
+/// VoidX resolves preset and model references by their visible names, and the
+/// firmware refuses duplicate names even in different slots. TonePush keeps
+/// the person's library title intact and chooses the smallest distinct label
+/// only for the pedal copy.
+fn unique_slot_name(list: &BlobList, target: usize, requested: &str) -> String {
+    const MAX_BYTES: usize = 63;
+
+    fn fitted(text: &str, max: usize) -> String {
+        let mut end = text.len().min(max);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text[..end].to_owned()
+    }
+
+    let base = if requested.trim().is_empty() {
+        "Preset"
+    } else {
+        requested.trim()
+    };
+    let collides = |candidate: &str| {
+        list.names.iter().enumerate().any(|(index, known)| {
+            index != target
+                && known
+                    .as_deref()
+                    .is_some_and(|known| known.eq_ignore_ascii_case(candidate))
+        })
+    };
+    let first = fitted(base, MAX_BYTES);
+    if !collides(&first) {
+        return first;
+    }
+    for number in 2..=(list.count + 2) {
+        let suffix = format!(" {number}");
+        let candidate = format!("{}{}", fitted(base, MAX_BYTES - suffix.len()), suffix);
+        if !collides(&candidate) {
+            return candidate;
+        }
+    }
+    // There are fewer occupied slots than candidates tried, so this is only a
+    // defensive fallback for malformed list metadata.
+    fitted(&format!("{base} copy"), MAX_BYTES)
 }
 
 fn import_blob(library: Library, source: &[u8], capacity: usize) -> WorkResult<Vec<u8>> {
@@ -3844,6 +4011,29 @@ root\\app\\ir\\on_off:{\"value\":\"OFF\"}\r\n";
             &float,
             &Value::from(0.0)
         ));
+        assert!(!editable_node(
+            "root\\app\\output\\pst\\ctl1\\lnk1\\min",
+            &float,
+            &Value::from(0.0)
+        ));
+    }
+
+    #[test]
+    fn duplicate_device_names_receive_the_smallest_available_suffix() {
+        let list = BlobList {
+            path: NodePath::new("root\\presets").unwrap(),
+            description: None,
+            size: 16_384,
+            count: 4,
+            chunk_size: 128,
+            group: None,
+            gzip: false,
+            movable: true,
+            item_type: None,
+            names: vec![Some("Clean".into()), Some("Clean 2".into()), None, None],
+        };
+        assert_eq!(unique_slot_name(&list, 2, "Clean"), "Clean 3");
+        assert_eq!(unique_slot_name(&list, 0, "Clean"), "Clean");
     }
 
     #[test]
