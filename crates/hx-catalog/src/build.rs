@@ -153,10 +153,19 @@ pub fn slots_from_hlx(preset: &mut Preset, document: &Json, catalog: &Catalog) -
             // the slot the moment a chain splits. A file with neither packs
             // from the front, which is all a dense numbering can mean.
             let explicitly_placed = node.get("@slot").is_some() || node.get("@position").is_some();
+            let branch = match node.get("@path") {
+                None => 0,
+                Some(value) => match value.as_u64() {
+                    Some(branch) => branch,
+                    None => {
+                        skipped.push(format!("{block_key}: @path is not a non-negative integer"));
+                        continue;
+                    }
+                },
+            };
             let recorded = if let Some(slot) = node.get("@slot") {
                 slot.as_u64().and_then(|slot| usize::try_from(slot).ok())
             } else {
-                let branch = node.get("@path").and_then(Json::as_u64).unwrap_or(0);
                 let position = node.get("@position").and_then(Json::as_u64);
                 usize::try_from(branch).ok().and_then(|branch| {
                     usize::try_from(position?)
@@ -612,5 +621,30 @@ mod tests {
         assert_eq!(preset.blocks().count(), 2);
         assert_eq!(built.skipped.len(), 1);
         assert!(built.skipped[0].contains("outside"));
+    }
+
+    #[test]
+    fn a_malformed_path_does_not_relocate_a_block() {
+        const FIXTURE: &[u8] = include_bytes!("../../hx-proto/tests/preset.bin");
+        let Some(catalog) = crate::tests::catalog() else {
+            return;
+        };
+        let mut preset = Preset::parse(FIXTURE).expect("fixture");
+        empty_the_chain(&mut preset);
+        let document = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": {
+                    "@model": "HD2_DistScream808Mono",
+                    "@path": "lower"
+                }
+            }}}
+        });
+
+        let built = slots_from_hlx(&mut preset, &document, &catalog);
+        assert_eq!(built.blocks, 0);
+        assert!(built
+            .skipped
+            .iter()
+            .any(|why| why.contains("@path") && why.contains("not a non-negative")));
     }
 }
