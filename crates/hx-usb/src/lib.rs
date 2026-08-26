@@ -992,13 +992,32 @@ impl Session {
             // setlist streams a flood of them; drained here, they cannot
             // back the control channel up. The keepalive feeds the channels
             // the storm is not using, because the device drops quiet ones.
-            let _ = self.poll_notifications();
-            let _ = self.keepalive();
+            if let Err(error) = self.poll_notifications() {
+                self.poisoned = Some(format!(
+                    "the session was lost while switching to preset {index}: {error}"
+                ));
+                return Err(error);
+            }
+            if let Err(error) = self.keepalive() {
+                self.poisoned = Some(format!(
+                    "the session was lost while switching to preset {index}: {error}"
+                ));
+                return Err(error);
+            }
             // A busy device may refuse the question; that is patience, not
             // failure, until the deadline says otherwise.
-            if let Ok((_, current, _)) = self.preset_info() {
-                if current == index {
-                    return Ok(());
+            match retry_device_refusal(self.preset_info()) {
+                Ok(Some((_, current, _))) => {
+                    if current == index {
+                        return Ok(());
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.poisoned = Some(format!(
+                        "the session was lost while switching to preset {index}: {error}"
+                    ));
+                    return Err(error);
                 }
             }
             if Instant::now() >= deadline {
