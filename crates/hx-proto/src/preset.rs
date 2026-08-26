@@ -1246,6 +1246,23 @@ fn slot_is_well_formed(raw: &Value) -> bool {
     if matches!(Kind::from_wire(kind), Kind::Block | Kind::Looper) && model_number(body).is_none() {
         return false;
     }
+    if body
+        .get(key::ENABLED)
+        .is_some_and(|enabled| !matches!(enabled, Value::Bool(_)))
+    {
+        return false;
+    }
+    if let Some(paired) = body
+        .get(key::MODEL_REF)
+        .and_then(|reference| reference.get(key::PAIRED_MODEL))
+    {
+        let Some(paired) = paired.as_i64() else {
+            return false;
+        };
+        if paired != -1 && u32::try_from(paired).is_err() {
+            return false;
+        }
+    }
     [key::VALUES, key::IO_VALUES, key::PAIRED_VALUES]
         .into_iter()
         .all(|field| body.get(field).is_none_or(value_array_is_well_formed))
@@ -2308,6 +2325,30 @@ mod tests {
             .and_then(|slot| slot.at_mut(&[key::BODY, key::MODEL_REF, key::MODEL]))
             .unwrap() = Value::Int(-1);
         assert!(Preset::parse(&missing_model.encode()).is_none());
+
+        let mut malformed_enabled = Preset::parse(&sample()).unwrap();
+        *malformed_enabled
+            .tone
+            .at_mut(&[key::PATH, key::SLOTS])
+            .and_then(|slots| match slots {
+                Value::Array(slots) => slots.first_mut(),
+                _ => None,
+            })
+            .and_then(|slot| slot.at_mut(&[key::BODY, key::ENABLED]))
+            .unwrap() = Value::Str("yes".into());
+        assert!(Preset::parse(&malformed_enabled.encode()).is_none());
+
+        let mut malformed_pair = Preset::parse(&sample()).unwrap();
+        *malformed_pair
+            .tone
+            .at_mut(&[key::PATH, key::SLOTS])
+            .and_then(|slots| match slots {
+                Value::Array(slots) => slots.first_mut(),
+                _ => None,
+            })
+            .and_then(|slot| slot.at_mut(&[key::BODY, key::MODEL_REF, key::PAIRED_MODEL]))
+            .unwrap() = Value::Int(i64::MAX);
+        assert!(Preset::parse(&malformed_pair.encode()).is_none());
 
         let mut trailing = FIXTURE.to_vec();
         trailing.push(0xc0);
