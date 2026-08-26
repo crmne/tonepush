@@ -761,11 +761,11 @@ impl Preset {
                     cc,
                     min: what
                         .get(key::ASSIGNED_MIN)
-                        .and_then(Value::as_f32)
+                        .and_then(assignment_end)
                         .unwrap_or(0.0),
                     max: what
                         .get(key::ASSIGNED_MAX)
-                        .and_then(Value::as_f32)
+                        .and_then(assignment_end)
                         .unwrap_or(1.0),
                 });
             }
@@ -1274,6 +1274,13 @@ fn section_word(offset: usize) -> Option<[u8; 4]> {
     u32::try_from(offset).ok().map(u32::to_le_bytes)
 }
 
+fn assignment_end(value: &Value) -> Option<f32> {
+    match value {
+        Value::Bool(value) => Some(u8::from(*value) as f32),
+        other => other.as_f32().filter(|value| value.is_finite()),
+    }
+}
+
 fn assignments_are_well_formed(tone: &Value) -> bool {
     let by_source = match tone.get(key::ASSIGNMENTS) {
         None | Some(Value::Nil) => return true,
@@ -1309,7 +1316,7 @@ fn assignments_are_well_formed(tone: &Value) -> bool {
                 .into_iter()
                 .all(|field| match what.get(field) {
                     None | Some(Value::Nil) => true,
-                    Some(value) => value.as_f32().is_some_and(f32::is_finite),
+                    Some(value) => assignment_end(value).is_some(),
                 });
             let valid_kind = match what.get(key::ASSIGNED_KIND) {
                 None | Some(Value::Nil) => ordinal != 8,
@@ -2664,6 +2671,23 @@ mod tests {
             ])
         };
         assert!(Preset::parse(&document(under_footswitch(entry(parameter)))).is_some());
+
+        // Switch parameters carry their two travel endpoints as booleans.
+        // Keeping them as booleans matters when the direction is reversed:
+        // falling back to the numeric defaults would silently turn true/false
+        // back into false/true.
+        let reversed_switch = crate::msgmap! {
+            key::ASSIGNED_KIND => Value::Int(4),
+            key::ASSIGNED_MIN => Value::Bool(true),
+            key::ASSIGNED_MAX => Value::Bool(false),
+            key::ASSIGNED_ON => Value::Int(0),
+            key::ASSIGNED_TARGET => crate::msgmap! {
+                key::ASSIGNED_PARAM => Value::Int(1),
+            },
+        };
+        let parsed = Preset::parse(&document(under_footswitch(entry(reversed_switch)))).unwrap();
+        let assignment = parsed.assignments().pop().unwrap();
+        assert_eq!((assignment.min, assignment.max), (1.0, 0.0));
 
         let missing_target = crate::msgmap! {
             key::ASSIGNED_KIND => Value::Int(4),
