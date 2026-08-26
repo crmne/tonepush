@@ -1678,6 +1678,7 @@ impl App {
             self.undo_depth,
             self.redo_depth,
             self.dirty,
+            self.dirty,
             "Save - no changes to save",
         );
         if actions.undo {
@@ -1688,6 +1689,9 @@ impl App {
         }
         if actions.save {
             self.send(Cmd::SavePreset);
+        }
+        if actions.discard {
+            self.discard_changes();
         }
     }
 
@@ -2091,6 +2095,15 @@ impl App {
         self.send(Cmd::SelectPreset(index));
     }
 
+    /// Throw away the edit buffer by asking the pedal to load its stored copy
+    /// of the preset again. This is intentionally the same device operation as
+    /// selecting a preset, even when the selected slot does not change.
+    fn discard_changes(&mut self) {
+        if self.dirty && self.preset_index >= 0 {
+            self.load_preset(self.preset_index);
+        }
+    }
+
     /// The next visible preset in the requested direction. Favourites mode is
     /// a filtered list, so keyboard navigation follows what is actually on
     /// screen rather than landing on a hidden slot.
@@ -2476,6 +2489,7 @@ impl App {
                                     _ => {}
                                 }
                             }
+                            processor::preset_dirty_marker(ui, selected && self.dirty);
                             let renaming_this = self.sending.is_none()
                                 && matches!(&self.renaming, Some((i, _)) if *i == index);
                             if self.sending.is_some() {
@@ -11345,6 +11359,22 @@ mod tests {
         events.send(loaded(false)).unwrap();
         app.drain_events();
         assert!(!app.dirty, "a fresh load has nothing to save");
+    }
+
+    #[test]
+    fn discarding_reloads_the_current_preset_from_the_pedal() {
+        let (mut app, _events, cmds) = app();
+        let _ = cmds.try_iter().collect::<Vec<_>>();
+        app.preset_index = 7;
+        app.dirty = true;
+
+        app.discard_changes();
+
+        assert!(
+            app.loading,
+            "the title should show that the reload is under way"
+        );
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::SelectPreset(7))));
     }
 
     #[test]

@@ -9,6 +9,10 @@ pub const TEXT: Color32 = Color32::from_rgb(0xd6, 0xd9, 0xdf);
 pub const DIM: Color32 = Color32::from_rgb(0x7d, 0x84, 0x92);
 /// The amber HX Edit uses for values and the selected preset.
 pub const ACCENT: Color32 = Color32::from_rgb(0xd8, 0xa8, 0x3b);
+/// A warmer mark reserved for edits that have not been written to the preset.
+/// Keeping it distinct from `ACCENT` lets the title say "selected/attention"
+/// while the dot says the more specific "unsaved".
+pub const DIRTY: Color32 = Color32::from_rgb(0xff, 0x8c, 0x10);
 
 /// The name of the semibold family, for the few places that want real weight
 /// rather than egui's `strong()` - which only brightens the colour.
@@ -228,6 +232,7 @@ macro_rules! ui_icons {
 
 const UI_ICONS: &[(Icon, &str, &[u8])] = ui_icons! {
     Save => "save",
+    Discard => "circle-x",
     Undo => "undo-2",
     Redo => "redo-2",
     Copy => "copy",
@@ -567,6 +572,7 @@ pub enum Icon {
     Computer,
     Cloud,
     Save,
+    Discard,
     Undo,
     Redo,
     Copy,

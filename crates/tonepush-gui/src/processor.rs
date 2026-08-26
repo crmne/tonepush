@@ -142,6 +142,13 @@ pub(crate) fn fixed_endpoint(ui: &mut Ui, label: &str, selected: bool) -> egui::
 
 /// The loaded preset title, including its stable dirty indicator and inline
 /// rename field. `Some(name)` is returned only when Enter commits a rename.
+pub(crate) fn preset_dirty_marker(ui: &mut Ui, dirty: bool) {
+    let (dot, _) = ui.allocate_exact_size(egui::Vec2::new(10.0, 14.0), egui::Sense::hover());
+    if dirty {
+        ui.painter().circle_filled(dot.center(), 4.0, theme::DIRTY);
+    }
+}
+
 pub(crate) fn preset_title(
     ui: &mut Ui,
     slot: &str,
@@ -150,10 +157,7 @@ pub(crate) fn preset_title(
     rename_enabled: bool,
     renaming: &mut Option<String>,
 ) -> Option<String> {
-    let (dot, _) = ui.allocate_exact_size(egui::Vec2::new(10.0, 14.0), egui::Sense::hover());
-    if dirty {
-        ui.painter().circle_filled(dot.center(), 4.0, theme::ACCENT);
-    }
+    preset_dirty_marker(ui, dirty);
     ui.label(
         egui::RichText::new(format!("{slot}  "))
             .size(16.0)
@@ -178,16 +182,19 @@ pub(crate) fn preset_title(
         return None;
     }
 
-    let shown = ui.add_enabled(
-        rename_enabled,
-        egui::Label::new(
-            egui::RichText::new(name)
-                .font(theme::semibold(16.0))
-                .color(ui.visuals().strong_text_color()),
-        )
-        .selectable(false)
-        .sense(egui::Sense::click()),
-    );
+    let shown =
+        ui.add_enabled(
+            rename_enabled,
+            egui::Label::new(egui::RichText::new(name).font(theme::semibold(16.0)).color(
+                if dirty {
+                    theme::ACCENT
+                } else {
+                    ui.visuals().strong_text_color()
+                },
+            ))
+            .selectable(false)
+            .sense(egui::Sense::click()),
+        );
     if shown
         .on_hover_text(if !rename_enabled {
             "rename becomes available when persistent writes are guarded"
@@ -207,6 +214,7 @@ pub(crate) fn preset_title(
 pub(crate) struct PresetActions {
     pub(crate) undo: bool,
     pub(crate) redo: bool,
+    pub(crate) discard: bool,
     pub(crate) save: bool,
 }
 
@@ -218,6 +226,7 @@ pub(crate) fn preset_tools(
     live: bool,
     undo_depth: usize,
     redo_depth: usize,
+    dirty: bool,
     save_enabled: bool,
     save_disabled: &str,
 ) -> PresetActions {
@@ -241,7 +250,20 @@ pub(crate) fn preset_tools(
         ))
         .on_disabled_hover_text(save_disabled)
         .clicked();
-    PresetActions { undo, redo, save }
+    let discard = theme::icon_button(ui, theme::Icon::Discard, live && dirty)
+        .on_hover_text("Discard changes - reload the stored preset from the pedal")
+        .on_disabled_hover_text(if live {
+            "Discard - no unsaved changes"
+        } else {
+            "Discard becomes available when the pedal is connected"
+        })
+        .clicked();
+    PresetActions {
+        undo,
+        redo,
+        discard,
+        save,
+    }
 }
 
 /// The common BPM display/editor. Device adapters only decide where the

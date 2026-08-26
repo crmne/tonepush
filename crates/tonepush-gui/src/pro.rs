@@ -660,6 +660,7 @@ impl Panel {
                     self.online,
                     self.undo_depth,
                     self.redo_depth,
+                    self.dirty,
                     save_enabled,
                     save_disabled,
                 );
@@ -671,6 +672,9 @@ impl Panel {
                 }
                 if actions.save {
                     let _ = self.tx.send(Cmd::SavePreset(self.save_name.trim().into()));
+                }
+                if actions.discard {
+                    self.discard_changes(snapshot);
                 }
             }
             if self.busy {
@@ -719,6 +723,16 @@ impl Panel {
                     value,
                     persistent: false,
                 });
+            }
+        }
+    }
+
+    /// Selecting the already active slot makes the pedal rebuild its live app
+    /// tree from the stored preset. That is the protocol's native discard.
+    fn discard_changes(&self, snapshot: &Snapshot) {
+        if self.online && self.dirty {
+            if let Some(index) = active_preset_index(snapshot) {
+                let _ = self.tx.send(Cmd::SelectPreset(index));
             }
         }
     }
@@ -1030,6 +1044,7 @@ impl Panel {
                         } else {
                             ui.add_space(16.0);
                         }
+                        processor::preset_dirty_marker(ui, selected && self.dirty);
                         if sending.is_some() {
                             let empty = name.is_none();
                             let target_text = if empty {
