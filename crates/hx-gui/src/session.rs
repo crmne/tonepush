@@ -447,7 +447,6 @@ pub fn spawn_repainting() -> (Sender<Cmd>, Receiver<Evt>, RepaintSignal) {
             snapshot_taken: false,
             dirty: false,
             shown: (-1, String::new()),
-            stumbles: 0,
             audition: None,
         }
         .run()
@@ -481,10 +480,6 @@ struct Worker {
     /// view built from a document we hold does not need a round trip to say
     /// which preset it is.
     shown: (i64, String),
-    /// Keepalives missed in a row. The device goes quiet while it commits a
-    /// document write, and dropping the session on the first missed beat is
-    /// how a drag came to end in a disconnect.
-    stumbles: u32,
     /// Everything an audition temporarily displaces. Histories are moved here
     /// rather than copied: while a cloud Tone is sounding it is not an edit
     /// somebody can accidentally fold into their existing undo stack.
@@ -1750,7 +1745,6 @@ impl Worker {
                 Err(error) => {
                     self.send(Evt::Failed(error.to_string()));
                     self.device = None;
-                    self.stumbles = 0;
                     self.send(Evt::Disconnected);
                     return None;
                 }
@@ -1802,17 +1796,15 @@ impl Worker {
                     .send(Evt::Activity(format!("event {event}: {args:?}")));
             }
         }
-        // The device goes quiet while committing a write; one missed beat is
-        // patience, not a dead link.
+        // An idle read timeout is already represented as `Ok(None)`. Anything
+        // that reaches this error arm is transport or protocol loss, and the
+        // next poll cannot safely reuse the session's sequence state.
         match polled.map(|_| ()).and_then(|_| device.keepalive()) {
-            Ok(()) => self.stumbles = 0,
+            Ok(()) => {}
             Err(e) => {
-                self.stumbles += 1;
-                if self.stumbles >= 3 {
-                    self.send(Evt::Failed(e.to_string()));
-                    self.device = None;
-                    self.send(Evt::Disconnected);
-                }
+                self.send(Evt::Failed(e.to_string()));
+                self.device = None;
+                self.send(Evt::Disconnected);
             }
         }
     }
@@ -1844,7 +1836,6 @@ impl Worker {
                     // the only safe response; the UI can offer a fresh Connect
                     // after the pedal itself is healthy again.
                     self.device = None;
-                    self.stumbles = 0;
                     self.events.send(Evt::Disconnected);
                 }
                 None
@@ -1868,7 +1859,6 @@ impl Worker {
             Err(error) => {
                 self.events.send(Evt::Failed(error.to_string()));
                 self.device = None;
-                self.stumbles = 0;
                 self.events.send(Evt::Disconnected);
                 None
             }
