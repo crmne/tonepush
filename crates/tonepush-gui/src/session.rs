@@ -1100,9 +1100,12 @@ impl Worker {
                 "No HX device found - check the USB cable.".into(),
             ));
         };
-        // Retry once: the device ignores a fresh session's opening handshake
-        // on roughly every other attempt. The CLI does the same.
-        let opened = found.open().or_else(|_| found.open());
+        // `Found::open` owns the one narrow retry for an opening-handshake
+        // timeout. Retrying the whole call here as well used to turn one
+        // failure into as many as four fresh sessions, including retries for
+        // errors such as a claimed USB interface that cannot improve by
+        // immediately opening it again.
+        let opened = found.open();
         match opened {
             Ok(session) => {
                 let profile = session.profile;

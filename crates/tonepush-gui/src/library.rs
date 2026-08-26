@@ -27,10 +27,10 @@
 //! library still finds it; edit its bytes and it becomes what its bytes say it
 //! is, which is the only honest answer.
 //!
-//! Objects keep their extension, so every one is an ordinary `.hxpreset` any
-//! other program can open, and each is written with a `.hlx` beside it: the
-//! device's own bytes for a restore that is exact, Line 6's portable form for
-//! everything else that might want to read it.
+//! Objects keep their extension, so every one remains an ordinary native file:
+//! `.hxpreset` for Line 6 or `.vxpreset` for the PRO. An HX document gets a
+//! symbolic `.hlx` companion for publishing; a PRO preset is already its
+//! portable, lossless artifact.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -61,10 +61,12 @@ fn objects_dir() -> Option<PathBuf> {
     dir().map(|d| d.join("objects"))
 }
 
-/// The extensions a tone can arrive as. `.hxpreset` is the device's own
-/// document and what everything captured from a pedal is; `.hlx` is Line 6's
-/// portable form, welcome here because somebody may well open one and keep it.
-const KINDS: [&str; 2] = ["hxpreset", "hlx"];
+/// The extensions a tone can arrive as. Native documents remain byte-exact;
+/// `.hlx` is Line 6's portable companion. VoidX does not publish a filename or
+/// outer container for a PRO preset, so `.vxpreset` is TonePush's name for the
+/// byte-exact preset payload returned by the device protocol. The object store
+/// itself deliberately does not care which device family produced a tone.
+const KINDS: [&str; 3] = ["hxpreset", "hlx", "vxpreset"];
 
 /// A tone's identity: the SHA-256 of its document bytes, in hex.
 ///
@@ -328,16 +330,32 @@ pub fn portable_path(hash: &str) -> Option<PathBuf> {
     beside.is_file().then_some(beside)
 }
 
-/// The hash of a tone's *portable* copy, which is a different number from the
+/// The artifact TonePush Cloud should receive for this tone.
+///
+/// Line 6 native documents publish through their symbolic `.hlx` companion;
+/// a StompStation PRO document is already the only portable, lossless form of
+/// that tone and is therefore uploaded directly.
+pub fn publish_path(hash: &str) -> Option<PathBuf> {
+    let path = object_path(hash)?;
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "vxpreset")
+    {
+        Some(path)
+    } else {
+        portable_path(hash)
+    }
+}
+
+/// The hash of the artifact uploaded for a tone, which can differ from the
 /// tone's own identity and answers a different question.
 ///
 /// A tone is identified here by the bytes the device gave us. TonePush stores
-/// the uploaded Tone artifact, which is the `.hlx`. So "is this tone on the
-/// site" is asked of the portable copy's hash and never of the object's, and
-/// the two must not be confused: every tone in the library has both, and they
-/// never match.
+/// the uploaded Tone artifact. For HX that is the `.hlx` companion; for the
+/// PRO it is the native object itself. Cloud presence is always asked of that
+/// publishable artifact rather than assuming a device family.
 pub fn portable_hash(hash: &str) -> Option<String> {
-    Some(hash_of(&std::fs::read(portable_path(hash)?).ok()?))
+    Some(hash_of(&std::fs::read(publish_path(hash)?).ok()?))
 }
 
 /// A local Tone's editable metadata, including the Song it realizes. Song facts
@@ -1078,8 +1096,8 @@ impl Slot {
 
 /// A setlist: everything a pedal holds, kept on this machine.
 ///
-/// A pedal has room for one at a time - 126 slots on an HX Stomp - and that is
-/// a property of the pedal, not of the music. Here a person keeps as many as
+/// A pedal has room for one set at a time, with a device-specific slot count;
+/// that is a property of the pedal, not of the music. Here a person keeps as many as
 /// they have gigs, and puts any of them back with one button. The slots are in
 /// the pedal's own order, because that order *is* the setlist: which preset the
 /// footswitch reaches next is the whole point.
@@ -1371,7 +1389,11 @@ pub fn awaiting_portable() -> Vec<(String, String)> {
     let names = known_names();
     rescan()
         .into_keys()
-        .filter(|hash| !has_portable(hash))
+        // Only a Line 6 native document has a second, symbolic form to make.
+        // PRO documents are already publishable as-is; trying to parse them as
+        // HX presets made every library refresh report a bogus conversion
+        // failure.
+        .filter(|hash| kind(hash).as_deref() == Some("hxpreset") && !has_portable(hash))
         .map(|hash| {
             let name = names
                 .get(&hash)
@@ -1617,6 +1639,20 @@ mod tests {
         assert_eq!(how, Keeping::Already("Blackened".into()));
         assert_eq!(entries().len(), 1);
         assert_eq!(objects(), 1);
+    }
+
+    #[test]
+    fn a_pro_tone_is_a_first_class_publishable_object() {
+        let _scratch = Scratch::new("pro-object");
+        let bytes = b"root\\app\\amp\\gain:{\"value\":5.0}\r\n";
+        let (hash, how) = keep("PRO Clean", "vxpreset", bytes).unwrap();
+
+        assert_eq!(how, Keeping::Kept);
+        assert_eq!(kind(&hash).as_deref(), Some("vxpreset"));
+        assert_eq!(publish_path(&hash), object_path(&hash));
+        assert_eq!(portable_hash(&hash), Some(hash_of(bytes)));
+        assert!(awaiting_portable().is_empty());
+        assert_eq!(entries()[0].name(), "PRO Clean");
     }
 
     #[test]

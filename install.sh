@@ -137,7 +137,8 @@ install_udev_rule() {
     if [ -f "packaging/udev/70-line6-hx.rules" ]; then
         rule="$(grep -v '^#' packaging/udev/70-line6-hx.rules)"
     else
-        rule="SUBSYSTEM==\"usb\", ATTR{idVendor}==\"$LINE6_VENDOR\", MODE=\"0666\", TAG+=\"uaccess\""
+        rule="SUBSYSTEM==\"usb\", ATTR{idVendor}==\"$LINE6_VENDOR\", MODE=\"0666\", TAG+=\"uaccess\"
+SUBSYSTEM==\"tty\", ATTRS{manufacturer}==\"SONULAB\", ATTRS{product}==\"StompStation PRO\", MODE=\"0660\", TAG+=\"uaccess\""
     fi
 
     if [ "$(id -u)" = 0 ]; then
@@ -171,12 +172,12 @@ make_desktop_entry() {
 Type=Application
 Version=1.0
 Name=$APP_NAME
-GenericName=HX Signal Chain Editor
-Comment=Editor for Line 6 HX hardware
+GenericName=Guitar Processor Editor
+Comment=Editor for Line 6 HX and Sonulab StompStation PRO hardware
 Exec=$gui
 Terminal=false
 Categories=AudioVideo;Audio;
-Keywords=Line 6;HX;Helix;stomp;pedal;guitar;preset;tone;
+Keywords=Line 6;HX;Helix;Sonulab;StompStation;VoidX;stomp;pedal;guitar;preset;tone;
 Icon=$APP_SLUG
 StartupNotify=false
 DESKTOP
@@ -202,7 +203,7 @@ main() {
 
     say "building (this takes a few minutes the first time)"
     if [ "$cli_only" = 1 ]; then
-        cargo build --release -p hx-cli
+        cargo build --release -p tonepush-cli
     else
         cargo build --release
     fi
@@ -249,7 +250,7 @@ main() {
     esac
 
     echo
-    say "ready. Quit HX Edit first - it holds the device exclusively - then:"
+    say "ready. Quit any other pedal editor first - device sessions are exclusive - then:"
     echo "      tonepush list      find your device"
     echo "      tonepush chain     show the loaded preset"
     if [ "$cli_only" = 0 ]; then

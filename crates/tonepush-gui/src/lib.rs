@@ -1,6 +1,6 @@
-//! A cross-platform editor for HX hardware, laid out the way HX Edit is so the
-//! muscle memory carries over: presets down the left, the signal chain across
-//! the top, and the selected block's model browser and parameters below.
+//! A cross-platform editor for supported guitar processors. HX devices retain
+//! their familiar signal-chain editor; the StompStation PRO gets a native,
+//! schema-driven VoidX editor and library manager.
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Duration;
@@ -14,6 +14,8 @@ mod eq;
 /// Public so the desktop entry point can bring an older library across before
 /// the first window opens. Nothing else here needs to be.
 pub mod library;
+mod pro;
+mod processor;
 mod session;
 mod table;
 mod theme;
@@ -221,6 +223,7 @@ enum Clash {
 pub struct App {
     to_device: Sender<Cmd>,
     from_device: Receiver<Evt>,
+    pro: pro::Panel,
 
     catalog: Option<Catalog>,
     connection: Connection,
@@ -355,6 +358,14 @@ pub struct App {
     display_only: bool,
     /// Which half of the library the strip is showing.
     lib_showing: LibraryView,
+    /// `Some(product)` scopes local tones, setlists and Cloud to that pedal.
+    /// `None` exposes the whole collection; incompatible rows remain
+    /// inspectable but cannot be sent to the connected hardware.
+    library_device_filter: Option<String>,
+    /// Connection identity observed on the preceding frame. A newly connected
+    /// pedal becomes the default scope once, without fighting a later manual
+    /// choice of “All pedals”.
+    library_connected_device: String,
     /// The centered library search is the front door to TonePush discovery.
     library_search: String,
     cloud_search_due: Option<std::time::Instant>,
@@ -508,8 +519,8 @@ pub struct App {
     /// answered; `Some(empty)` is a real answer saying nothing is published.
     cloud_check: Option<std::sync::mpsc::Receiver<std::collections::BTreeSet<String>>>,
     cloud_files: Option<std::collections::BTreeSet<String>>,
-    /// Each library tone's portable hash, worked out once. Reading and hashing
-    /// two hundred `.hlx` files is nothing once and far too much every frame.
+    /// Each library tone's publishable-artifact hash, worked out once. Reading
+    /// and hashing a large library is nothing once and too much every frame.
     portable_hashes: std::collections::HashMap<String, String>,
     update_available: Option<String>,
 }
@@ -537,7 +548,7 @@ mod id {
 enum CopyTarget {
     Clipboard,
     File(std::path::PathBuf),
-    /// Into the library, as a portable .hlx named after the preset.
+    /// Into the library as the byte-exact native preset document.
     Library,
 }
 
@@ -809,6 +820,130 @@ enum Connection {
 }
 
 impl App {
+    /// Which protocol adapter currently owns the editor surface.
+    fn pro_active(&self) -> bool {
+        self.pro.claims_ui() && self.connection != Connection::Online
+    }
+
+    /// Device presence as understood by shared library/setlist/cloud widgets.
+    fn pedal_online(&self) -> bool {
+        if self.pro_active() {
+            self.pro.is_online()
+        } else {
+            matches!(self.connection, Connection::Online)
+        }
+    }
+
+    fn end_audition(&mut self) {
+        if self.pro_active() {
+            self.pro.end_audition();
+        } else {
+            self.send(Cmd::EndAudition);
+        }
+    }
+
+    fn keep_audition(&mut self) {
+        if self.pro_active() {
+            self.pro.keep_audition();
+        } else {
+            self.send(Cmd::KeepAudition);
+        }
+    }
+
+    fn tone_kind_compatible(&self, hash: &str) -> bool {
+        match library::kind(hash).as_deref() {
+            Some("vxpreset") => self.pro_active(),
+            Some("hxpreset" | "hlx") => !self.pro_active(),
+            _ => false,
+        }
+    }
+
+    fn device_is_pro(device: &str) -> bool {
+        device.to_ascii_lowercase().contains("stompstation")
+    }
+
+    fn tone_matches_device(hash: &str, device: &str) -> bool {
+        match library::kind(hash).as_deref() {
+            Some("vxpreset") => Self::device_is_pro(device),
+            Some("hxpreset" | "hlx") => !Self::device_is_pro(device),
+            _ => false,
+        }
+    }
+
+    fn tone_in_library_scope(&self, hash: &str) -> bool {
+        self.library_device_filter
+            .as_deref()
+            .is_none_or(|device| Self::tone_matches_device(hash, device))
+    }
+
+    fn setlist_in_library_scope(&self, setlist: &library::Setlist) -> bool {
+        self.library_device_filter.as_deref().is_none_or(|device| {
+            setlist
+                .slots
+                .iter()
+                .filter(|slot| !slot.is_empty())
+                .all(|slot| Self::tone_matches_device(&slot.hash, device))
+        })
+    }
+
+    fn scoped_tone_count(&self) -> usize {
+        self.lib_entries
+            .iter()
+            .filter(|entry| self.tone_in_library_scope(&entry.hash))
+            .count()
+    }
+
+    fn scoped_setlist_count(&self) -> usize {
+        self.lib_setlists
+            .iter()
+            .filter(|(_, setlist)| self.setlist_in_library_scope(setlist))
+            .count()
+    }
+
+    fn observe_library_device(&mut self) {
+        let connected = if self.pedal_online() {
+            self.device.trim().to_owned()
+        } else {
+            String::new()
+        };
+        if connected.is_empty() {
+            self.library_connected_device.clear();
+        } else if connected != self.library_connected_device {
+            self.library_connected_device.clone_from(&connected);
+            self.library_device_filter = Some(connected);
+            self.lib_selected = None;
+            self.lib_setlist = None;
+            self.cloud_loaded_device = None;
+            self.cloud_search_due = Some(std::time::Instant::now());
+        }
+    }
+
+    fn cloud_device_scope(&self) -> String {
+        self.library_device_filter.clone().unwrap_or_default()
+    }
+
+    fn active_slot_label(&self, slot: i64) -> String {
+        if self.pro_active() {
+            format!("{}", slot + 1)
+        } else {
+            hx_proto::rpc::slot_label(slot)
+        }
+    }
+
+    fn setlist_compatible(&self, setlist: &library::Setlist) -> bool {
+        let capacity = if self.pro_active() {
+            self.pro.preset_count()
+        } else {
+            self.preset_count as usize
+        };
+        setlist.slots.len() <= capacity
+            && setlist
+                .slots
+                .iter()
+                .filter(|slot| !slot.is_empty())
+                .all(|slot| self.tone_kind_compatible(&slot.hash))
+    }
+
     /// Styling is applied once here rather than per frame: it clones and
     /// rewrites the whole `Style`, which is pure waste sixty times a second.
     pub fn new(ctx: &egui::Context, to_device: Sender<Cmd>, from_device: Receiver<Evt>) -> Self {
@@ -818,6 +953,7 @@ impl App {
         let mut app = App {
             to_device,
             from_device,
+            pro: pro::Panel::new(ctx.clone()),
             // Without HX Edit installed everything still works, just with
             // numbers where names would be.
             catalog: Catalog::load().ok(),
@@ -872,6 +1008,8 @@ impl App {
             preview: None,
             display_only: false,
             lib_showing: LibraryView::Tones,
+            library_device_filter: None,
+            library_connected_device: String::new(),
             library_search: String::new(),
             // Public discovery is useful before anybody types or signs in.
             // Give the automatic pedal connection a moment to identify its
@@ -944,7 +1082,7 @@ impl App {
             confirm_switch: None,
             renaming_header: None,
             update_check: Some(update::check()),
-            cloud_check: Some(cloud::published()),
+            cloud_check: None,
             cloud_files: None,
             portable_hashes: std::collections::HashMap::new(),
             update_available: None,
@@ -952,6 +1090,7 @@ impl App {
         // The library is on screen from the first frame, so it is read before
         // the first frame rather than when something happens to refresh it.
         app.refresh_library();
+        app.start_cloud_check();
         // Likewise what the pedal is holding, if a backup from a previous run
         // is on disk: the dots should say something true on the first frame
         // rather than after the first connection.
@@ -1167,7 +1306,7 @@ impl App {
                 Ok(Evt::Irs(slots)) => self.irs = slots,
                 Ok(Evt::Favourites(list)) => self.favourites = list,
                 Ok(Evt::Setlists(names)) => self.setlists = names,
-                Ok(Evt::CapturedSetlist(slots)) => self.keep_setlist(slots),
+                Ok(Evt::CapturedSetlist(slots)) => self.keep_setlist(slots, "hxpreset"),
                 Ok(Evt::Switches(switches)) => self.switches = switches,
                 Ok(Evt::Activity(line)) => self.note(line),
                 Ok(Evt::Failed(e)) => {
@@ -1334,13 +1473,52 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.drain_events();
+        self.pro.drain();
+        for (name, bytes, replace) in self.pro.take_library_documents() {
+            if replace {
+                let updated = library::named(&name)
+                    .ok_or_else(|| "that tone disappeared from the library".to_owned())
+                    .and_then(|old| {
+                        let hash = library::store(&name, &bytes, "vxpreset")?;
+                        library::override_with(&old.hash, &hash, &old.meta.name)?;
+                        Ok(())
+                    });
+                match updated {
+                    Ok(()) => {
+                        self.refresh_library();
+                        self.note(format!("updated {name} from the pedal"));
+                    }
+                    Err(why) => self.note(why),
+                }
+            } else {
+                self.keep_tone(&name, "vxpreset", &bytes);
+            }
+        }
+        for slots in self.pro.take_captured_setlists() {
+            self.keep_setlist(slots, "vxpreset");
+        }
+        for key in self.pro.take_audition_events() {
+            self.auditioning = key;
+        }
         // Device events wake the UI directly. This slow fallback is for the
         // other background receivers (resource extraction and cloud work), so
         // an otherwise idle editor does not rebuild the whole immediate-mode
         // interface several times per second.
         ctx.request_repaint_after(Duration::from_secs(1));
 
-        self.shortcuts(&ctx);
+        let pro_active = self.pro.claims_ui() && self.connection != Connection::Online;
+        if pro_active {
+            // The shared library/cloud code keys discovery and publishing off
+            // these public device facts. They describe the active adapter; no
+            // library component needs to know which wire protocol supplied
+            // them.
+            self.device = self.pro.device_name().to_owned();
+            self.firmware = self.pro.firmware().to_owned();
+            self.pro.shortcuts(&ctx);
+        } else {
+            self.shortcuts(&ctx);
+        }
+        self.observe_library_device();
         self.finish_extraction();
         // Both arrive from a thread and neither belongs to any one panel: one
         // is a person approving a sign-in somewhere else, the other is the site
@@ -1349,7 +1527,33 @@ impl eframe::App for App {
         self.settle_publishing(&ctx);
         self.settle_cloud_search(&ctx);
         self.settle_cloud_download(&ctx);
-        self.dropped_files(&ctx);
+        if !pro_active {
+            self.dropped_files(&ctx);
+        }
+        if pro_active {
+            self.pro.top_bar(ui);
+            self.pro.status_bar(ui);
+            // This is the exact TonePush library surface used by HX devices:
+            // local Tones, ordered Setlists, and Cloud all occupy the same
+            // shared state and the same widgets.
+            self.library_strip(ui);
+            let sending = self.sending.as_ref().map(|sending| sending.name.clone());
+            if let Some(slot) = self.pro.preset_list(
+                ui,
+                &self.library_lookup,
+                &mut self.config,
+                sending.as_deref(),
+            ) {
+                if slot == usize::MAX {
+                    self.sending = None;
+                } else {
+                    self.finish_sending(slot as i64);
+                }
+            }
+            self.pro.body(ui);
+            self.pro.windows(&ctx);
+            return;
+        }
         self.top_bar(ui);
         self.status_bar(ui);
         // Before the preset list on purpose: an egui panel claims its edge
@@ -1375,7 +1579,8 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // The worker still drains its channel after the UI sender is dropped,
         // so a normal window close gets the same exact restoration as Done.
-        self.send(Cmd::EndAudition);
+        self.end_audition();
+        self.pro.disconnect();
     }
 }
 
@@ -1388,27 +1593,23 @@ impl App {
     /// to a status bar at the bottom, and what is left is the preset itself.
     fn top_bar(&mut self, root_ui: &mut egui::Ui) {
         let ctx = root_ui.ctx().clone();
-        egui::Panel::top("top")
-            .exact_size(46.0)
-            .show(root_ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    // What preset, which of its three states, and what you can
-                    // do to it - in that order, because that is the order the
-                    // question comes in. Tempo is not part of that question, so
-                    // it is not in the middle of it.
-                    ui.add_space(8.0);
-                    self.preset_title(ui);
-                    ui.add_space(12.0);
-                    self.snapshot_bar(ui);
-                    ui.add_space(12.0);
-                    self.preset_tools(ui);
+        processor::top_bar(root_ui, "top", |ui| {
+            // What preset, which of its three states, and what you can
+            // do to it - in that order, because that is the order the
+            // question comes in. Tempo is not part of that question, so
+            // it is not in the middle of it.
+            ui.add_space(8.0);
+            self.preset_title(ui);
+            ui.add_space(12.0);
+            self.snapshot_bar(ui);
+            ui.add_space(12.0);
+            self.preset_tools(ui);
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(8.0);
-                        self.tempo_control(ui);
-                    });
-                });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                self.tempo_control(ui);
             });
+        });
         self.confirm_clear_window(&ctx);
     }
 
@@ -1423,38 +1624,21 @@ impl App {
             return;
         }
         let live = matches!(self.connection, Connection::Online);
-        let hint =
-            |ui: &egui::Ui, m, k| ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(m, k));
-        let save_hint = hint(ui, egui::Modifiers::COMMAND, egui::Key::S);
-        let undo_hint = hint(ui, egui::Modifiers::COMMAND, egui::Key::Z);
-        let redo_hint = hint(
+        let actions = processor::preset_tools(
             ui,
-            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-            egui::Key::Z,
+            live,
+            self.undo_depth,
+            self.redo_depth,
+            self.dirty,
+            "Save - no changes to save",
         );
-
-        // Undo and redo step through what you did; save is what you do at the
-        // end of it. Left to right in that order is the order they are reached
-        // for.
-        if theme::icon_button(ui, theme::Icon::Undo, live && self.undo_depth > 0)
-            .on_hover_text(format!("Undo - step back through changes ({undo_hint})"))
-            .clicked()
-        {
+        if actions.undo {
             self.send(Cmd::Undo);
         }
-        if theme::icon_button(ui, theme::Icon::Redo, live && self.redo_depth > 0)
-            .on_hover_text(format!("Redo - put back what undo took away ({redo_hint})"))
-            .clicked()
-        {
+        if actions.redo {
             self.send(Cmd::Redo);
         }
-        if theme::icon_button(ui, theme::Icon::Save, self.dirty)
-            .on_hover_text(format!(
-                "Save - write these changes into the preset ({save_hint})"
-            ))
-            .on_disabled_hover_text("Save - no changes to save")
-            .clicked()
-        {
+        if actions.save {
             self.send(Cmd::SavePreset);
         }
     }
@@ -1505,145 +1689,145 @@ impl App {
 
     /// The device, along the bottom, where a status bar belongs.
     fn status_bar(&mut self, root_ui: &mut egui::Ui) {
-        egui::Panel::bottom("status")
-            .exact_size(28.0)
-            .show(root_ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.add_space(8.0);
-                    let colour = match self.connection {
-                        Connection::Online => egui::Color32::from_rgb(0x4c, 0xc0, 0x60),
-                        _ => theme::DIM,
-                    };
-                    theme::status_dot(ui, colour);
+        processor::status_bar(root_ui, "status", |ui| {
+            ui.add_space(8.0);
+            let colour = match self.connection {
+                Connection::Online => egui::Color32::from_rgb(0x4c, 0xc0, 0x60),
+                _ => theme::DIM,
+            };
+            theme::status_dot(ui, colour);
 
-                    // The device's name is the way in to its settings: that is
-                    // where you would look for them.
-                    let name = if self.device.is_empty() {
-                        "No device".to_owned()
-                    } else {
-                        self.device.clone()
-                    };
-                    // A framed button, not a bare label. This is the way in
-                    // to everything about the device - its impulse responses,
-                    // its favourite blocks, and now backing it up and putting a
-                    // backup back - and a word you have to guess is clickable
-                    // is a door with no handle.
-                    if ui
-                        .add_enabled(
-                            matches!(self.connection, Connection::Online),
-                            egui::Button::new(RichText::new(name).strong()),
-                        )
-                        .on_hover_text(
-                            "everything about the pedal: backup and restore, \
+            // The device's name is the way in to its settings: that is
+            // where you would look for them.
+            let name = if self.device.is_empty() {
+                "No device".to_owned()
+            } else {
+                self.device.clone()
+            };
+            // A framed button, not a bare label. This is the way in
+            // to everything about the device - its impulse responses,
+            // its favourite blocks, and now backing it up and putting a
+            // backup back - and a word you have to guess is clickable
+            // is a door with no handle.
+            if processor::device_button(
+                ui,
+                matches!(self.connection, Connection::Online),
+                RichText::new(name).strong(),
+                "everything about the pedal: backup and restore, \
                              impulse responses, favourite blocks",
-                        )
-                        .clicked()
-                    {
-                        self.show_device = !self.show_device;
-                        if self.show_device {
-                            self.send(Cmd::ReadSettings);
-                            self.send(Cmd::ListFavourites);
-                        }
-                    }
-                    if !self.firmware.is_empty() {
-                        // Same size as the device name, so the two share a
-                        // baseline instead of the smaller one riding high.
-                        ui.label(
-                            RichText::new(format!("firmware {}", self.firmware)).color(theme::DIM),
-                        );
-                    }
-                    // The other two things that belong to the pedal rather than
-                    // to a preset, each behind its own button rather than
-                    // stacked under the impulse responses in one long scroll.
-                    let live = matches!(self.connection, Connection::Online);
-                    if theme::icon_button(ui, theme::Icon::Sliders, live)
-                        .on_hover_text("Global EQ")
-                        .clicked()
-                    {
-                        self.show_eq = !self.show_eq;
-                        if self.show_eq {
-                            self.send(Cmd::ReadSettings);
-                        }
-                    }
-                    if theme::icon_button(ui, theme::Icon::Gear, live)
-                        .on_hover_text("Preferences")
-                        .clicked()
-                    {
-                        self.show_preferences = !self.show_preferences;
-                        if self.show_preferences {
-                            self.send(Cmd::ReadSettings);
-                        }
-                    }
+            )
+            .clicked()
+            {
+                self.show_device = !self.show_device;
+                if self.show_device {
+                    self.send(Cmd::ReadSettings);
+                    self.send(Cmd::ListFavourites);
+                }
+            }
+            if !self.firmware.is_empty() {
+                // Same size as the device name, so the two share a
+                // baseline instead of the smaller one riding high.
+                ui.label(RichText::new(format!("firmware {}", self.firmware)).color(theme::DIM));
+            }
+            // The other two things that belong to the pedal rather than
+            // to a preset, each behind its own button rather than
+            // stacked under the impulse responses in one long scroll.
+            let live = matches!(self.connection, Connection::Online);
+            if theme::icon_button(ui, theme::Icon::Sliders, live)
+                .on_hover_text("Global EQ")
+                .clicked()
+            {
+                self.show_eq = !self.show_eq;
+                if self.show_eq {
+                    self.send(Cmd::ReadSettings);
+                }
+            }
+            if theme::icon_button(ui, theme::Icon::Gear, live)
+                .on_hover_text("Preferences")
+                .clicked()
+            {
+                self.show_preferences = !self.show_preferences;
+                if self.show_preferences {
+                    self.send(Cmd::ReadSettings);
+                }
+            }
 
-                    // Connecting belongs with the device it connects to, not in
-                    // the far corner: "no device" and the button that does
-                    // something about it should be within a glance of each other.
-                    match self.connection {
-                        Connection::Online => {
-                            if ui
-                                .small_button("Disconnect")
-                                .on_hover_text("let the pedal go, so another editor can have it")
-                                .clicked()
-                            {
-                                self.status.clear();
-                                self.send(Cmd::Disconnect);
-                            }
-                        }
-                        Connection::Connecting => {
-                            theme::spinner(ui);
-                        }
-                        Connection::Offline => {
-                            if ui
-                                .small_button("Connect")
-                                .on_hover_text("look for a pedal on USB")
-                                .clicked()
-                            {
-                                self.connection = Connection::Connecting;
-                                self.send(Cmd::Connect);
-                            }
-                        }
+            // Connecting belongs with the device it connects to, not in
+            // the far corner: "no device" and the button that does
+            // something about it should be within a glance of each other.
+            match self.connection {
+                Connection::Online => {
+                    if ui
+                        .small_button("Disconnect")
+                        .on_hover_text("let the pedal go, so another editor can have it")
+                        .clicked()
+                    {
+                        self.status.clear();
+                        self.send(Cmd::Disconnect);
                     }
-                    // A backup reads all 126 presets. That is seconds rather
-                    // than minutes now, but silence for seconds still reads as
-                    // a window that has stopped answering.
-                    if let Some((what, progress)) = self.working.clone() {
-                        ui.add(
-                            egui::ProgressBar::new(progress)
-                                .desired_width(120.0)
-                                .text(RichText::new(what).small()),
-                        );
+                }
+                Connection::Connecting => {
+                    theme::spinner(ui);
+                    ui.label(
+                        RichText::new("Looking for a connected pedal…")
+                            .small()
+                            .color(theme::DIM),
+                    );
+                }
+                Connection::Offline => {
+                    if ui
+                        .small_button("Connect")
+                        .on_hover_text("look for a pedal on USB")
+                        .clicked()
+                    {
+                        self.connection = Connection::Connecting;
+                        self.send(Cmd::Connect);
                     }
+                }
+            }
+            // A backup reads all 126 presets. That is seconds rather
+            // than minutes now, but silence for seconds still reads as
+            // a window that has stopped answering.
+            if let Some((what, progress)) = self.working.clone() {
+                ui.add(
+                    egui::ProgressBar::new(progress)
+                        .desired_width(120.0)
+                        .text(RichText::new(what).small()),
+                );
+            }
 
-                    // Laid out right to left, so what is added first sits
-                    // furthest right: the version in the corner, where a
-                    // version goes.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(8.0);
-                        self.version_label(ui);
-                        // Only failures reach here now, and a failure earns its
-                        // separator. Silence is the healthy state.
-                        if !self.status.is_empty() {
-                            ui.separator();
-                            ui.label(RichText::new(&self.status).small().color(theme::DIM));
-                        }
-                    });
-                });
+            // Laid out right to left, so what is added first sits
+            // furthest right: the version in the corner, where a
+            // version goes.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                self.version_label(ui);
+                // Only failures reach here now, and a failure earns its
+                // separator. Silence is the healthy state.
+                if !self.status.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new(&self.status).small().color(theme::DIM));
+                }
             });
+        });
     }
 
     /// Take the site's answer if it has arrived, and say whether a tone is on
     /// it.
     ///
-    /// The site records the hash of the file it was given, which is the `.hlx`,
-    /// so the comparison is against the portable copy and never against the
-    /// tone's own identity. A tone with no portable copy written yet cannot be
+    /// The site records the hash of the artifact it was given: an `.hlx` for
+    /// HX or the native `.vxpreset` for PRO. A tone with no publishable artifact cannot be
     /// looked up at all, and answers `Unknown` rather than `Absent`: we do not
     /// know that it is missing, only that we cannot ask.
     fn cloud_sync(&mut self, hash: &str) -> theme::Sync {
         if let Some(rx) = &self.cloud_check {
             match rx.try_recv() {
                 Ok(files) => {
-                    self.cloud_files = Some(files);
+                    // A completed publish POST is more authoritative than a
+                    // catalog refresh that may have started before it. Merge
+                    // the answer so that refresh can never erase the badge we
+                    // just filled for this exact artifact.
+                    self.cloud_files.get_or_insert_default().extend(files);
                     self.cloud_check = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.cloud_check = None,
@@ -1661,6 +1845,21 @@ impl App {
         // hashes. The latter is precisely when every row needs an actionable
         // outline cloud so the first tone can be published.
         cloud_presence(self.cloud_files.as_ref(), &portable)
+    }
+
+    fn start_cloud_check(&mut self) {
+        let hashes: Vec<String> = self
+            .lib_entries
+            .iter()
+            .filter_map(|entry| {
+                let portable = self
+                    .portable_hashes
+                    .entry(entry.hash.clone())
+                    .or_insert_with(|| library::portable_hash(&entry.hash).unwrap_or_default());
+                (!portable.is_empty()).then(|| portable.clone())
+            })
+            .collect();
+        self.cloud_check = Some(cloud::published(hashes));
     }
 
     /// Which TonePush this is, in the corner where a version belongs.
@@ -2013,147 +2212,30 @@ impl App {
             // last are worth announcing - a flicker per knob tick is noise.
             theme::spinner(ui).on_hover_text("writing to the pedal…");
         }
-        // The dot keeps its place whether or not it is painted, so the name
-        // does not jump sideways the first time a knob is turned.
-        let (dot, _) = ui.allocate_exact_size(egui::Vec2::new(10.0, 14.0), egui::Sense::hover());
-        if self.dirty {
-            ui.painter().circle_filled(dot.center(), 4.0, theme::ACCENT);
+        if let Some(name) = processor::preset_title(
+            ui,
+            &hx_proto::rpc::slot_label(self.preset_index),
+            &self.preset_name,
+            self.dirty,
+            true,
+            &mut self.renaming_header,
+        ) {
+            self.send(Cmd::Rename {
+                index: self.preset_index,
+                name,
+            });
         }
-
-        // Only the name is clickable. The slot number is the pedal's, not
-        // yours - offering to edit it would be offering something that cannot
-        // happen.
-        ui.label(
-            RichText::new(format!(
-                "{}  ",
-                hx_proto::rpc::slot_label(self.preset_index)
-            ))
-            .size(16.0)
-            .color(theme::DIM),
-        );
-
-        if self.renaming_header.is_some() {
-            let mut done: Option<Option<String>> = None;
-            if let Some(draft) = self.renaming_header.as_mut() {
-                let field = ui.add(
-                    egui::TextEdit::singleline(draft)
-                        .desired_width(220.0)
-                        .font(theme::semibold(16.0)),
-                );
-                if !field.has_focus() && !field.lost_focus() {
-                    field.request_focus();
-                }
-                if field.lost_focus() {
-                    let commit = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    done = Some(commit.then(|| draft.clone()));
-                }
-            }
-            if let Some(result) = done {
-                let index = self.preset_index;
-                self.renaming_header = None;
-                if let Some(name) = result {
-                    self.send(Cmd::Rename { index, name });
-                }
-            }
-            return;
-        }
-
-        let shown = ui.add(
-            egui::Label::new(
-                RichText::new(&self.preset_name)
-                    .font(theme::semibold(16.0))
-                    .color(ui.visuals().strong_text_color()),
-            )
-            .selectable(false)
-            .sense(egui::Sense::click()),
-        );
-        if shown
-            .on_hover_text(if self.dirty {
-                "unsaved changes - click the name to rename it"
-            } else {
-                "click the name to rename it"
-            })
-            .clicked()
-        {
-            self.renaming_header = Some(self.preset_name.clone());
-        }
-    }
-
-    /// Work out a tempo from the intervals between taps.
-    ///
-    /// Taps more than two seconds apart start a new measurement rather than
-    /// averaging in a stale one, and it waits for two taps before saying
-    /// anything, because one tap is not an interval.
-    fn tap_tempo(&mut self) -> Option<f32> {
-        let now = std::time::Instant::now();
-        if let Some(previous) = self.taps.last() {
-            if now.duration_since(*previous) > Duration::from_secs(2) {
-                self.taps.clear();
-            }
-        }
-        self.taps.push(now);
-        // Four intervals is enough to steady it without lagging behind.
-        if self.taps.len() > 5 {
-            self.taps.remove(0);
-        }
-        if self.taps.len() < 2 {
-            return None;
-        }
-        let span = self.taps.last()?.duration_since(self.taps[0]).as_secs_f32();
-        let intervals = (self.taps.len() - 1) as f32;
-        let bpm = 60.0 * intervals / span;
-        (20.0..=999.0).contains(&bpm).then_some(bpm)
     }
 
     /// Laid out right to left, in the corner it sits in: Tap goes on first so
     /// it ends up rightmost, and the reading lands to its left.
     fn tempo_control(&mut self, ui: &mut egui::Ui) {
         let Some(tempo) = self.tempo else { return };
-
-        // Tap it in, which is how anyone actually finds a tempo.
-        if ui
-            .button("Tap")
-            .on_hover_text("tap in time to set the tempo")
-            .clicked()
+        if let Some(bpm) =
+            processor::tempo_control(ui, tempo, &mut self.tempo_draft, &mut self.taps)
         {
-            if let Some(bpm) = self.tap_tempo() {
-                self.tempo = Some(bpm);
-                self.edit(Cmd::SetTempo(bpm));
-            }
-        }
-
-        match &mut self.tempo_draft {
-            Some(draft) => {
-                let edit = ui.add(
-                    egui::TextEdit::singleline(draft)
-                        .desired_width(52.0)
-                        .font(egui::TextStyle::Monospace),
-                );
-                if !edit.has_focus() && !edit.lost_focus() {
-                    edit.request_focus();
-                }
-                if edit.lost_focus() {
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        if let Ok(bpm) = draft.trim().parse::<f32>() {
-                            let _ = self.to_device.send(Cmd::SetTempo(bpm));
-                        }
-                    }
-                    self.tempo_draft = None;
-                }
-            }
-            None => {
-                let label = ui.add(
-                    egui::Label::new(
-                        RichText::new(format!("{tempo:.1} BPM"))
-                            .monospace()
-                            .color(theme::ACCENT),
-                    )
-                    .sense(egui::Sense::click()),
-                );
-                if label.on_hover_text("click to change tempo").clicked() {
-                    self.tempo_draft = Some(format!("{tempo:.1}"));
-                }
-            }
+            self.tempo = Some(bpm);
+            self.edit(Cmd::SetTempo(bpm));
         }
     }
 
@@ -2216,329 +2298,318 @@ impl App {
         let mut capture = false;
         let mut cancel_send = false;
         let mut picked: Option<i64> = None;
-        egui::Panel::left("presets")
-            .default_size(216.0)
-            .size_range(150.0..=340.0)
-            .show(root_ui, |ui| {
-                ui.add_space(4.0);
-                // The actions sit on the list they act on, the way HX Edit
-                // puts COPY / PASTE / IMPORT / EXPORT on its preset header. A
-                // menu called "Preset" at the top of the window made you go
-                // looking somewhere else for something that belongs here.
-                ui.horizontal(|ui| {
-                    // SETLIST, not PRESETS: what the pedal holds is a setlist,
-                    // and it is the same word the device itself uses for a bank
-                    // of 126. Calling the panel Presets was always a half-truth.
-                    ui.label(RichText::new("SETLIST").small().color(theme::DIM))
-                        .on_hover_text("Use ↑/↓ to move through presets when no field is active");
-                    // The same drawn star as the rows use. As a small text
-                    // glyph it sat on its own baseline, a few pixels above the
-                    // word beside it.
-                    let (mark, colour) = if self.show_favorites_only {
-                        (theme::Icon::StarOn, theme::ACCENT)
-                    } else {
-                        (theme::Icon::Star, theme::DIM)
-                    };
-                    if theme::small_icon_button(ui, mark, Some(colour))
-                        .on_hover_text("Show favourites only")
+        processor::preset_panel(root_ui, "presets", |ui| {
+            ui.add_space(4.0);
+            // The actions sit on the list they act on, the way HX Edit
+            // puts COPY / PASTE / IMPORT / EXPORT on its preset header. A
+            // menu called "Preset" at the top of the window made you go
+            // looking somewhere else for something that belongs here.
+            ui.horizontal(|ui| {
+                // SETLIST, not PRESETS: what the pedal holds is a setlist,
+                // and it is the same word the device itself uses for a bank
+                // of 126. Calling the panel Presets was always a half-truth.
+                ui.label(RichText::new("SETLIST").small().color(theme::DIM))
+                    .on_hover_text("Use ↑/↓ to move through presets when no field is active");
+                // The same drawn star as the rows use. As a small text
+                // glyph it sat on its own baseline, a few pixels above the
+                // word beside it.
+                let (mark, colour) = if self.show_favorites_only {
+                    (theme::Icon::StarOn, theme::ACCENT)
+                } else {
+                    (theme::Icon::Star, theme::DIM)
+                };
+                if theme::small_icon_button(ui, mark, Some(colour))
+                    .on_hover_text("Show favourites only")
+                    .clicked()
+                {
+                    self.show_favorites_only = !self.show_favorites_only;
+                }
+                // The counterpart to the per-preset computer beside it:
+                // that one keeps a tone, this one keeps the whole pedal.
+                // Backup and Restore used to sit here too and do not
+                // belong: they act on the whole device, settings and
+                // impulse responses included, so they live behind the
+                // device's own button.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let live = matches!(self.connection, Connection::Online);
+                    if ui
+                        .add_enabled_ui(live, |ui| {
+                            theme::small_icon_button(ui, theme::Icon::Computer, Some(theme::DIM))
+                        })
+                        .inner
+                        .on_hover_text("keep every preset on the pedal, in order, as a setlist")
                         .clicked()
                     {
-                        self.show_favorites_only = !self.show_favorites_only;
+                        capture = true;
                     }
-                    // The counterpart to the per-preset computer beside it:
-                    // that one keeps a tone, this one keeps the whole pedal.
-                    // Backup and Restore used to sit here too and do not
-                    // belong: they act on the whole device, settings and
-                    // impulse responses included, so they live behind the
-                    // device's own button.
+                });
+            });
+            // While a tone is on its way to the pedal, the list says so and
+            // says how to stop. Without this the highlighted rows would be
+            // a state with no explanation and no way out but a click.
+            if let Some(sending) = &self.sending {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Choose a slot for {}", sending.name))
+                            .small()
+                            .color(theme::ACCENT),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let live = matches!(self.connection, Connection::Online);
-                        if ui
-                            .add_enabled_ui(live, |ui| {
-                                theme::small_icon_button(
-                                    ui,
-                                    theme::Icon::Computer,
-                                    Some(theme::DIM),
-                                )
-                            })
-                            .inner
-                            .on_hover_text("keep every preset on the pedal, in order, as a setlist")
-                            .clicked()
-                        {
-                            capture = true;
+                        if ui.small_button("Cancel").clicked() {
+                            cancel_send = true;
                         }
                     });
                 });
-                // While a tone is on its way to the pedal, the list says so and
-                // says how to stop. Without this the highlighted rows would be
-                // a state with no explanation and no way out but a click.
-                if let Some(sending) = &self.sending {
-                    ui.add_space(2.0);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!("Choose a slot for {}", sending.name))
-                                .small()
-                                .color(theme::ACCENT),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("Cancel").clicked() {
-                                cancel_send = true;
+            }
+            ui.separator();
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // Show slot labels alone until the names arrive.
+                    let total = if self.presets.is_empty() {
+                        self.preset_count as i64
+                    } else {
+                        self.presets.len() as i64
+                    };
+                    let setlist = self.setlist;
+                    let mut load = None;
+                    let mut toggle = None;
+                    let mut rename_start = None;
+                    let mut menu_action = None;
+                    // Some(Some(name)) commits a rename, Some(None) cancels.
+                    let mut rename_result: Option<Option<(i64, String)>> = None;
+                    let mut shown_any = false;
+                    for index in 0..total {
+                        let fav = self.config.is_favorite(setlist, index);
+                        if self.show_favorites_only && !fav {
+                            continue;
+                        }
+                        shown_any = true;
+                        let name = self
+                            .presets
+                            .get(index as usize)
+                            .cloned()
+                            .unwrap_or_default();
+                        let selected = index == self.preset_index;
+                        let label = format!("{}  {}", hx_proto::rpc::slot_label(index), name);
+                        ui.horizontal(|ui| {
+                            // One height for the row, and every widget in it
+                            // centred on that: a text star, a drawn icon and
+                            // a label are three different heights, and left
+                            // to themselves they sat on three baselines.
+                            ui.set_min_height(20.0);
+                            // Two icons that belong together sit together;
+                            // the default gap made them look like controls
+                            // for different things.
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            // The star leads the row, clear of the scrollbar
+                            // that overlaps the right edge and eats the click.
+                            // The same kind of thing as the keep button
+                            // beside it: a drawn icon that lights under the
+                            // pointer. As a text glyph it did not read as
+                            // something you could press at all.
+                            let (mark, colour) = if fav {
+                                (theme::Icon::StarOn, theme::ACCENT)
+                            } else {
+                                (theme::Icon::Star, theme::DIM)
+                            };
+                            if theme::small_icon_button(ui, mark, Some(colour))
+                                .on_hover_text(if fav { "Remove favourite" } else { "Favourite" })
+                                .clicked()
+                            {
+                                toggle = Some(index);
+                            }
+                            // Keeping is a thing you do to *a* preset, so it
+                            // sits on the preset - beside its own star, not
+                            // in the list's title where it could only ever
+                            // mean the loaded one.
+                            //
+                            // And it is a dot rather than a button, because
+                            // the question a person actually has is "is this
+                            // one saved?", which a button can only answer by
+                            // disappearing. Three states in one place: not
+                            // in the library, in it and identical, in it
+                            // under this name and different.
+                            // This row *is* the pedal, so the pedal is not
+                            // one of the icons: what it shows is the two
+                            // other places a tone can be.
+                            let state = self.slot_sync(index);
+                            let held = theme::place(ui, theme::Icon::Computer, state);
+                            let held = match state {
+                                theme::Sync::Absent => {
+                                    held.on_hover_text("Not in your library. Keep it")
+                                }
+                                theme::Sync::Same => held.on_hover_text("In your library"),
+                                theme::Sync::Differs => held.on_hover_text(
+                                    "In your library under this name, but different. \
+                                         Update it from the pedal",
+                                ),
+                                theme::Sync::Working => held.on_hover_text("Saving…"),
+                                theme::Sync::Unknown => held,
+                            };
+                            if held.clicked() {
+                                match state {
+                                    theme::Sync::Absent => {
+                                        menu_action = Some((index, RowAction::Keep))
+                                    }
+                                    theme::Sync::Differs => {
+                                        menu_action = Some((index, RowAction::Update))
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let renaming_this = self.sending.is_none()
+                                && matches!(&self.renaming, Some((i, _)) if *i == index);
+                            if self.sending.is_some() {
+                                // Every row is a target now. An empty slot
+                                // is the safe one and reads as such; an
+                                // occupied one says what it would cost
+                                // before it costs it, which is the whole
+                                // reason for picking in the list rather
+                                // than in a dialog with a slot number in it.
+                                let empty = name.trim().is_empty();
+                                let text = if empty {
+                                    RichText::new(format!(
+                                        "{}  empty",
+                                        hx_proto::rpc::slot_label(index)
+                                    ))
+                                    .color(theme::ACCENT)
+                                } else {
+                                    RichText::new(&label).color(theme::DIM)
+                                };
+                                let target = ui.add(
+                                    egui::Button::new(())
+                                        .left_text(text)
+                                        .frame(false)
+                                        .min_size(egui::vec2(ui.available_width(), 18.0)),
+                                );
+                                let target = if empty {
+                                    target.on_hover_text("Put it here")
+                                } else {
+                                    target.on_hover_text(format!("Replace {name}"))
+                                };
+                                if target.clicked() {
+                                    picked = Some(index);
+                                }
+                            } else if renaming_this {
+                                if let Some((_, draft)) = self.renaming.as_mut() {
+                                    let edit = ui.add(
+                                        egui::TextEdit::singleline(draft)
+                                            .desired_width(180.0)
+                                            .hint_text("preset name"),
+                                    );
+                                    if !edit.has_focus() && !edit.lost_focus() {
+                                        edit.request_focus();
+                                    }
+                                    if edit.lost_focus() {
+                                        rename_result = Some(
+                                            ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                                .then(|| (index, draft.clone())),
+                                        );
+                                    }
+                                }
+                            } else {
+                                let text = if selected {
+                                    RichText::new(&label).color(theme::ACCENT).strong()
+                                } else {
+                                    RichText::new(&label)
+                                };
+                                // A plain, content-sized label: left-aligned
+                                // as before, never centered (no forced width).
+                                let row = ui.selectable_label(selected, text);
+                                if row.clicked() {
+                                    load = Some(index);
+                                }
+                                // A preset picked on the pedal itself should
+                                // be in view here too, without fighting
+                                // manual scrolling.
+                                if selected && self.reveal_preset {
+                                    row.scroll_to_me(Some(egui::Align::Center));
+                                    self.reveal_preset = false;
+                                }
+                                // Right-click a preset to rename it in place,
+                                // whether or not it is the one loaded.
+                                // Everything that acts on this one preset,
+                                // on the preset itself. The header's Back up
+                                // and Restore act on all 126, and keeping the
+                                // two apart is what stops either being
+                                // mistaken for the other.
+                                row.context_menu(|ui| {
+                                    if ui.button("Rename").clicked() {
+                                        rename_start = Some((index, name.clone()));
+                                        ui.close();
+                                    }
+                                    if ui.button("Copy").clicked() {
+                                        menu_action = Some((index, RowAction::Copy));
+                                        ui.close();
+                                    }
+                                    let can_paste = self.clipboard.is_some();
+                                    if ui
+                                        .add_enabled(can_paste, egui::Button::new("Paste"))
+                                        .clicked()
+                                    {
+                                        menu_action = Some((index, RowAction::Paste));
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if ui.button("Save to file…").clicked() {
+                                        menu_action = Some((index, RowAction::Export));
+                                        ui.close();
+                                    }
+                                    if ui.button("Load from file…").clicked() {
+                                        menu_action = Some((index, RowAction::Import));
+                                        ui.close();
+                                    }
+                                    if ui.button("Keep in library").clicked() {
+                                        menu_action = Some((index, RowAction::Keep));
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    // Last, alone, below a line: it empties
+                                    // the slot in flash and undo does not
+                                    // reach it. It asks before it does.
+                                    if ui.button("Remove").clicked() {
+                                        menu_action = Some((index, RowAction::Remove));
+                                        ui.close();
+                                    }
+                                });
                             }
                         });
-                    });
-                }
-                ui.separator();
-
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        // Show slot labels alone until the names arrive.
-                        let total = if self.presets.is_empty() {
-                            self.preset_count as i64
-                        } else {
-                            self.presets.len() as i64
-                        };
-                        let setlist = self.setlist;
-                        let mut load = None;
-                        let mut toggle = None;
-                        let mut rename_start = None;
-                        let mut menu_action = None;
-                        // Some(Some(name)) commits a rename, Some(None) cancels.
-                        let mut rename_result: Option<Option<(i64, String)>> = None;
-                        let mut shown_any = false;
-                        for index in 0..total {
-                            let fav = self.config.is_favorite(setlist, index);
-                            if self.show_favorites_only && !fav {
-                                continue;
-                            }
-                            shown_any = true;
-                            let name = self
-                                .presets
-                                .get(index as usize)
-                                .cloned()
-                                .unwrap_or_default();
-                            let selected = index == self.preset_index;
-                            let label = format!("{}  {}", hx_proto::rpc::slot_label(index), name);
-                            ui.horizontal(|ui| {
-                                // One height for the row, and every widget in it
-                                // centred on that: a text star, a drawn icon and
-                                // a label are three different heights, and left
-                                // to themselves they sat on three baselines.
-                                ui.set_min_height(20.0);
-                                // Two icons that belong together sit together;
-                                // the default gap made them look like controls
-                                // for different things.
-                                ui.spacing_mut().item_spacing.x = 2.0;
-                                // The star leads the row, clear of the scrollbar
-                                // that overlaps the right edge and eats the click.
-                                // The same kind of thing as the keep button
-                                // beside it: a drawn icon that lights under the
-                                // pointer. As a text glyph it did not read as
-                                // something you could press at all.
-                                let (mark, colour) = if fav {
-                                    (theme::Icon::StarOn, theme::ACCENT)
-                                } else {
-                                    (theme::Icon::Star, theme::DIM)
-                                };
-                                if theme::small_icon_button(ui, mark, Some(colour))
-                                    .on_hover_text(if fav {
-                                        "Remove favourite"
-                                    } else {
-                                        "Favourite"
-                                    })
-                                    .clicked()
-                                {
-                                    toggle = Some(index);
-                                }
-                                // Keeping is a thing you do to *a* preset, so it
-                                // sits on the preset - beside its own star, not
-                                // in the list's title where it could only ever
-                                // mean the loaded one.
-                                //
-                                // And it is a dot rather than a button, because
-                                // the question a person actually has is "is this
-                                // one saved?", which a button can only answer by
-                                // disappearing. Three states in one place: not
-                                // in the library, in it and identical, in it
-                                // under this name and different.
-                                // This row *is* the pedal, so the pedal is not
-                                // one of the icons: what it shows is the two
-                                // other places a tone can be.
-                                let state = self.slot_sync(index);
-                                let held = theme::place(ui, theme::Icon::Computer, state);
-                                let held = match state {
-                                    theme::Sync::Absent => {
-                                        held.on_hover_text("Not in your library. Keep it")
-                                    }
-                                    theme::Sync::Same => held.on_hover_text("In your library"),
-                                    theme::Sync::Differs => held.on_hover_text(
-                                        "In your library under this name, but different. \
-                                         Update it from the pedal",
-                                    ),
-                                    theme::Sync::Working => held.on_hover_text("Saving…"),
-                                    theme::Sync::Unknown => held,
-                                };
-                                if held.clicked() {
-                                    match state {
-                                        theme::Sync::Absent => {
-                                            menu_action = Some((index, RowAction::Keep))
-                                        }
-                                        theme::Sync::Differs => {
-                                            menu_action = Some((index, RowAction::Update))
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                let renaming_this = self.sending.is_none()
-                                    && matches!(&self.renaming, Some((i, _)) if *i == index);
-                                if self.sending.is_some() {
-                                    // Every row is a target now. An empty slot
-                                    // is the safe one and reads as such; an
-                                    // occupied one says what it would cost
-                                    // before it costs it, which is the whole
-                                    // reason for picking in the list rather
-                                    // than in a dialog with a slot number in it.
-                                    let empty = name.trim().is_empty();
-                                    let text = if empty {
-                                        RichText::new(format!(
-                                            "{}  empty",
-                                            hx_proto::rpc::slot_label(index)
-                                        ))
-                                        .color(theme::ACCENT)
-                                    } else {
-                                        RichText::new(&label).color(theme::DIM)
-                                    };
-                                    let target = ui.add(
-                                        egui::Button::new(())
-                                            .left_text(text)
-                                            .frame(false)
-                                            .min_size(egui::vec2(ui.available_width(), 18.0)),
-                                    );
-                                    let target = if empty {
-                                        target.on_hover_text("Put it here")
-                                    } else {
-                                        target.on_hover_text(format!("Replace {name}"))
-                                    };
-                                    if target.clicked() {
-                                        picked = Some(index);
-                                    }
-                                } else if renaming_this {
-                                    if let Some((_, draft)) = self.renaming.as_mut() {
-                                        let edit = ui.add(
-                                            egui::TextEdit::singleline(draft)
-                                                .desired_width(180.0)
-                                                .hint_text("preset name"),
-                                        );
-                                        if !edit.has_focus() && !edit.lost_focus() {
-                                            edit.request_focus();
-                                        }
-                                        if edit.lost_focus() {
-                                            rename_result = Some(
-                                                ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                                    .then(|| (index, draft.clone())),
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    let text = if selected {
-                                        RichText::new(&label).color(theme::ACCENT).strong()
-                                    } else {
-                                        RichText::new(&label)
-                                    };
-                                    // A plain, content-sized label: left-aligned
-                                    // as before, never centered (no forced width).
-                                    let row = ui.selectable_label(selected, text);
-                                    if row.clicked() {
-                                        load = Some(index);
-                                    }
-                                    // A preset picked on the pedal itself should
-                                    // be in view here too, without fighting
-                                    // manual scrolling.
-                                    if selected && self.reveal_preset {
-                                        row.scroll_to_me(Some(egui::Align::Center));
-                                        self.reveal_preset = false;
-                                    }
-                                    // Right-click a preset to rename it in place,
-                                    // whether or not it is the one loaded.
-                                    // Everything that acts on this one preset,
-                                    // on the preset itself. The header's Back up
-                                    // and Restore act on all 126, and keeping the
-                                    // two apart is what stops either being
-                                    // mistaken for the other.
-                                    row.context_menu(|ui| {
-                                        if ui.button("Rename").clicked() {
-                                            rename_start = Some((index, name.clone()));
-                                            ui.close();
-                                        }
-                                        if ui.button("Copy").clicked() {
-                                            menu_action = Some((index, RowAction::Copy));
-                                            ui.close();
-                                        }
-                                        let can_paste = self.clipboard.is_some();
-                                        if ui
-                                            .add_enabled(can_paste, egui::Button::new("Paste"))
-                                            .clicked()
-                                        {
-                                            menu_action = Some((index, RowAction::Paste));
-                                            ui.close();
-                                        }
-                                        ui.separator();
-                                        if ui.button("Save to file…").clicked() {
-                                            menu_action = Some((index, RowAction::Export));
-                                            ui.close();
-                                        }
-                                        if ui.button("Load from file…").clicked() {
-                                            menu_action = Some((index, RowAction::Import));
-                                            ui.close();
-                                        }
-                                        if ui.button("Keep in library").clicked() {
-                                            menu_action = Some((index, RowAction::Keep));
-                                            ui.close();
-                                        }
-                                        ui.separator();
-                                        // Last, alone, below a line: it empties
-                                        // the slot in flash and undo does not
-                                        // reach it. It asks before it does.
-                                        if ui.button("Remove").clicked() {
-                                            menu_action = Some((index, RowAction::Remove));
-                                            ui.close();
-                                        }
-                                    });
-                                }
-                            });
+                    }
+                    if self.show_favorites_only && !shown_any {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("No favorites yet. Tap a star to add one.")
+                                .small()
+                                .color(theme::DIM),
+                        );
+                    }
+                    if let Some(index) = toggle {
+                        self.config.toggle_favorite(setlist, index);
+                    }
+                    if let Some(index) = load {
+                        // Selecting a preset throws away whatever is in the
+                        // edit buffer. That is the device's rule, not ours,
+                        // and it costs a person their unsaved work in
+                        // silence - so it asks first.
+                        self.request_preset(index);
+                    }
+                    if let Some((index, action)) = menu_action {
+                        self.row_action(index, action);
+                    }
+                    if let Some(started) = rename_start {
+                        self.renaming = Some(started);
+                    }
+                    if let Some(result) = rename_result {
+                        self.renaming = None;
+                        if let Some((index, name)) = result {
+                            self.send(Cmd::Rename { index, name });
                         }
-                        if self.show_favorites_only && !shown_any {
-                            ui.add_space(8.0);
-                            ui.label(
-                                RichText::new("No favorites yet. Tap a star to add one.")
-                                    .small()
-                                    .color(theme::DIM),
-                            );
-                        }
-                        if let Some(index) = toggle {
-                            self.config.toggle_favorite(setlist, index);
-                        }
-                        if let Some(index) = load {
-                            // Selecting a preset throws away whatever is in the
-                            // edit buffer. That is the device's rule, not ours,
-                            // and it costs a person their unsaved work in
-                            // silence - so it asks first.
-                            self.request_preset(index);
-                        }
-                        if let Some((index, action)) = menu_action {
-                            self.row_action(index, action);
-                        }
-                        if let Some(started) = rename_start {
-                            self.renaming = Some(started);
-                        }
-                        if let Some(result) = rename_result {
-                            self.renaming = None;
-                            if let Some((index, name)) = result {
-                                self.send(Cmd::Rename { index, name });
-                            }
-                        }
-                    });
-            });
+                    }
+                });
+        });
 
         if capture {
             self.send(Cmd::CaptureSetlist);
@@ -2702,9 +2773,19 @@ impl App {
     /// library's now, not the setlist's, and any of them can be dropped into
     /// any other slot later. The setlist records the order, which is the part
     /// that was only ever on the pedal.
-    fn keep_setlist(&mut self, slots: Vec<(String, Option<Vec<u8>>)>) {
+    fn keep_setlist(&mut self, slots: Vec<(String, Option<Vec<u8>>)>, kind: &str) {
         let mut kept = Vec::with_capacity(slots.len());
         let mut failures = 0;
+        let device_label = if self.device.trim().is_empty() {
+            if kind == "vxpreset" {
+                "StompStation PRO"
+            } else {
+                "HX"
+            }
+        } else {
+            self.device.trim()
+        }
+        .to_owned();
         for (name, bytes) in slots {
             let Some(bytes) = bytes else {
                 kept.push(library::Slot::default());
@@ -2713,11 +2794,31 @@ impl App {
             // A full capture cannot stop for 126 name questions. A changed
             // preset with an existing name is the next revision of that tone;
             // identical bytes remain the same content-addressed revision.
-            let captured = library::keep(&name, "hxpreset", &bytes).and_then(|(hash, how)| {
+            let captured = library::keep(&name, kind, &bytes).and_then(|(hash, how)| {
                 if matches!(how, library::Keeping::NameTaken { .. }) {
                     let old = library::named(&name)
                         .ok_or_else(|| "that tone disappeared during capture".to_owned())?;
-                    library::override_with(&old.hash, &hash, &old.meta.name)?;
+                    let old_kind = library::kind(&old.hash).unwrap_or_default();
+                    let same_family = (kind == "vxpreset") == (old_kind == "vxpreset");
+                    if same_family {
+                        library::override_with(&old.hash, &hash, &old.meta.name)?;
+                    } else {
+                        // Names are unique in the shared library, but a factory
+                        // name is not a cross-device identity. Keep both and
+                        // qualify only the computer-side label; the setlist
+                        // below retains the exact name the pedal displays.
+                        let base = format!("{name} · {device_label}");
+                        let mut candidate = base.clone();
+                        let mut suffix = 2;
+                        while library::named(&candidate).is_some() {
+                            candidate = format!("{base} {suffix}");
+                            suffix += 1;
+                        }
+                        let (_, kept) = library::keep(&candidate, kind, &bytes)?;
+                        if !matches!(kept, library::Keeping::Kept | library::Keeping::Already(_)) {
+                            return Err("could not choose a distinct cross-device name".into());
+                        }
+                    }
                 }
                 Ok(hash)
             });
@@ -2866,8 +2967,11 @@ impl App {
         let Some(entry) = self.lib_entries.get(row) else {
             return;
         };
-        if !matches!(self.connection, Connection::Online) {
+        if !self.pedal_online() {
             return self.note("no pedal to send to".into());
+        }
+        if !self.tone_kind_compatible(&entry.hash) {
+            return self.note(format!("{} is for a different pedal family", entry.name));
         }
         self.sending = Some(Sending {
             hash: entry.hash.clone(),
@@ -2890,9 +2994,13 @@ impl App {
         self.note(format!(
             "writing {} to {}",
             sending.name,
-            hx_proto::rpc::slot_label(slot)
+            self.active_slot_label(slot)
         ));
-        self.send(Cmd::PushSetlist(vec![(slot, Some((sending.name, bytes)))]));
+        if self.pro_active() {
+            self.pro.send_tone(slot as usize, sending.name, bytes);
+        } else {
+            self.send(Cmd::PushSetlist(vec![(slot, Some((sending.name, bytes)))]));
+        }
     }
 
     /// A slot's name and its bytes, out of the automatic backup.
@@ -2948,6 +3056,12 @@ impl App {
 
     /// The same question from the library's side: is this tone on the pedal?
     fn tone_sync(&self, hash: &str, name: &str) -> theme::Sync {
+        if !self.tone_kind_compatible(hash) {
+            return theme::Sync::Unknown;
+        }
+        if self.pro_active() {
+            return self.pro.tone_sync(hash, name);
+        }
         if self.mirror.is_empty() {
             return theme::Sync::Unknown;
         }
@@ -3164,10 +3278,13 @@ impl App {
     /// through the same codec the preview uses.
     fn library_facts(&self, hash: &str) -> (String, String) {
         let fallback = library::short(hash).to_owned();
-        let Some(catalog) = self.catalog.as_ref() else {
+        let Some(bytes) = library::read(hash) else {
             return (fallback, String::new());
         };
-        let Some(bytes) = library::read(hash) else {
+        if library::kind(hash).as_deref() == Some("vxpreset") {
+            return (fallback, pro::preset_content(&bytes).unwrap_or_default());
+        }
+        let Some(catalog) = self.catalog.as_ref() else {
             return (fallback, String::new());
         };
         let tone = if library::kind(hash).as_deref() == Some("hlx") {
@@ -3203,13 +3320,14 @@ impl App {
             && view != LibraryView::Cloud
             && self.auditioning.is_some()
         {
-            self.send(Cmd::EndAudition);
+            self.end_audition();
         }
         self.lib_showing = view;
+        let scoped_device = self.cloud_device_scope();
         if view == LibraryView::Cloud
             && (self.cloud_loaded_query.as_deref() != Some(self.library_search.trim())
                 || self.cloud_loaded_order != Some(self.cloud_order)
-                || self.cloud_loaded_device.as_deref() != Some(self.device.trim()))
+                || self.cloud_loaded_device.as_deref() != Some(scoped_device.as_str()))
         {
             self.cloud_search_due = Some(std::time::Instant::now());
         }
@@ -3225,7 +3343,7 @@ impl App {
     fn start_cloud_page(&mut self, page: u32, ctx: &egui::Context) {
         let query = self.library_search.trim().to_owned();
         let order = self.cloud_order;
-        let device = self.device.trim().to_owned();
+        let device = self.cloud_device_scope();
         let (tx, rx) = std::sync::mpsc::channel();
         let repaint = ctx.clone();
         let requested = query.clone();
@@ -3306,7 +3424,7 @@ impl App {
         // receiver looking busy forever.
         if job.query != self.library_search.trim()
             || job.order != self.cloud_order
-            || job.device != self.device.trim()
+            || job.device != self.cloud_device_scope()
         {
             return;
         }
@@ -3384,7 +3502,7 @@ impl App {
     /// Discovery itself stays global; only this one device-writing action is
     /// compatibility constrained.
     fn cloud_audition_blocker(&self, entry: &cloud::DiscoveredTone) -> Option<&'static str> {
-        if !matches!(self.connection, Connection::Online) {
+        if !self.pedal_online() {
             return Some("Connect a pedal to audition this Tone");
         }
         if !cloud::compatible_device(&self.device, &entry.tone.summary.device.name) {
@@ -3423,7 +3541,7 @@ impl App {
     ) {
         let id = entry.tone.summary.id;
         if matches!(action, CloudAction::Audition) && self.auditioning == Some(id) {
-            self.send(Cmd::EndAudition);
+            self.end_audition();
             return;
         }
         if matches!(action, CloudAction::Audition) {
@@ -3501,7 +3619,9 @@ impl App {
         match action {
             CloudAction::Computer => {
                 let view = self.lib_showing;
-                let kind = if hx_proto::preset::Preset::parse(&bytes).is_some() {
+                let kind = if voidx_proto::Preset::parse(&bytes).is_ok() {
+                    "vxpreset"
+                } else if hx_proto::preset::Preset::parse(&bytes).is_some() {
                     "hxpreset"
                 } else {
                     "hlx"
@@ -3533,6 +3653,14 @@ impl App {
             CloudAction::Audition => {
                 let id = entry.tone.summary.id;
                 let name = entry.tone.summary.name.clone();
+                if self.pro_active() {
+                    if voidx_proto::Preset::parse(&bytes).is_err() {
+                        return self
+                            .problem("this Cloud tone is not a StompStation PRO preset".into());
+                    }
+                    self.pro.audition(id, name, bytes);
+                    return;
+                }
                 if hx_proto::preset::Preset::parse(&bytes).is_some() {
                     self.send(Cmd::AuditionDocument {
                         key: id,
@@ -3818,7 +3946,7 @@ impl App {
                         .get(entry)
                         .map(|entry| entry.discovered.tone.summary.id) =>
                 {
-                    self.send(Cmd::KeepAudition)
+                    self.keep_audition()
                 }
                 0 => self.start_cloud_action(entry, CloudAction::Audition, ui.ctx()),
                 _ if local.is_some() => {
@@ -3952,14 +4080,14 @@ impl App {
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("Done auditioning").clicked() {
-                    self.send(Cmd::EndAudition);
+                    self.end_audition();
                 }
                 if ui
                     .button("Keep on pedal")
                     .on_hover_text("leave it in the edit buffer; Save writes it")
                     .clicked()
                 {
-                    self.send(Cmd::KeepAudition);
+                    self.keep_audition();
                 }
             });
         }
@@ -3993,8 +4121,12 @@ impl App {
                 // library with local and public views of the same Tones.
                 let cloud_count = self.cloud_total.unwrap_or(self.cloud_entries.len());
                 for (view, label, count) in [
-                    (LibraryView::Tones, "Tones", self.lib_entries.len()),
-                    (LibraryView::Setlists, "Setlists", self.lib_setlists.len()),
+                    (LibraryView::Tones, "Tones", self.scoped_tone_count()),
+                    (
+                        LibraryView::Setlists,
+                        "Setlists",
+                        self.scoped_setlist_count(),
+                    ),
                     (LibraryView::Cloud, "Cloud", cloud_count),
                 ] {
                     let on = self.lib_showing == view;
@@ -4035,7 +4167,7 @@ impl App {
                 .max_rect(right_rect)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
             |ui| {
-                let live = matches!(self.connection, Connection::Online);
+                let live = self.pedal_online();
                 match self.lib_showing {
                     // Keeping a preset lives on the preset list now, beside
                     // the star: it is a thing you do to a preset, not a thing
@@ -4063,12 +4195,49 @@ impl App {
                             self.refresh_cloud();
                         }
                         if self.auditioning.is_some() && ui.button("Done auditioning").clicked() {
-                            self.send(Cmd::EndAudition);
+                            self.end_audition();
                         }
                         if self.cloud_searching.is_some() || self.cloud_download.is_some() {
                             theme::spinner(ui);
                         }
                     }
+                }
+                let selected = self
+                    .library_device_filter
+                    .as_deref()
+                    .unwrap_or("All pedals")
+                    .to_owned();
+                let connected = self.library_connected_device.clone();
+                let mut changed = false;
+                egui::ComboBox::from_id_salt("library-device-scope")
+                    .selected_text(selected)
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(self.library_device_filter.is_none(), "All pedals")
+                            .clicked()
+                        {
+                            self.library_device_filter = None;
+                            changed = true;
+                        }
+                        if !connected.is_empty()
+                            && ui
+                                .selectable_label(
+                                    self.library_device_filter.as_deref()
+                                        == Some(connected.as_str()),
+                                    &connected,
+                                )
+                                .clicked()
+                        {
+                            self.library_device_filter = Some(connected.clone());
+                            changed = true;
+                        }
+                    });
+                if changed {
+                    self.lib_selected = None;
+                    self.lib_setlist = None;
+                    self.cloud_loaded_device = None;
+                    self.refresh_cloud();
                 }
             },
         );
@@ -4166,7 +4335,11 @@ impl App {
             });
         if capture {
             self.note("reading the whole setlist off the pedal".to_owned());
-            self.send(Cmd::CaptureSetlist);
+            if self.pro_active() {
+                self.pro.capture_setlist();
+            } else {
+                self.send(Cmd::CaptureSetlist);
+            }
         }
         self.confirm_push_window(&ctx);
         self.confirm_delete_window(&ctx);
@@ -4184,6 +4357,13 @@ impl App {
     /// venue without going to a panel below. The table brings all three along.
     fn setlist_rail(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
+        let rows = self
+            .lib_setlists
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, setlist))| self.setlist_in_library_scope(setlist))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
         let mut grid = table::Grid {
             columns: setlist_rail_columns(),
             sticky: 1,
@@ -4193,7 +4373,8 @@ impl App {
                           to keep the pedal as one.",
             ..Default::default()
         };
-        for (_, setlist) in &self.lib_setlists {
+        for &index in &rows {
+            let setlist = &self.lib_setlists[index].1;
             grid.rows.push(vec![
                 table::Cell::Text(setlist.name.clone()),
                 table::Cell::Dim(format!("v{}", setlist.revision())),
@@ -4203,18 +4384,25 @@ impl App {
             ]);
         }
 
-        grid.selected = self.lib_setlist;
+        grid.selected = self
+            .lib_setlist
+            .and_then(|selected| rows.iter().position(|&row| row == selected));
         if let Some((path, column, draft)) = self.lib_setlist_editing.clone() {
             grid.editing = self
                 .lib_setlists
                 .iter()
                 .position(|(known, _)| *known == path)
+                .and_then(|selected| rows.iter().position(|&row| row == selected))
                 .map(|row| (row, column));
             grid.draft = draft;
         }
         // Sorted on the very strings the table shows, so the order on screen
         // and the order underneath can never disagree.
-        let order = grid.sort_rows();
+        let order = grid
+            .sort_rows()
+            .into_iter()
+            .map(|row| rows[row])
+            .collect::<Vec<_>>();
 
         // Its own height, so the details below it keep theirs. A long library
         // takes a little over half the panel and scrolls inside that.
@@ -4334,7 +4522,7 @@ impl App {
         let Some((_, setlist)) = self.lib_setlists.get(i).cloned() else {
             return;
         };
-        let live = matches!(self.connection, Connection::Online);
+        let live = self.pedal_online() && self.setlist_compatible(&setlist);
 
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -4396,7 +4584,7 @@ impl App {
                         "missing from the library"
                     },
                 )]),
-                table::Cell::Dim(hx_proto::rpc::slot_label(*slot as i64)),
+                table::Cell::Dim(self.active_slot_label(*slot as i64)),
                 table::Cell::Text(entry.name.clone()),
                 table::Cell::Text(
                     tone.map(|tone| tone.meta.artist.clone())
@@ -4420,17 +4608,24 @@ impl App {
 
     /// Put one preset out of a setlist back into its slot.
     fn send_one_slot(&mut self, slot: i64, entry: &library::Slot) {
+        if !self.tone_kind_compatible(&entry.hash) {
+            return self.note(format!("{} is for a different pedal family", entry.name));
+        }
         match library::read(&entry.hash) {
             Some(bytes) => {
                 self.note(format!(
                     "writing {} to {}",
                     entry.name,
-                    hx_proto::rpc::slot_label(slot)
+                    self.active_slot_label(slot)
                 ));
-                self.send(Cmd::PushSetlist(vec![(
-                    slot,
-                    Some((entry.name.clone(), bytes)),
-                )]));
+                if self.pro_active() {
+                    self.pro.send_tone(slot as usize, entry.name.clone(), bytes);
+                } else {
+                    self.send(Cmd::PushSetlist(vec![(
+                        slot,
+                        Some((entry.name.clone(), bytes)),
+                    )]));
+                }
             }
             None => self.note(format!("{} is missing from the library", entry.name)),
         }
@@ -4475,7 +4670,11 @@ impl App {
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(6.0);
-        let live = matches!(self.connection, Connection::Online);
+        let compatible = self
+            .lib_setlists
+            .get(i)
+            .is_some_and(|(_, setlist)| self.setlist_compatible(setlist));
+        let live = self.pedal_online() && compatible;
         let filled = self.lib_setlists.get(i).map_or(0, |(_, s)| s.filled());
         if ui
             .add_enabled(live, egui::Button::new("Put this setlist on the pedal"))
@@ -4579,6 +4778,10 @@ impl App {
 
     /// Read every tone the setlist names and send the lot to the pedal.
     fn push_setlist(&mut self, setlist: &library::Setlist) {
+        if !self.setlist_compatible(setlist) {
+            return self
+                .note("this setlist contains tones or slots for a different pedal family".into());
+        }
         let mut slots = Vec::with_capacity(setlist.slots.len());
         let mut missing = 0;
         for (index, entry) in setlist.slots.iter().enumerate() {
@@ -4598,14 +4801,36 @@ impl App {
             self.note(format!("{missing} tones are missing and were skipped"));
         }
         self.note(format!("writing “{}” to the pedal", setlist.name));
-        self.send(Cmd::PushSetlist(slots));
+        if self.pro_active() {
+            self.pro.push_setlist(
+                slots
+                    .into_iter()
+                    .map(|(slot, tone)| (slot as usize, tone))
+                    .collect(),
+            );
+        } else {
+            self.send(Cmd::PushSetlist(slots));
+        }
     }
 
     /// The left rail: every tag, click one to filter the table to it.
     fn library_tags_rail(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.label(RichText::new("TAGS").small().color(theme::DIM));
-        tag_rail(ui, &mut self.lib_tag_filter, &self.library_lookup.tags);
+        let tags = if self.library_device_filter.is_none() {
+            self.library_lookup.tags.clone()
+        } else {
+            let mut tags = self
+                .lib_entries
+                .iter()
+                .filter(|entry| self.tone_in_library_scope(&entry.hash))
+                .flat_map(|entry| entry.meta.tags.iter().cloned())
+                .collect::<Vec<_>>();
+            tags.sort();
+            tags.dedup();
+            tags
+        };
+        tag_rail(ui, &mut self.lib_tag_filter, &tags);
     }
 
     /// The middle table: one row per tone, filtered by the chosen tag. Click to
@@ -4616,7 +4841,12 @@ impl App {
             .lib_entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| filter.as_ref().is_none_or(|t| e.meta.tags.contains(t)))
+            .filter(|(_, entry)| self.tone_in_library_scope(&entry.hash))
+            .filter(|(_, entry)| {
+                filter
+                    .as_ref()
+                    .is_none_or(|tag| entry.meta.tags.contains(tag))
+            })
             .map(|(i, _)| i)
             .collect();
 
@@ -4926,7 +5156,7 @@ impl App {
 
     /// Publish this local Tone under its Song.
     ///
-    /// A new Song is created first, then the portable preset is attached as its
+    /// A new Song is created first, then the publishable preset is attached as its
     /// first device-native Tone. These remain two calls in the cloud client so
     /// a failed second call can truthfully report the empty Song left behind.
     fn start_publishing(&mut self, entry: usize, ctx: &egui::Context) {
@@ -4939,12 +5169,13 @@ impl App {
         let Some(entry) = self.lib_entries.get(entry) else {
             return;
         };
-        let Some(path) = library::portable_path(&entry.hash) else {
-            return self.problem(format!("{} has no portable copy to publish", entry.name));
+        let Some(path) = library::publish_path(&entry.hash) else {
+            return self.problem(format!("{} has no publishable artifact", entry.name));
         };
-        let Ok(hlx) = std::fs::read(&path) else {
+        let Ok(artifact) = std::fs::read(&path) else {
             return self.problem(format!("{} could not be read", entry.name));
         };
+        let pro_tone = library::kind(&entry.hash).as_deref() == Some("vxpreset");
         let catalog_song = !entry.meta.song.trim().is_empty();
         if catalog_song && entry.meta.artist.trim().is_empty() {
             return self.problem(format!(
@@ -4958,44 +5189,68 @@ impl App {
             let value = value.trim();
             (!value.is_empty()).then(|| value.to_owned())
         };
-        let inspected = serde_json::from_slice::<serde_json::Value>(&hlx)
-            .ok()
+        let inspected = (!pro_tone)
+            .then(|| serde_json::from_slice::<serde_json::Value>(&artifact).ok())
+            .flatten()
             .and_then(|document| {
                 self.catalog
                     .as_ref()
                     .map(|catalog| hx_catalog::inspect(&document, catalog))
             });
-        let blocks = inspected
-            .as_ref()
-            .map(|tone| {
-                tone.blocks
-                    .iter()
-                    .map(|block| {
-                        serde_json::json!({
-                            "name": block.model_name,
-                            "category": block.category,
-                            "enabled": block.enabled,
-                            "path": block.path,
+        let blocks = if pro_tone {
+            pro::preset_blocks(&artifact)
+        } else {
+            inspected
+                .as_ref()
+                .map(|tone| {
+                    tone.blocks
+                        .iter()
+                        .map(|block| {
+                            serde_json::json!({
+                                "name": block.model_name,
+                                "category": block.category,
+                                "enabled": block.enabled,
+                                "path": block.path,
+                            })
                         })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let parsed_metadata = inspected.as_ref().map_or(serde_json::Value::Null, |tone| {
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let parsed_metadata = if pro_tone {
             serde_json::json!({
-                "models_used": tone.models_used,
-                "skipped": tone.skipped,
+                "format": "vxpreset",
+                "protocol": "VoidX",
             })
-        });
-        let chain_content = inspected.as_ref().map(|tone| {
-            match tone.chain_content {
-                hx_catalog::ChainContent::FullRig => "full_rig",
-                hx_catalog::ChainContent::AmpAndCab => "amp_and_cab",
-                hx_catalog::ChainContent::AmpOnly => "amp_only",
-                hx_catalog::ChainContent::EffectsOnly => "effects_only",
-            }
-            .to_owned()
-        });
+        } else {
+            inspected.as_ref().map_or(serde_json::Value::Null, |tone| {
+                serde_json::json!({
+                    "models_used": tone.models_used,
+                    "skipped": tone.skipped,
+                })
+            })
+        };
+        let chain_content = if pro_tone {
+            pro::preset_content(&artifact).map(|content| {
+                match content.as_str() {
+                    "Full rig" => "full_rig",
+                    "Amp, no cab" => "amp_only",
+                    "Cab and effects" => "effects_only",
+                    _ => "effects_only",
+                }
+                .to_owned()
+            })
+        } else {
+            inspected.as_ref().map(|tone| {
+                match tone.chain_content {
+                    hx_catalog::ChainContent::FullRig => "full_rig",
+                    hx_catalog::ChainContent::AmpAndCab => "amp_and_cab",
+                    hx_catalog::ChainContent::AmpOnly => "amp_only",
+                    hx_catalog::ChainContent::EffectsOnly => "effects_only",
+                }
+                .to_owned()
+            })
+        };
         let output_target = inspected.as_ref().map(|tone| {
             match tone.output_target_guess {
                 hx_catalog::OutputTarget::FrfrPa => "frfr_pa",
@@ -5004,6 +5259,18 @@ impl App {
             .to_owned()
         });
         let character = library::character_key(&entry.meta.character).map(str::to_owned);
+        let publish_device = if pro_tone {
+            "StompStation PRO".to_owned()
+        } else if !self.pro_active() && !self.device.is_empty() {
+            self.device.clone()
+        } else {
+            "HX Stomp".to_owned()
+        };
+        let publish_firmware = if self.tone_kind_compatible(&entry.hash) {
+            present(&self.firmware)
+        } else {
+            None
+        };
         let request = cloud::PublishRequest {
             song: cloud::PublishSong::New(cloud::CreateSongRequest {
                 creator_name: self.config.account.clone().unwrap_or_default(),
@@ -5040,12 +5307,8 @@ impl App {
                     )
                     .map(str::to_owned),
                     device_id: None,
-                    device_name: Some(if self.device.is_empty() {
-                        "HX Stomp".to_owned()
-                    } else {
-                        self.device.clone()
-                    }),
-                    firmware_version: present(&self.firmware),
+                    device_name: Some(publish_device),
+                    firmware_version: publish_firmware,
                     parser_version: Some(update::VERSION.to_owned()),
                     output_target,
                     chain_content,
@@ -5056,8 +5319,14 @@ impl App {
                         filename: path
                             .file_name()
                             .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| format!("{}.hlx", entry.name)),
-                        bytes: hlx,
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "{}.{}",
+                                    entry.name,
+                                    if pro_tone { "vxpreset" } else { "hlx" }
+                                )
+                            }),
+                        bytes: artifact,
                     }),
                 },
             },
@@ -5111,7 +5380,7 @@ impl App {
                 }
                 self.status.clear();
                 self.note(format!("{} is published as a Tone", tone.summary.name));
-                self.cloud_check = Some(cloud::published());
+                self.start_cloud_check();
             }
             Err(why) => self.problem(why.to_string()),
         }
@@ -5567,12 +5836,12 @@ impl App {
 
         ui.add_space(10.0);
         ui.separator();
-        // The way a tone leaves this machine for the web: the .hlx the site
-        // reads, and the details beside it in the site's own field names.
+        // The way a tone leaves this machine for the web: its publishable
+        // device artifact and the details beside it in the site's own fields.
         if ui
             .button("Export for the web")
             .on_hover_text(
-                "write this tone as .hlx with its details alongside, \
+                "write this tone's publishable preset with its details alongside, \
                  ready to upload",
             )
             .clicked()
@@ -5602,19 +5871,23 @@ impl App {
 
     /// Write a library Tone and its Song facts in the cloud contract's shape.
     ///
-    /// Two files, not one: the `.hlx` the site parses for what the tone *is* -
-    /// through the same inspector the site runs, so the two cannot drift - and
-    /// a `.json` of what only a person knows, in the site's own field names.
-    /// The library keeps whole device documents, so the `.hlx` is made here
-    /// rather than stored; snapshots and routing stay in the library copy,
-    /// which is the one that goes back on a pedal.
+    /// Two files, not one: the device-family artifact the site receives, and a
+    /// `.json` of what only a person knows, in the site's own field names. HX
+    /// native documents are converted to `.hlx`; a PRO `.vxpreset` is already
+    /// the lossless publishable form.
     fn export_for_the_web(&mut self, index: usize) {
         let Some(entry) = self.lib_entries.get(index).cloned() else {
             return;
         };
-        let Some(catalog) = self.catalog.as_ref() else {
-            self.note("exporting needs HX Edit's model data first".into());
-            return;
+        let pro_tone = library::kind(&entry.hash).as_deref() == Some("vxpreset");
+        let catalog = if pro_tone {
+            None
+        } else {
+            let Some(catalog) = self.catalog.as_ref() else {
+                self.note("exporting this HX tone needs HX Edit's model data first".into());
+                return;
+            };
+            Some(catalog)
         };
         let Some(dir) = rfd::FileDialog::new()
             .set_title("Where to put the tone")
@@ -5629,13 +5902,19 @@ impl App {
         };
         // A library tone is a device document; the site wants the symbolic
         // form. A tone kept as .hlx already is passed through untouched.
-        let hlx = if library::kind(&entry.hash).as_deref() == Some("hlx") {
-            String::from_utf8_lossy(&document).into_owned()
+        let artifact = if pro_tone {
+            document
+        } else if library::kind(&entry.hash).as_deref() == Some("hlx") {
+            String::from_utf8_lossy(&document).into_owned().into_bytes()
         } else {
             match hx_proto::preset::Preset::parse(&document) {
-                Some(preset) => {
-                    hx_catalog::to_hlx(&preset, catalog, &entry.name).to_pretty_string()
-                }
+                Some(preset) => hx_catalog::to_hlx(
+                    &preset,
+                    catalog.expect("HX catalog checked above"),
+                    &entry.name,
+                )
+                .to_pretty_string()
+                .into_bytes(),
                 None => return self.note(format!("{} is not a readable preset", entry.name)),
             }
         };
@@ -5645,8 +5924,11 @@ impl App {
             Ok(json) => json,
             Err(error) => return self.note(format!("could not encode the tone details: {error}")),
         };
-        let tone = dir.join(format!("{stem}.hlx"));
-        if let Err(e) = library::atomic_write(&tone, hlx) {
+        let tone = dir.join(format!(
+            "{stem}.{}",
+            if pro_tone { "vxpreset" } else { "hlx" }
+        ));
+        if let Err(e) = library::atomic_write(&tone, artifact) {
             return self.note(format!("could not write {}: {e}", tone.display()));
         }
         if let Err(e) = library::atomic_write(&details, json) {
@@ -6818,7 +7100,11 @@ impl App {
             .map(|m| m.name)
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| library::short(hash).to_owned());
-        if library::kind(hash).as_deref() == Some("hlx") {
+        if library::kind(hash).as_deref() == Some("vxpreset") {
+            if let Err(why) = self.pro.preview(name, &bytes) {
+                self.note(why);
+            }
+        } else if library::kind(hash).as_deref() == Some("hlx") {
             self.preview_hlx(&name, bytes);
         } else {
             self.preview_hxpreset(&name, bytes);
@@ -7238,11 +7524,12 @@ impl App {
             });
         }
 
-        egui::Panel::top("chain")
-            .resizable(true)
-            .default_size(default_height)
-            .size_range(min_height..=max_height)
-            .show(root_ui, |ui| {
+        processor::chain_panel(
+            root_ui,
+            "chain",
+            default_height,
+            min_height..=max_height,
+            |ui| {
                 ui.add_space(6.0);
                 if self.chain.is_empty() {
                     ui.centered_and_justified(|ui| {
@@ -7300,7 +7587,8 @@ impl App {
                     self.browsing = None;
                     self.browsing_shelf = None;
                 }
-            });
+            },
+        );
     }
 
     /// One signal path: the main line straight across, branches hanging below.
@@ -7857,7 +8145,7 @@ impl App {
     /// pedal is the work; the shelf is a side trip, so it is a panel of its
     /// own beside this one.
     fn editor(&mut self, root_ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show(root_ui, |ui| {
+        processor::editor(root_ui, |ui| {
             let Some(block) = self.chain.get(self.selected).cloned() else {
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new("Connect a device to begin").color(theme::DIM));
@@ -9037,8 +9325,7 @@ impl App {
         // Knobs sit in rows under the pedal like the face of one, every row
         // starting at the same left edge so the columns line up - a wrapped
         // row that started at the margin made twelve knobs look scattered.
-        let cell = egui::vec2(84.0, 116.0);
-        let pitch = cell.x + ui.spacing().item_spacing.x;
+        let cell = processor::CONTROL_CELL;
         // The bypass is a control like any other and leads them: it is the
         // first thing you reach for on a real pedal, and putting it on a line
         // of its own said it was a different kind of thing, which was the whole
@@ -9049,10 +9336,7 @@ impl App {
             .into_iter()
             .chain(values.iter().copied().enumerate().map(Some))
             .collect();
-        let columns = ((ui.available_width() / pitch).floor() as usize)
-            .clamp(1, 8)
-            .min(cells.len().max(1));
-        let indent = ((ui.available_width() - columns as f32 * pitch) / 2.0).max(0.0);
+        let (columns, indent) = processor::control_grid(ui, cells.len());
         let draft = self.param_draft.clone();
         let mut set_draft: Option<Option<(i64, i64, String)>> = None;
         let bypass = self.bypass_view(position);
@@ -10439,6 +10723,21 @@ mod tests {
     }
 
     #[test]
+    fn a_cloud_refresh_never_forgets_an_authoritative_published_hash() {
+        let (mut app, _events, _cmds) = app();
+        let local = "local-object".to_owned();
+        let portable = "a".repeat(64);
+        app.portable_hashes.insert(local.clone(), portable.clone());
+        app.cloud_files = Some(std::collections::BTreeSet::from([portable]));
+
+        let (answer, received) = mpsc::channel();
+        answer.send(std::collections::BTreeSet::new()).unwrap();
+        app.cloud_check = Some(received);
+
+        assert!(matches!(app.cloud_sync(&local), theme::Sync::Same));
+    }
+
+    #[test]
     fn a_finished_publish_opens_the_published_tone() {
         let (mut app, _events, _cmds) = app();
         let tone: cloud::ToneDetails =
@@ -10495,6 +10794,43 @@ mod tests {
         assert!(
             app.cloud_search_due.is_some(),
             "connecting must replace the device-agnostic Cloud prefetch"
+        );
+    }
+
+    #[test]
+    fn a_new_pedal_becomes_the_library_scope_without_fighting_all_pedals() {
+        let (mut app, events, _cmds) = app();
+        events
+            .send(Evt::Connected {
+                device: "HX Stomp".into(),
+                presets: 126,
+            })
+            .unwrap();
+        app.drain_events();
+        app.observe_library_device();
+        assert_eq!(app.library_device_filter.as_deref(), Some("HX Stomp"));
+
+        app.library_device_filter = None;
+        app.observe_library_device();
+        assert!(
+            app.library_device_filter.is_none(),
+            "a frame redraw must not undo the explicit All pedals choice"
+        );
+
+        app.connection = Connection::Offline;
+        app.observe_library_device();
+        events
+            .send(Evt::Connected {
+                device: "HX Stomp".into(),
+                presets: 126,
+            })
+            .unwrap();
+        app.drain_events();
+        app.observe_library_device();
+        assert_eq!(
+            app.library_device_filter.as_deref(),
+            Some("HX Stomp"),
+            "a reconnect is a new pedal-selection event"
         );
     }
 

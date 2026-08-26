@@ -1,6 +1,6 @@
 [package]
-name = "hx-gui"
-description = "Edit the presets on a Line 6 Helix or HX guitar pedal, on Linux, macOS and Windows"
+name = "tonepush-gui"
+description = "Edit Line 6 HX and Sonulab StompStation PRO guitar processors on Linux, macOS and Windows"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,8 @@ rust-version.workspace = true
 hx-proto.workspace = true
 hx-usb.workspace = true
 hx-catalog.workspace = true
+voidx-proto.workspace = true
+voidx-client.workspace = true
 # Persist favorites (and, later, rig profiles and preferences) as one small
 # JSON file the user could open and read.
 serde = { version = "1", features = ["derive"] }
@@ -47,7 +49,7 @@ atomic-write-file = "0.3.1"
 jiff = "0.2"
 
 [lib]
-name = "hx_gui"
+name = "tonepush_gui"
 
 [[bin]]
 name = "tonepush-gui"

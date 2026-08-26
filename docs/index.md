@@ -1,12 +1,12 @@
 ---
 layout: home
 title: TonePush Editor
-description: The open-source editor for Line 6 Helix and HX pedals. Fast, scriptable, and on every OS.
+description: One open-source editor and tone library for Line 6 HX pedals and the StompStation PRO.
 permalink: /
 hero:
   name: TonePush
-  text: Your Helix gear, on every OS
-  tagline: The open-source editor for Line 6 Helix and HX pedals. A tiny download that opens fast, connects fast, and runs on Linux, macOS, and Windows.
+  text: Your pedals, one great editor
+  tagline: The same polished editor, local library, setlists, and Cloud for Line 6 HX pedals and the StompStation PRO—on Linux, macOS, and Windows.
   actions:
     - theme: brand
       text: Download
@@ -26,16 +26,16 @@ hero:
 features:
   - icon: 🎛️
     title: Your whole rig at a glance
-    details: Blocks, branches, and knobs laid out like the pedalboard they are. Drag a pedal below the line to run it in parallel, and move the fork wherever you want it.
+    details: Modelled blocks and real knobs laid out like the pedalboard they are, with the controls and routing each connected processor can actually provide.
   - icon: 🐧
     title: Every OS, including Linux
-    details: HX Edit covers macOS and Windows. TonePush covers those and the Linux machine already sitting next to your pedalboard.
+    details: TonePush covers macOS and Windows, plus the Linux machine already sitting next to your pedalboard.
   - icon: ⚡
     title: Small and quick
     details: A few megabytes, opens in a blink, connects in a moment. No launcher, no installer ceremony, no waiting.
   - icon: 🔓
     title: Improving in the open
-    details: HX Edit has not seen an update in a long while. TonePush is open source and moving, and the USB protocol behind it is documented for anyone to build on.
+    details: TonePush is open source and moving, with reusable HX and VoidX protocol crates for anyone to build on.
     link: https://github.com/crmne/tonepush/blob/main/PROTOCOL.md
     link_text: Read the protocol
   - icon: ⌨️
@@ -43,7 +43,7 @@ features:
     details: A full command-line tool for backups, preset changes, and parameter tweaks. Automate your rig like the computer it secretly is.
   - icon: 🛡️
     title: Safe with your presets
-    details: Presets travel as the device's own data, byte for byte, and every operation was verified against real hardware. What you save is exactly what was there.
+    details: Presets travel as each device's own data, byte for byte, and persistent PRO writes have a verified rollback guard. What you save is exactly what was there.
 ---
 
 <style>

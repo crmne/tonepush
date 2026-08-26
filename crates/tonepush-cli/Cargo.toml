@@ -1,6 +1,6 @@
 [package]
-name = "hx-cli"
-description = "Edit the presets on a Line 6 Helix or HX guitar pedal from the command line"
+name = "tonepush-cli"
+description = "Edit Line 6 HX and Sonulab StompStation PRO guitar processors from the command line"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,6 +14,8 @@ path = "src/main.rs"
 [dependencies]
 hx-proto.workspace = true
 hx-usb.workspace = true
+voidx-proto.workspace = true
+voidx-client.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 serde_json = "1"

@@ -1,3 +1,7 @@
 # Grant users access to Line 6 HX devices over USB. Without this, opening the
 # device fails with a permission error that looks like an application bug.
 SUBSYSTEM=="usb", ATTR{idVendor}=="0e41", MODE="0666", TAG+="uaccess"
+
+# StompStation PRO exposes VoidX as USB CDC serial. Match its strings rather
+# than Linux's shared USB-gadget VID, which is not unique to this pedal.
+SUBSYSTEM=="tty", ATTRS{manufacturer}=="SONULAB", ATTRS{product}=="StompStation PRO", MODE="0660", TAG+="uaccess"

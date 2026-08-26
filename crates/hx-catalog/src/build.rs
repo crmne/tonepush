@@ -233,7 +233,7 @@ pub fn slots_from_hlx(preset: &mut Preset, document: &Json, catalog: &Catalog) -
         // Applying it belongs to the other direction, and is done there. An
         // import reaches the device as ordinary edits, so it can set a
         // junction's model the way the editor's own Type chips do - see
-        // `hx-cli`'s `hlx::plan_for`, confirmed on hardware. Here the result is
+        // `tonepush-cli`'s `hlx::plan_for`, confirmed on hardware. Here the result is
         // a whole document, and the pedal refuses documents built from `.hlx`
         // at all, so building a junction slot to put in one buys nothing.
         let Some(path) = layout.paths.get(dsp_index) else {

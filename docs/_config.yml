@@ -1,6 +1,6 @@
 title: TonePush Editor
 tonepush_version: "0.5.6"
-description: The open-source editor for Line 6 HX pedals.
+description: One open-source editor and tone library for Line 6 HX pedals and the StompStation PRO.
 lang: en-US
 timezone: Europe/Berlin
 url: https://docs.tonepush.rocks
@@ -33,6 +33,8 @@ defaults:
         - Line 6
         - HX Stomp
         - Helix
+        - StompStation PRO
+        - Sonulab
         - guitar effects
         - preset editor
   - scope:
@@ -49,7 +51,7 @@ jekyll_vitepress:
     page_type: TechArticle
     image:
       path: /screenshot.png
-      alt: TonePush Editor for Line 6 HX-family devices
+      alt: TonePush Editor for Line 6 HX pedals and StompStation PRO
     publisher:
       type: Organization
       name: TonePush
@@ -61,7 +63,8 @@ jekyll_vitepress:
     title: TonePush Editor
     description: >-
       Documentation for TonePush, the open-source editor for Line 6 HX-family
-      devices with a cross-platform GUI, scriptable CLI, and protocol reference.
+      devices and the StompStation PRO, with a shared cross-platform GUI,
+      scriptable CLI, local/Cloud library, and protocol references.
     full: true
     details: >-
       The canonical documentation covers installation, device workflows,
@@ -81,7 +84,7 @@ jekyll_vitepress:
     message: >-
       Brought to you by <a href="https://paolino.me" target="_blank" rel="noreferrer">Carmine Paolino</a>, maker of
     copyright: >-
-      <span class="footer-brand-links"><a href="https://chatwithwork.com" class="footer-chatwithwork-link" target="_blank" rel="noreferrer"><img class="footer-chatwithwork-logo theme-image light" src="https://chatwithwork.com/logotype.svg" alt="Chat with Work"><img class="footer-chatwithwork-logo theme-image dark" src="https://chatwithwork.com/logotype-dark.svg" alt="Chat with Work"></a><a href="https://rubyllm.com" class="footer-rubyllm-link" target="_blank" rel="noreferrer"><img class="footer-rubyllm-logo theme-image light" src="https://rubyllm.com/assets/images/logotype.svg" alt="RubyLLM"><img class="footer-rubyllm-logo theme-image dark" src="https://rubyllm.com/assets/images/logotype_dark.svg" alt="RubyLLM"></a></span><br><span class="footer-built-with">Docs built with <a href="https://jekyll-vitepress.dev" target="_blank" rel="noreferrer">Jekyll VitePress</a>. "Line 6", "Helix" and "HX Stomp" are trademarks of Yamaha Guitar Group; this project is not affiliated with or endorsed by them.</span>
+      <span class="footer-brand-links"><a href="https://chatwithwork.com" class="footer-chatwithwork-link" target="_blank" rel="noreferrer"><img class="footer-chatwithwork-logo theme-image light" src="https://chatwithwork.com/logotype.svg" alt="Chat with Work"><img class="footer-chatwithwork-logo theme-image dark" src="https://chatwithwork.com/logotype-dark.svg" alt="Chat with Work"></a><a href="https://rubyllm.com" class="footer-rubyllm-link" target="_blank" rel="noreferrer"><img class="footer-rubyllm-logo theme-image light" src="https://rubyllm.com/assets/images/logotype.svg" alt="RubyLLM"><img class="footer-rubyllm-logo theme-image dark" src="https://rubyllm.com/assets/images/logotype_dark.svg" alt="RubyLLM"></a></span><br><span class="footer-built-with">Docs built with <a href="https://jekyll-vitepress.dev" target="_blank" rel="noreferrer">Jekyll VitePress</a>. Product names belong to their respective owners; this project is not affiliated with or endorsed by Line 6, Yamaha Guitar Group, Sonulab, or VoidX.</span>
   doc_footer:
     enabled: true
     previous_label: Previous page

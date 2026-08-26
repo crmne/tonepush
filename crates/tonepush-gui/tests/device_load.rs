@@ -2,7 +2,7 @@
 //! default; run with a pedal attached and nothing else holding it:
 //!
 //! ```sh
-//! cargo test -p hx-gui --test device_load -- --ignored
+//! cargo test -p tonepush-gui --test device_load -- --ignored
 //! ```
 //!
 //! Everything happens in the edit buffer of whatever preset is loaded, and
@@ -11,7 +11,7 @@
 
 use std::time::{Duration, Instant};
 
-use hx_gui::{spawn, ApplyBlock, Cmd, Evt};
+use tonepush_gui::{spawn, ApplyBlock, Cmd, Evt};
 
 fn wait_for<T>(
     rx: &std::sync::mpsc::Receiver<Evt>,

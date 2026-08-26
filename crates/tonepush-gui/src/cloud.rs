@@ -255,6 +255,11 @@ struct TonesResponse {
     total: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PublishedFilesResponse {
+    file_sha256s: Vec<String>,
+}
+
 /// A client rooted at one TonePush web deployment.
 #[derive(Clone)]
 pub struct CloudClient {
@@ -276,6 +281,39 @@ impl CloudClient {
 
     fn tones_url(&self) -> String {
         format!("{}/api/v1/tones", self.base)
+    }
+
+    /// Fetch the compact artifact manifest used by local Push badges. `None`
+    /// keeps a new Editor compatible with an older TonePush deployment.
+    fn published_files(&self) -> Result<Option<Vec<String>>, String> {
+        let response = self
+            .http
+            .get(format!("{}/files", self.tones_url()))
+            .header("User-Agent", agent_name())
+            .header("Accept", "application/json")
+            .call()
+            .map_err(|error| format!("the published Tone manifest did not answer: {error}"))?;
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        decode(response).map(|response: PublishedFilesResponse| Some(response.file_sha256s))
+    }
+
+    /// Ask the long-standing public hash resolver about one local artifact.
+    /// This is the compatibility path for a website deployment that predates
+    /// the compact manifest; a match redirects to its canonical Tone page.
+    fn file_is_published(&self, file_sha256: &str) -> Result<bool, String> {
+        let response = self
+            .http
+            .get(format!("{}/tones/files/{file_sha256}", self.base))
+            .header("User-Agent", agent_name())
+            .call()
+            .map_err(|error| format!("the published Tone lookup did not answer: {error}"))?;
+        match response.status().as_u16() {
+            200..=299 => Ok(true),
+            404 => Ok(false),
+            status => Err(format!("the published Tone lookup failed (HTTP {status})")),
+        }
     }
 
     /// Search musical ideas. The returned rows are Songs, not installable
@@ -953,17 +991,38 @@ impl fmt::Display for PublishError {
 /// Ask the Song index what native files are already published, off the UI
 /// thread. Failure yields no value; a successful empty catalog yields an empty
 /// set so the library can still offer its first publish action.
-pub fn published() -> Receiver<BTreeSet<String>> {
+pub fn published(local_hashes: Vec<String>) -> Receiver<BTreeSet<String>> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
-        if let Ok(hashes) = fetch_published(&CloudClient::new(site())) {
+        if let Ok(hashes) = fetch_published(&CloudClient::new(site()), &local_hashes) {
             let _ = tx.send(hashes);
         }
     });
     rx
 }
 
-fn fetch_published(client: &CloudClient) -> Result<BTreeSet<String>, String> {
+fn fetch_published(
+    client: &CloudClient,
+    local_hashes: &[String],
+) -> Result<BTreeSet<String>, String> {
+    if let Some(hashes) = client.published_files()? {
+        return Ok(normalized_hashes(hashes));
+    }
+
+    // `/tones/files/:sha256` existed before the manifest and is exact. Use it
+    // for the finite local library instead of guessing that a capped catalog
+    // crawl happened to encounter every published Tone.
+    let local_hashes = normalized_hashes(local_hashes.iter().cloned());
+    if !local_hashes.is_empty() {
+        let mut found = BTreeSet::new();
+        for hash in local_hashes {
+            if client.file_is_published(&hash)? {
+                found.insert(hash);
+            }
+        }
+        return Ok(found);
+    }
+
     let mut found = BTreeSet::new();
     for page in 1..=PAGES {
         let songs = client.search_songs(&SongSearch {
@@ -983,6 +1042,14 @@ fn fetch_published(client: &CloudClient) -> Result<BTreeSet<String>, String> {
         }
     }
     Ok(found)
+}
+
+fn normalized_hashes(hashes: impl IntoIterator<Item = String>) -> BTreeSet<String> {
+    hashes
+        .into_iter()
+        .filter(|hash| hash.len() == 64)
+        .map(|hash| hash.to_ascii_lowercase())
+        .collect()
 }
 
 /// Open the published Tone represented by a portable preset hash. The web app
@@ -1406,8 +1473,24 @@ mod tests {
     }
 
     #[test]
-    fn song_index_hashes_are_normalized_for_library_matching() {
+    fn published_manifest_hashes_are_normalized_for_library_matching() {
+        let server = StubServer::start(vec![(
+            200,
+            serde_json::json!({"file_sha256s": ["A".repeat(64), "not-a-hash"]}),
+        )]);
+        let client = CloudClient::new(&server.base);
+        assert_eq!(
+            fetch_published(&client, &[]).unwrap(),
+            BTreeSet::from(["a".repeat(64)])
+        );
+        let requests = server.finish();
+        assert!(String::from_utf8_lossy(&requests[0]).starts_with("GET /api/v1/tones/files "));
+    }
+
+    #[test]
+    fn published_hashes_fall_back_to_the_song_index_on_an_older_site() {
         let server = StubServer::start(vec![
+            (404, serde_json::json!({"error": "not found"})),
             (
                 200,
                 serde_json::json!({"songs": [song_json(12, "Wide Clean")]}),
@@ -1416,11 +1499,31 @@ mod tests {
         ]);
         let client = CloudClient::new(&server.base);
         assert_eq!(
-            fetch_published(&client).unwrap(),
+            fetch_published(&client, &[]).unwrap(),
             BTreeSet::from(["a".repeat(64)])
         );
         let requests = server.finish();
-        assert!(String::from_utf8_lossy(&requests[0]).starts_with("GET /api/v1/songs?page=1 "));
+        assert!(String::from_utf8_lossy(&requests[1]).starts_with("GET /api/v1/songs?page=1 "));
+    }
+
+    #[test]
+    fn an_older_site_checks_the_exact_local_artifacts() {
+        let present = "a".repeat(64);
+        let absent = "b".repeat(64);
+        let server = StubServer::start(vec![
+            (404, serde_json::json!({"error": "not found"})),
+            (200, serde_json::json!({})),
+            (404, serde_json::json!({"error": "not found"})),
+        ]);
+        let client = CloudClient::new(&server.base);
+
+        assert_eq!(
+            fetch_published(&client, &[present.clone(), absent]).unwrap(),
+            BTreeSet::from([present])
+        );
+        let requests = server.finish();
+        assert!(String::from_utf8_lossy(&requests[1]).starts_with("GET /tones/files/"));
+        assert!(String::from_utf8_lossy(&requests[2]).starts_with("GET /tones/files/"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
 title: Getting Started
-description: Install TonePush, set up USB access and model artwork, and connect your HX Stomp.
+description: Install TonePush, set up USB access, and connect an HX pedal or StompStation PRO.
 nav_order: 2
 ---
 
@@ -26,11 +26,17 @@ sudo apt install libxkbcommon-dev libwayland-dev libgl1-mesa-dev
 
 ### USB access on Linux
 
-A normal user cannot open a USB device on Linux without being granted access. `install.sh` installs a udev rule for Line 6 devices and asks for sudo once; without it, every connection fails with a permission error that looks like a bug in this program. Replug the device after installing. To do it by hand:
+A normal user cannot open a USB device on Linux without being granted access.
+`install.sh` installs rules for both Line 6 USB interfaces and the StompStation
+PRO serial interface, and asks for sudo once; without them, a connection can
+fail with a permission error that looks like an application bug. Replug the
+device after installing. To do it by hand:
 
 ```sh
 echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0e41", MODE="0666", TAG+="uaccess"' \
   | sudo tee /etc/udev/rules.d/70-line6-hx.rules
+echo 'SUBSYSTEM=="tty", ATTRS{manufacturer}=="SONULAB", ATTRS{product}=="StompStation PRO", MODE="0660", TAG+="uaccess"' \
+  | sudo tee -a /etc/udev/rules.d/70-line6-hx.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
@@ -42,7 +48,8 @@ Reading an installer needs 7-Zip on Linux and Windows; on most distros that is t
 
 ## Connect
 
-**Quit HX Edit first.** It claims the vendor USB interface exclusively, and so does TonePush; only one editor can talk to the device at a time.
+**Quit the vendor editor first:** HX Edit for a Line 6 device, or VoidX Control
+for a StompStation PRO. Only one editor can own a device connection at a time.
 
 Plug in the pedal and start the editor:
 
@@ -51,6 +58,12 @@ tonepush-gui
 ```
 
 It connects on launch. The signal chain runs across the top, presets down the left, and the selected block's knobs fill the middle, with the model browser on the right.
+
+That layout, and the local Tones / Setlists / Cloud library below it, is the
+same for both families. The available blocks and operations follow the pedal's
+capabilities. The PRO does not need HX Edit resources; it supplies its names,
+ranges, choices, NAM models, and IR names through its own schema. See the
+[StompStation PRO guide](/stompstation-pro/) for its verified rollback guard.
 
 A few things worth knowing on day one:
 

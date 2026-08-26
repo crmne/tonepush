@@ -1,10 +1,15 @@
 ---
 title: Using the CLI
-description: Script your HX Stomp from the command line, from preset backups to parameter changes.
-nav_order: 4
+description: Script an HX pedal or StompStation PRO, from preset backups to parameter changes.
+nav_order: 5
 ---
 
 The `tonepush` command does everything the editor does, plus a few things only a command line makes convenient: bulk backups, scripted parameter changes, and protocol work.
+
+Commands in this page without a namespace operate on Line 6 devices. The
+StompStation PRO uses `tonepush pro …`; see the [StompStation PRO guide](/stompstation-pro/)
+for its schema paths, 1-based slots, NAM/stereo-IR operations, and verified
+rollback requirements.
 
 ## Everyday commands
 

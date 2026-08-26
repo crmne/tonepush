@@ -56,7 +56,7 @@ jobs:
       # reason to have. Building it here fails on Windows, where rb-sys cannot
       # generate bindings, and on macOS, where the cross-target link finds no
       # Ruby symbols. Nothing shipped in a release comes from it.
-      - run: cargo build --release -p hx-cli -p hx-gui --target ${{ matrix.target }}
+      - run: cargo build --release -p tonepush-cli -p tonepush-gui --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
@@ -116,8 +116,8 @@ jobs:
 
       - name: Build both architectures
         run: |
-          cargo build --release -p hx-cli -p hx-gui --target aarch64-apple-darwin
-          cargo build --release -p hx-cli -p hx-gui --target x86_64-apple-darwin
+          cargo build --release -p tonepush-cli -p tonepush-gui --target aarch64-apple-darwin
+          cargo build --release -p tonepush-cli -p tonepush-gui --target x86_64-apple-darwin
 
       - name: Universal binaries
         run: |
@@ -250,12 +250,27 @@ jobs:
             # A re-run of a release must not fail on what it already did.
             if published "$crate" "$version"; then
               echo "${crate} ${version} is already published"
-              continue
+            else
+              # --no-verify would skip building the package; it is left on so
+              # a crate that cannot compile from its own published sources
+              # fails here rather than on somebody's machine.
+              cargo publish -p "$crate"
             fi
-            # --no-verify would skip building the package; it is left on so a
-            # crate that cannot compile from its own published sources fails
-            # here rather than on somebody's machine.
-            cargo publish -p "$crate"
+
+            # hx-catalog is verified against the registry copy of hx-proto,
+            # not the workspace path. The API can report a successful upload
+            # several seconds before Cargo's index can resolve it, and the new
+            # catalog may use APIs introduced at this exact version.
+            if [ "$crate" = hx-proto ]; then
+              for attempt in $(seq 1 30); do
+                registry_resolves "$crate" "$version" && break
+                sleep 10
+              done
+              if ! registry_resolves "$crate" "$version"; then
+                echo "::error::${crate} ${version} is not resolvable after five minutes"
+                exit 1
+              fi
+            fi
           done
 
       - name: Confirm both are on crates.io

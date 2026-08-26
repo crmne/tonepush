@@ -3,9 +3,11 @@ resolver = "2"
 members = [
     "crates/hx-proto",
     "crates/hx-usb",
-    "crates/hx-cli",
+    "crates/voidx-proto",
+    "crates/voidx-client",
+    "crates/tonepush-cli",
     "crates/hx-catalog",
-    "crates/hx-gui",
+    "crates/tonepush-gui",
     "crates/hx-ruby/ext/hx_ruby",
 ]
 
@@ -20,10 +22,14 @@ rust-version = "1.87"
 hx-proto = { path = "crates/hx-proto", version = "0.5.6" }
 hx-usb = { path = "crates/hx-usb", version = "0.5.6" }
 hx-catalog = { path = "crates/hx-catalog", version = "0.5.6" }
+voidx-proto = { path = "crates/voidx-proto", version = "0.5.6" }
+voidx-client = { path = "crates/voidx-client", version = "0.5.6" }
 nusb = "0.2"
 anyhow = "1"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # The Ruby extension names hx-catalog and hx-proto by version rather than by
 # path, because its manifest is copied into the gem and compiled where no

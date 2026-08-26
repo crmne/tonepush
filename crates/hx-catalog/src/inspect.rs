@@ -1,6 +1,6 @@
 //! Reading a `.hlx` preset into "what this tone is", with no device attached.
 //!
-//! This is the read-only twin of the device-apply reader in `hx-cli`, and it
+//! This is the read-only twin of the device-apply reader in `tonepush-cli`, and it
 //! answers a different question. The apply reader turns a file into a list of
 //! edits to send, so it is careful to touch only what it can address on the
 //! wire - one DSP, no splits. Here nothing is sent, so nothing collides: we can

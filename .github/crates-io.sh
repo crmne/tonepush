@@ -18,3 +18,14 @@ published() {
         "https://crates.io/api/v1/crates/${crate}/${version}" \
         >/dev/null 2>&1
 }
+
+# registry_resolves <crate> <version>
+#
+# The crates.io API can know about an upload before Cargo's sparse index does.
+# Run outside the checkout so the workspace's [patch.crates-io] entries cannot
+# make a local path look like a published crate.
+registry_resolves() {
+    local crate="$1" version="$2"
+    local lookup_dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+    (cd "$lookup_dir" && cargo info "${crate}@${version}" >/dev/null 2>&1)
+}

@@ -393,6 +393,132 @@ pub fn block_button_tinted(
     response.on_hover_text(name)
 }
 
+/// A narrow card for a processor whose chain position is fixed.
+///
+/// The category image owns the top of the card while the model wraps above its
+/// type underneath. Keeping those regions separate gives both the artwork and
+/// the horizontal text room to breathe without making a fixed chain wider.
+pub fn fixed_block_button_tinted(
+    ui: &mut Ui,
+    name: &str,
+    category: &str,
+    artwork: Option<&Art>,
+    selected: bool,
+    enabled: bool,
+    accent: Color32,
+) -> Response {
+    const WIDTH: f32 = 76.0;
+    const HEIGHT: f32 = 88.0;
+    let size = Vec2::new(WIDTH, HEIGHT);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response.on_hover_text(name);
+    }
+
+    let tint = if enabled { accent } else { DIM };
+    let fill = if selected {
+        if enabled {
+            accent.gamma_multiply(0.23)
+        } else {
+            Color32::from_rgb(0x2a, 0x2f, 0x38)
+        }
+    } else if !enabled {
+        Color32::from_rgb(0x17, 0x1a, 0x20)
+    } else if response.hovered() {
+        Color32::from_rgb(0x23, 0x29, 0x32)
+    } else {
+        Color32::from_rgb(0x1b, 0x20, 0x27)
+    };
+    let border = Stroke::new(
+        if selected { 2.0 } else { 1.5 },
+        tint.gamma_multiply(if selected || response.hovered() {
+            1.0
+        } else {
+            0.78
+        }),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(6), fill);
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(6),
+        border,
+        egui::StrokeKind::Inside,
+    );
+
+    let text_colour = if enabled { accent } else { DIM };
+    let icon = egui::Rect::from_center_size(
+        egui::pos2(rect.center().x, rect.top() + 18.0),
+        Vec2::splat(22.0),
+    );
+    if let Some(artwork) = artwork {
+        artwork.paint(
+            ui,
+            icon,
+            if enabled {
+                Color32::WHITE
+            } else {
+                Color32::from_gray(110)
+            },
+        );
+    } else {
+        painter.circle_filled(icon.center(), 4.0, tint);
+    }
+
+    let (first, second) = compact_name_lines(name, 12);
+    for (line, y) in [
+        (first.as_str(), rect.top() + 44.0),
+        (second.as_str(), rect.top() + 57.0),
+    ] {
+        painter.text(
+            egui::pos2(rect.center().x, y),
+            egui::Align2::CENTER_CENTER,
+            line,
+            egui::FontId::proportional(9.5),
+            text_colour,
+        );
+    }
+    painter.text(
+        egui::pos2(rect.center().x, rect.bottom() - 10.0),
+        egui::Align2::CENTER_CENTER,
+        category_short(category),
+        egui::FontId::proportional(8.0),
+        if enabled {
+            tint.gamma_multiply(0.82)
+        } else {
+            DIM.gamma_multiply(0.6)
+        },
+    );
+
+    response.on_hover_text(format!("{name} · {category}"))
+}
+
+fn compact_name_lines(text: &str, width: usize) -> (String, String) {
+    let text = text.trim();
+    if text.chars().count() <= width {
+        return (text.to_owned(), String::new());
+    }
+    let mut split = text
+        .char_indices()
+        .take_while(|(index, _)| *index <= width)
+        .filter_map(|(index, character)| character.is_whitespace().then_some(index))
+        .last()
+        .unwrap_or_else(|| {
+            text.char_indices()
+                .nth(width)
+                .map_or(text.len(), |(index, _)| index)
+        });
+    if split == 0 {
+        split = text
+            .char_indices()
+            .nth(width)
+            .map_or(text.len(), |(index, _)| index);
+    }
+    let first = text[..split].trim().to_owned();
+    let rest = text[split..].trim();
+    (first, elide(rest, width + 1))
+}
+
 /// A small filled circle. Painted rather than typed, because the bundled font
 /// has no glyph for one and an empty box is worse than no indicator at all.
 pub fn status_dot(ui: &mut Ui, colour: Color32) -> Response {

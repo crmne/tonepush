@@ -1,7 +1,7 @@
 ---
 title: The Workflow
 description: How the pedal, your library and your setlists fit together, and the loop that takes a tone from an idea to a gig.
-nav_order: 3
+nav_order: 4
 ---
 
 The pedal, your library and your setlists are three different things, and knowing which is which is most of knowing how to use TonePush.
@@ -10,7 +10,9 @@ The pedal, your library and your setlists are three different things, and knowin
 
 **Your library is where tones live afterwards.** It is on your computer, not on the pedal, so it outlives any slot on any device. Sell the pedal, buy another, and your tones are still there.
 
-**A setlist is a whole pedal kept as one thing.** All 126 slots, in order, as they were on the night they worked.
+**A setlist is a whole pedal kept as one thing.** Every slot the connected
+device provides—126 on an HX Stomp, 60 on a StompStation PRO—in order, as they
+were on the night they worked.
 
 ## The loop
 
@@ -46,9 +48,13 @@ This is also why deleting a tone from your library never breaks a setlist. If a 
 
 ## Publishing a Song and Tone
 
-On [TonePush](https://tonepush.rocks), a **Song** is the musical idea: either a catalog song by an Artist or an original. A **Tone** is one playable, device-native preset belonging to that Song. Publishing from the library creates the Song first and then attaches the `.hlx` as its first Tone. If adding the Tone fails, the editor says that the empty Song remains instead of pretending the two requests were one transaction.
+On [TonePush](https://tonepush.rocks), a **Song** is the musical idea: either a catalog song by an Artist or an original. A **Tone** is one playable, device-native preset belonging to that Song. Publishing from the library creates the Song first and then attaches the publishable device artifact—`.hlx` for Line 6 or `.vxpreset` for StompStation PRO—as its first Tone. If adding the Tone fails, the editor says that the empty Song remains instead of pretending the two requests were one transaction.
 
-**Export for the web** writes the same information without publishing it: the Tone as Line 6's own `.hlx`, plus a `.json` manifest with separate `song` and `tone` objects. Song facts include its title, kind, Artist, description and tags; Tone facts include the preset name, part, guitar, tuning and device-specific description.
+**Export for the web** writes the same information without publishing it: the
+Tone's `.hlx` or `.vxpreset`, plus a `.json` manifest with separate `song` and
+`tone` objects. Song facts include its title, kind, Artist, description and
+tags; Tone facts include the preset name, part, guitar, tuning and
+device-specific description.
 
 Song search results are musical ideas, not files that can be installed. Open a Song and choose one of its Tones for your device before downloading or installing it. An externally indexed Tone opens its original source; a native Tone downloads its hosted artifact.
 
@@ -58,7 +64,7 @@ Song search results are musical ideas, not files that can be installed. Open a S
 |---|---|---|
 | Tones | `~/.local/share/tonepush/library` | One file per tone, the pedal's own document |
 | Setlists | `library/setlists` | Small JSON files naming the tones they play |
-| Automatic backups | `~/.local/share/tonepush/backups` | The whole pedal, refreshed on connect, with dated snapshots behind it |
+| Device backups | `~/.local/share/tonepush/backups` | Whole-pedal HX backups and verified PRO rollback bundles |
 
 On macOS these sit under `~/Library/Application Support`; on Windows, under your profile.
 

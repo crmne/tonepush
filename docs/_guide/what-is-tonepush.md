@@ -6,31 +6,54 @@ nav_order: 0
 
 ## The problem
 
-The Line 6 HX Stomp is a small box holding a large amp-and-effects rig. Editing it from the hardware means three footswitches and a knob. Editing it from a computer means HX Edit, which is excellent, closed, and only runs on macOS and Windows. If your studio machine runs Linux, or you want to script your pedal, or you want to build something on top of the device, you were out of luck.
+Modern floor processors are small boxes holding large amp-and-effects rigs.
+Their vendor editors are closed, usually platform-limited, and rarely share a
+good library workflow with hardware from another maker. If your studio machine
+runs Linux, you want to script the pedal, or you want one carefully designed
+place for your tones, you are otherwise out of luck.
 
-TonePush is an open-source editor for HX-family devices. It talks the same USB protocol HX Edit talks, edits the same scratch buffer, and runs on Linux, macOS, and Windows. Behind it sits the protocol itself, reverse-engineered from USB captures and written up in [PROTOCOL.md](https://github.com/crmne/tonepush/blob/main/PROTOCOL.md), so this editor is not the only thing that can ever be built on it.
+TonePush is an open-source editor for Line 6 HX-family devices and the Sonulab
+StompStation PRO. Both use the same TonePush editor, local library, setlists,
+Cloud workflow, and visual language. Small device adapters translate those
+shared operations into the very different HX USB and VoidX serial protocols.
+It runs on Linux, macOS, and Windows, and the reusable protocol/client crates
+make the hardware useful outside this editor too.
 
 ![TonePush editing a preset on an HX Stomp: a wah, distortion, amp and cab along the main line with a second cab on a parallel branch, the wah's knobs and its expression pedal assignment below, and the library along the bottom](/screenshot.png)
 
 ## What it does
 
-Everything HX Edit does on an HX Stomp, verified operation by operation against the hardware:
+The common workflow is the same whichever supported pedal is connected:
 
-- **Your whole rig at a glance.** Blocks, branches, and knobs laid out like the pedalboard they are. Drag a block below the line to run it in parallel, drag the fork and merge to move where the path splits, and choose how it splits: Y, A/B, crossover, or dynamic.
-- **Editing.** Swap models from a searchable thumbnail browser with HX Edit's own artwork, turn knobs with values formatted exactly as HX Edit formats them, drag to reorder, undo and redo with the keyboard.
-- **Presets.** Select, rename, save, copy, paste, import, export, and back up a whole setlist. A preset travels as the device's own document, byte for byte, so nothing is lost in translation.
-- **Snapshots, setlists, tempo, impulse responses, device settings.** Switch, rename, edit, upload, and clear, each verified end to end.
-- **Live activity.** The editor follows what you do on the front panel.
+- **Your whole rig at a glance.** Modelled blocks and knobs are laid out like a
+  pedalboard. HX routing branches where the hardware can branch; the PRO shows
+  the fixed chain and algorithms its live schema advertises.
+- **Editing.** Search and swap models, turn the same knobs, use Tap tempo, and
+  undo, redo, or save from the same controls and keyboard shortcuts.
+- **One library.** Keep native presets locally, freeze a whole pedal as an
+  ordered setlist, and discover, audition, download, or publish compatible
+  tones through TonePush Cloud.
+- **Native capabilities.** HX snapshots, routing, favorites, and global EQ;
+  PRO NAM amp/drive libraries, stereo IR pairs, settings, and verified
+  rollback/restore. The UI appears only where the pedal can do the operation.
+- **Exact files.** A kept tone is the device's own document, byte for byte, so
+  nothing is silently rebuilt or lost.
 
 ## What it does not do yet
 
 This is a young project, and it says so:
 
-- The tested device is an HX Stomp on firmware 3.80. Helix and Helix LT parse and render (two DSP paths, four lanes), but they have not met real hardware yet.
+- Hardware verification covers an HX Stomp on firmware 3.80 and a StompStation
+  PRO on firmware 1.5.12. Helix and Helix LT parse and render (two DSP paths,
+  four lanes), but they have not met real hardware yet.
 - The tuner is not here because it is not an HX Edit feature either: it lives on the hardware.
-- Model names, ranges, and artwork come from HX Edit's own data files, which are Line 6's and are not redistributed. A small extractor pulls them from the installer you download from Line 6. Without them everything still works, just with numbers where names would be.
+- HX model names, ranges, and artwork come from HX Edit's own data files, which
+  are Line 6's and are not redistributed. The PRO describes its controls and
+  installed NAM/IR choices itself and needs no vendor asset extraction.
 
-If something misbehaves, [an issue](https://github.com/crmne/tonepush/issues) with the `tonepush chain` output and what you expected instead is gold.
+If something misbehaves, [an issue](https://github.com/crmne/tonepush/issues)
+with `tonepush chain` or `tonepush pro schema 'root\app'` output and what you
+expected instead is gold.
 
 ## Where this is going
 

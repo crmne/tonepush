@@ -16,7 +16,7 @@ fn main() -> eframe::Result<()> {
     // constructor put it in reach of every test that builds an App, and a test
     // that reaches out of its scratch directory and rearranges the machine's
     // actual library is not a test.
-    let moved = hx_gui::library::migrate();
+    let moved = tonepush_gui::library::migrate();
     if moved > 0 {
         eprintln!("moved {moved} tones into the library's object store");
     }
@@ -24,12 +24,12 @@ fn main() -> eframe::Result<()> {
     // from the migration above because it is not a one-off: a library written
     // by an earlier TonePush has objects named after their hashes, and a
     // rename that failed half way should simply finish next time.
-    let renamed = hx_gui::library::tidy_names();
+    let renamed = tonepush_gui::library::tidy_names();
     if renamed > 0 {
         eprintln!("gave {renamed} tones their own names on disk");
     }
 
-    let (tx, rx, repaint) = hx_gui::spawn_repainting();
+    let (tx, rx, repaint) = tonepush_gui::spawn_repainting();
     // Closing the window must let the device go cleanly. A process that just
     // disappears leaves the device mid-conversation, and it then refuses new
     // sessions until its power is pulled.
@@ -52,13 +52,13 @@ fn main() -> eframe::Result<()> {
             repaint.bind(&cc.egui_ctx);
             // Lets `ui.image("file://…")` load the model artwork HX Edit ships.
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(hx_gui::App::new(&cc.egui_ctx, tx, rx)))
+            Ok(Box::new(tonepush_gui::App::new(&cc.egui_ctx, tx, rx)))
         }),
     )?;
 
     // eframe has returned, so the window is gone; give the worker a moment to
     // put the device down before the process exits.
-    let _ = on_exit.send(hx_gui::Cmd::Disconnect);
+    let _ = on_exit.send(tonepush_gui::Cmd::Disconnect);
     std::thread::sleep(std::time::Duration::from_millis(800));
     Ok(())
 }

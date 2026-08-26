@@ -1,6 +1,7 @@
-//! `tonepush`, the command-line editor for Line 6 HX-family devices.
+//! `tonepush`, the command-line editor for supported guitar processors.
 
 mod hlx;
+mod voidx;
 mod wav;
 
 use anyhow::{bail, Context, Result};
@@ -97,7 +98,7 @@ fn zero_based(position: usize, what: &str) -> Result<usize> {
 #[command(
     name = "tonepush",
     version,
-    about = "Talk to Line 6 HX hardware over USB"
+    about = "Edit Line 6 HX and Sonulab StompStation PRO hardware over USB"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -106,7 +107,12 @@ struct Cli {
 
 #[derive(Subcommand, Clone)]
 enum Cmd {
-    /// List attached HX devices.
+    /// Work with a Sonulab StompStation PRO over VoidX USB serial.
+    Pro {
+        #[command(subcommand)]
+        command: voidx::Command,
+    },
+    /// List attached supported devices.
     List,
     /// Show device identity and firmware.
     Info,
@@ -479,6 +485,7 @@ fn main() -> Result<()> {
         eprintln!("brought {} across from the old name", dir.display());
     }
     match Cli::parse().cmd {
+        Cmd::Pro { command } => voidx::run(command),
         // Everything that needs no device, handled before we touch USB.
         Cmd::Decode { log } => decode_capture(&log),
         Cmd::Models { category, model } => browse_models(category, model),
@@ -510,8 +517,9 @@ fn slot(text: &str) -> Result<i64> {
 
 fn list_devices() -> Result<()> {
     let devices = hx_usb::list().context("enumerating USB devices")?;
-    if devices.is_empty() {
-        println!("no HX devices found");
+    let pro_devices = voidx_client::list().context("enumerating USB serial devices")?;
+    if devices.is_empty() && pro_devices.is_empty() {
+        println!("no supported devices found");
     }
     for d in &devices {
         println!(
@@ -520,6 +528,18 @@ fn list_devices() -> Result<()> {
             d.profile.product_id,
             d.serial.as_deref().unwrap_or("?"),
             d.profile.presets
+        );
+    }
+    for device in &pro_devices {
+        let product = device.product.as_deref().unwrap_or("StompStation PRO");
+        let usb = match (device.vendor_id, device.product_id) {
+            (Some(vendor), Some(product)) => format!(" USB {vendor:04x}:{product:04x}"),
+            _ => String::new(),
+        };
+        println!(
+            "{product} on {}{usb} serial {}",
+            device.port_name,
+            device.serial_number.as_deref().unwrap_or("?")
         );
     }
     Ok(())
@@ -818,6 +838,7 @@ fn on_device(cmd: Cmd) -> Result<()> {
         Cmd::ExtractBackup { file, output } => extract_backup(&file, &output),
         Cmd::ExportHxb { bundle, output } => export_hxb(&bundle, &output),
         Cmd::IrInfo { file } => ir_info(&file),
+        Cmd::Pro { command } => voidx::run(command),
     }
 }
 
