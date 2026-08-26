@@ -317,6 +317,9 @@ fn build_slot(node: &Json, cab: Option<&Json>, catalog: &Catalog) -> Result<Valu
         .get("@model")
         .and_then(Json::as_str)
         .ok_or("no @model")?;
+    if node.get("@stereo").is_some_and(|value| !value.is_boolean()) {
+        return Err("@stereo is not a boolean value".into());
+    }
     let symbol = resolve(catalog, symbol_name, node)
         .ok_or_else(|| format!("the catalog does not know {symbol_name}"))?;
     let model = symbol.number;
@@ -565,6 +568,19 @@ mod tests {
             "@enabled": "yes"
         });
         assert!(build_slot(&node, None, &catalog).is_err());
+    }
+
+    #[test]
+    fn document_building_refuses_a_malformed_stereo_flag() {
+        let Some(catalog) = crate::tests::catalog() else {
+            return;
+        };
+        let node = serde_json::json!({
+            "@model": "HD2_DistScream808Mono",
+            "@stereo": "wide"
+        });
+        let error = build_slot(&node, None, &catalog).unwrap_err();
+        assert!(error.contains("@stereo"), "{error}");
     }
 
     #[test]
