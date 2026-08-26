@@ -284,9 +284,7 @@ fn capture_into(
             // absent; carrying on would bless a partial capture as complete.
             Err(error) => return Err(error),
         };
-        if let Some(json) = to_json(&value) {
-            globals.insert(id.to_string(), json);
-        }
+        globals.insert(id.to_string(), setting_json(id, &value)?);
     }
     atomic_write(
         dir.join("globals.json"),
@@ -831,6 +829,14 @@ fn to_json(value: &Value) -> Option<serde_json::Value> {
     })
 }
 
+fn setting_json(id: i64, value: &Value) -> Result<serde_json::Value> {
+    to_json(value).ok_or_else(|| {
+        Error::Protocol(format!(
+            "device setting {id} returned an unsupported value {value:?}"
+        ))
+    })
+}
+
 /// Turn a setting from the file back into the shape the device holds, because
 /// it refuses one of the wrong type - a float where it wants a boolean is
 /// error -3, not a coerced write.
@@ -1214,6 +1220,14 @@ mod tests {
         // A value of the wrong shape is refused rather than coerced.
         assert!(from_json(&serde_json::json!("text"), &Value::Bool(true)).is_none());
         assert!(from_json(&serde_json::json!(1e300), &Value::F32(0.0)).is_none());
+    }
+
+    #[test]
+    fn unsupported_setting_shapes_cannot_be_silently_omitted() {
+        assert_eq!(setting_json(7, &Value::Bool(true)).unwrap(), true);
+        assert!(setting_json(7, &Value::Nil).is_err());
+        assert!(setting_json(7, &Value::Array(Vec::new())).is_err());
+        assert!(setting_json(7, &Value::Map(Vec::new())).is_err());
     }
 
     #[test]
