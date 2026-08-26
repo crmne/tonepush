@@ -405,11 +405,7 @@ impl Preset {
         let Value::Array(raw_slots) = slot_values else {
             return None;
         };
-        if raw_slots.is_empty()
-            || raw_slots
-                .iter()
-                .any(|slot| slot.get(key::KIND).and_then(Value::as_i64).is_none())
-        {
+        if raw_slots.is_empty() || raw_slots.iter().any(|slot| !slot_is_well_formed(slot)) {
             return None;
         }
         let slots = collect_slots(slot_values);
@@ -1110,6 +1106,9 @@ impl Preset {
     /// kind it was given, so pasting a block over an input is refused: the
     /// endpoints are fixtures of the topology, not slots you can fill.
     pub fn paste_slot(&mut self, position: usize, slot: &Value) -> bool {
+        if !slot_is_well_formed(slot) {
+            return false;
+        }
         let kind = self.slots.get(position).map(|s| s.kind);
         if !matches!(kind, Some(Kind::Block) | Some(Kind::Empty)) {
             return false;
@@ -1230,6 +1229,33 @@ fn collect_slots(slots: &Value) -> Vec<Slot> {
         return Vec::new();
     };
     items.iter().map(read_slot).collect()
+}
+
+fn slot_is_well_formed(raw: &Value) -> bool {
+    let Some(kind) = raw.get(key::KIND).and_then(Value::as_i64) else {
+        return false;
+    };
+    let Some(body) = raw.get(key::BODY) else {
+        return true;
+    };
+    let body = match Kind::from_wire(kind) {
+        Kind::Split => body.get(key::SPLIT_BODY).unwrap_or(body),
+        Kind::Join => body.get(key::JOIN_BODY).unwrap_or(body),
+        _ => body,
+    };
+    [key::VALUES, key::IO_VALUES, key::PAIRED_VALUES]
+        .into_iter()
+        .all(|field| body.get(field).is_none_or(value_array_is_well_formed))
+}
+
+fn value_array_is_well_formed(value: &Value) -> bool {
+    let Some(Value::Array(items)) = value.get(key::ARRAY_VALUES) else {
+        return false;
+    };
+    items.iter().all(|item| match item {
+        Value::Bool(_) => true,
+        other => other.as_f32().is_some_and(f32::is_finite),
+    })
 }
 
 fn read_slot(raw: &Value) -> Slot {
@@ -2251,6 +2277,18 @@ mod tests {
             .at_mut(&[key::PATH, key::SLOTS])
             .unwrap() = Value::Array(vec![Value::Nil]);
         assert!(Preset::parse(&malformed_slot.encode()).is_none());
+
+        let mut malformed_values = Preset::parse(&sample()).unwrap();
+        *malformed_values
+            .tone
+            .at_mut(&[key::PATH, key::SLOTS])
+            .and_then(|slots| match slots {
+                Value::Array(slots) => slots.first_mut(),
+                _ => None,
+            })
+            .and_then(|slot| slot.at_mut(&[key::BODY, key::VALUES, key::ARRAY_VALUES]))
+            .unwrap() = Value::Array(vec![Value::Str("not a parameter".into())]);
+        assert!(Preset::parse(&malformed_values.encode()).is_none());
 
         let mut trailing = FIXTURE.to_vec();
         trailing.push(0xc0);
