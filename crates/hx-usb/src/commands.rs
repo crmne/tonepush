@@ -13,7 +13,10 @@ use hx_proto::msgpack::Value;
 use hx_proto::rpc::Message;
 use hx_proto::{rpc, ChannelId, DeviceProfile, Preset};
 
-use crate::{checksum, decode_message, non_negative, preset_index, Error, Result, Session};
+use crate::{
+    checksum, decode_message, non_negative, preset_index, retry_device_refusal, Error, Result,
+    Session,
+};
 
 fn block_param(block: i64, param: i64) -> Result<()> {
     non_negative(block, "block")?;
@@ -614,9 +617,18 @@ impl Session {
         let want = fingerprint(preset);
         let deadline = Instant::now() + Duration::from_secs(4);
         loop {
-            if let Ok(back) = self.read_preset() {
-                if fingerprint(&back) == want {
-                    return Ok(());
+            match retry_device_refusal(self.read_preset()) {
+                Ok(Some(back)) => {
+                    if fingerprint(&back) == want {
+                        return Ok(());
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.poisoned = Some(format!(
+                        "the session was lost while verifying a preset write: {error}"
+                    ));
+                    return Err(error);
                 }
             }
             if Instant::now() >= deadline {
