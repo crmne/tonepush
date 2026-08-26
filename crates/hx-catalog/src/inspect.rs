@@ -208,6 +208,7 @@ fn read_block(
     block: &Value,
 ) {
     let Some(symbol) = block.get("@model").and_then(Value::as_str) else {
+        skipped.push(format!("dsp{path}/block{position}: no valid @model"));
         return;
     };
     let stereo = block
@@ -349,6 +350,23 @@ mod tests {
             .expect("a dsp1 block");
         assert_eq!(dsp1.model_name, "Room");
         assert!(!dsp1.enabled);
+    }
+
+    #[test]
+    fn reports_a_block_without_a_valid_model() {
+        let Some(catalog) = catalog() else { return };
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": { "@model": 101 }
+            }}}
+        });
+
+        let tone = inspect(&json, &catalog);
+        assert!(tone.blocks.is_empty());
+        assert!(tone
+            .skipped
+            .iter()
+            .any(|why| why.contains("block0") && why.contains("@model")));
     }
 
     #[test]
