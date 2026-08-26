@@ -175,11 +175,11 @@ fn slot_of(
     numbered: i64,
 ) -> Result<i64, String> {
     // Ours, and exact: the device's own index, which needs nothing to read it.
-    if let Some(slot) = node.get("@slot").and_then(|v| v.as_u64()) {
+    if let Some(slot) = placement_number(node, "@slot")? {
         return i64::try_from(slot).map_err(|_| format!("slot {slot} is too large"));
     }
-    let position = node.get("@position").and_then(|v| v.as_u64());
-    let branch = node.get("@path").and_then(|v| v.as_u64()).unwrap_or(0);
+    let position = placement_number(node, "@position")?;
+    let branch = placement_number(node, "@path")?.unwrap_or(0);
     let branch =
         usize::try_from(branch).map_err(|_| "the branch number is too large".to_owned())?;
     if let (Some(layout), Some(position)) = (layout, position) {
@@ -203,6 +203,16 @@ fn slot_of(
     position.map_or(Ok(numbered), |position| {
         i64::try_from(position).map_err(|_| format!("position {position} is too large"))
     })
+}
+
+fn placement_number(node: &serde_json::Value, field: &str) -> Result<Option<u64>, String> {
+    match node.get(field) {
+        None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("{field} is not a non-negative integer")),
+    }
 }
 
 /// Whether the slot being read is one that can be switched off. A block can; a
@@ -501,6 +511,19 @@ mod tests {
         let too_large = i64::MAX as u64 + 1;
         assert!(slot_of(&serde_json::json!({ "@slot": too_large }), None, 0, 0).is_err());
         assert!(slot_of(&serde_json::json!({ "@position": too_large }), None, 0, 0).is_err());
+    }
+
+    #[test]
+    fn malformed_file_positions_are_rejected_instead_of_relocated() {
+        assert!(slot_of(&serde_json::json!({ "@slot": "first" }), None, 0, 7).is_err());
+        assert!(slot_of(&serde_json::json!({ "@position": -1 }), None, 0, 7).is_err());
+        assert!(slot_of(
+            &serde_json::json!({ "@path": "lower", "@position": 1 }),
+            None,
+            0,
+            7
+        )
+        .is_err());
     }
 
     /// A file's split is applied to the slot the *chain* keeps its split in,
