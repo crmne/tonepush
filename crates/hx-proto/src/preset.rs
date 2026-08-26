@@ -1243,6 +1243,9 @@ fn slot_is_well_formed(raw: &Value) -> bool {
         Kind::Join => body.get(key::JOIN_BODY).unwrap_or(body),
         _ => body,
     };
+    if matches!(Kind::from_wire(kind), Kind::Block | Kind::Looper) && model_number(body).is_none() {
+        return false;
+    }
     [key::VALUES, key::IO_VALUES, key::PAIRED_VALUES]
         .into_iter()
         .all(|field| body.get(field).is_none_or(value_array_is_well_formed))
@@ -1256,6 +1259,14 @@ fn value_array_is_well_formed(value: &Value) -> bool {
         Value::Bool(_) => true,
         other => other.as_f32().is_some_and(f32::is_finite),
     })
+}
+
+fn model_number(body: &Value) -> Option<u32> {
+    body.get(key::MODEL_REF)
+        .and_then(|reference| reference.get(key::MODEL))
+        .or_else(|| body.get(key::INLINE_MODEL))
+        .and_then(Value::as_i64)
+        .and_then(|number| u32::try_from(number).ok())
 }
 
 fn read_slot(raw: &Value) -> Slot {
@@ -1281,11 +1292,7 @@ fn read_slot(raw: &Value) -> Slot {
     };
 
     let reference = body.get(key::MODEL_REF);
-    let model = reference
-        .and_then(|r| r.get(key::MODEL))
-        .or_else(|| body.get(key::INLINE_MODEL))
-        .and_then(Value::as_i64)
-        .and_then(|n| u32::try_from(n).ok());
+    let model = model_number(body);
 
     // A paired model is written as -1 when absent, so a plain "is it there"
     // check would report every block as having a cab.
@@ -2289,6 +2296,18 @@ mod tests {
             .and_then(|slot| slot.at_mut(&[key::BODY, key::VALUES, key::ARRAY_VALUES]))
             .unwrap() = Value::Array(vec![Value::Str("not a parameter".into())]);
         assert!(Preset::parse(&malformed_values.encode()).is_none());
+
+        let mut missing_model = Preset::parse(&sample()).unwrap();
+        *missing_model
+            .tone
+            .at_mut(&[key::PATH, key::SLOTS])
+            .and_then(|slots| match slots {
+                Value::Array(slots) => slots.first_mut(),
+                _ => None,
+            })
+            .and_then(|slot| slot.at_mut(&[key::BODY, key::MODEL_REF, key::MODEL]))
+            .unwrap() = Value::Int(-1);
+        assert!(Preset::parse(&missing_model.encode()).is_none());
 
         let mut trailing = FIXTURE.to_vec();
         trailing.push(0xc0);
