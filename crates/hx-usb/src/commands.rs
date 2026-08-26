@@ -1320,10 +1320,16 @@ fn decode_external_tempo(value: &Value) -> Result<bool> {
 }
 
 fn decode_favourites(value: Value) -> Result<Vec<(i64, String)>> {
-    let Value::Array(entries) = value else {
-        return Err(Error::Protocol(
-            "the device returned an invalid favourite list".into(),
-        ));
+    let entries = match value {
+        Value::Array(entries) => entries,
+        // Like the IR list, an empty favourites shelf is nil rather than an
+        // empty array on the device.
+        Value::Nil => return Ok(Vec::new()),
+        _ => {
+            return Err(Error::Protocol(
+                "the device returned an invalid favourite list".into(),
+            ))
+        }
     };
     let mut seen = BTreeSet::new();
     entries
@@ -1492,11 +1498,12 @@ mod validation_tests {
             rpc::key::NAME => Value::Str("Lead".into()),
         }]);
         assert_eq!(decode_favourites(valid).unwrap(), vec![(3, "Lead".into())]);
+        assert!(decode_favourites(Value::Nil).unwrap().is_empty());
 
         let missing_name = Value::Array(vec![hx_proto::msgmap! {
             rpc::key::OBJECT_ID => Value::Int(3),
         }]);
         assert!(decode_favourites(missing_name).is_err());
-        assert!(decode_favourites(Value::Nil).is_err());
+        assert!(decode_favourites(Value::Bool(false)).is_err());
     }
 }
