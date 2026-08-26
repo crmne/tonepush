@@ -111,6 +111,14 @@ fn preset_matches(info: &(i64, i64, String), setlist: i64, index: i64) -> bool {
     info.0 == setlist && info.1 == index
 }
 
+fn validated_preset_document(preset: &Preset) -> Result<Vec<u8>> {
+    let document = preset.encode();
+    Preset::parse(&document)
+        .is_some()
+        .then_some(document)
+        .ok_or_else(|| Error::Protocol("the document to write does not re-parse".into()))
+}
+
 /// A device found on the bus.
 #[derive(Debug, Clone)]
 pub struct Found {
@@ -1115,6 +1123,7 @@ impl Session {
     ) -> Result<()> {
         non_negative(setlist, "setlist")?;
         preset_index(&self.profile, index)?;
+        let document = validated_preset_document(preset)?;
         self.request(
             ChannelId::DATA,
             rpc::op::WRITE_SLOT_NAMED,
@@ -1122,7 +1131,7 @@ impl Session {
                 rpc::key::SETLIST => Value::Int(setlist),
                 rpc::key::PRESET_INDEX => Value::Int(index),
                 rpc::key::NAME => Value::Str(name.to_owned()),
-                rpc::key::DOCUMENT => Value::Bin(preset.encode(), 2),
+                rpc::key::DOCUMENT => Value::Bin(document, 2),
             },
         )?;
         self.settle_flash();
@@ -1354,6 +1363,18 @@ mod tests {
         assert!(!is_deferred(0).unwrap());
         assert!(is_deferred(1).unwrap());
         assert!(matches!(is_deferred(2), Err(Error::Protocol(_))));
+    }
+
+    #[test]
+    fn direct_writes_require_a_reparsable_preset() {
+        let mut preset = Preset::parse(include_bytes!("../../hx-proto/tests/preset.bin")).unwrap();
+        assert_eq!(validated_preset_document(&preset).unwrap(), preset.encode());
+
+        *preset.tone.get_mut(0).unwrap() = Value::Nil;
+        assert!(matches!(
+            validated_preset_document(&preset),
+            Err(Error::Protocol(_))
+        ));
     }
 
     #[test]
