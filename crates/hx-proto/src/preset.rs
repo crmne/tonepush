@@ -411,6 +411,9 @@ impl Preset {
         if !assignments_are_well_formed(&tone) {
             return None;
         }
+        if !snapshots_are_well_formed(&tone, raw_slots.len()) {
+            return None;
+        }
         let slots = collect_slots(slot_values);
 
         let preset = Preset {
@@ -1279,6 +1282,42 @@ fn assignments_are_well_formed(tone: &Value) -> bool {
             };
             valid_block && valid_target && valid_ends && valid_kind
         })
+    })
+}
+
+fn snapshots_are_well_formed(tone: &Value, slot_count: usize) -> bool {
+    let section = match tone.get(key::SNAPSHOT_SECTION) {
+        None | Some(Value::Nil) => return true,
+        Some(section) => section,
+    };
+    let Some(Value::Array(entries)) = section.get(key::SNAPSHOTS) else {
+        return false;
+    };
+    entries.iter().all(|entry| {
+        if !matches!(entry, Value::Map(_)) {
+            return false;
+        }
+        let valid_name = entry
+            .get(key::SNAPSHOT_NAME)
+            .and_then(Value::as_str)
+            .is_some_and(|name| !name.is_empty());
+        let valid_tempo = entry
+            .get(key::SNAPSHOT_TEMPO)
+            .and_then(Value::as_f32)
+            .is_some_and(f32::is_finite);
+        let valid_flags = [key::SNAPSHOT_VALID, key::SNAPSHOT_NAMED]
+            .into_iter()
+            .all(|field| matches!(entry.get(field), Some(Value::Bool(_))));
+        let valid_slots = match entry.get(key::SNAPSHOT_SLOTS) {
+            Some(Value::Array(slots)) if slots.len() == slot_count => {
+                slots.iter().all(|slot| match slot {
+                    Value::Array(pair) => matches!(pair.get(1), Some(Value::Bool(_))),
+                    _ => false,
+                })
+            }
+            _ => false,
+        };
+        valid_name && valid_tempo && valid_flags && valid_slots
     })
 }
 
@@ -2373,6 +2412,43 @@ mod tests {
         let mut by_source = (0..9).map(|_| Value::Nil).collect::<Vec<_>>();
         by_source[8] = Value::Array(vec![entry(midi)]);
         assert!(Preset::parse(&document(Value::Array(by_source))).is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_snapshot_records() {
+        let slot_count = Preset::parse(&sample()).unwrap().slots.len();
+        let document = |snapshot: Value| {
+            let mut preset = Preset::parse(&sample()).unwrap();
+            *preset.tone.get_mut(key::SNAPSHOT_SECTION).unwrap() = crate::msgmap! {
+                key::SNAPSHOTS => Value::Array(vec![snapshot]),
+            };
+            preset.encode()
+        };
+        let states = Value::Array(
+            (0..slot_count)
+                .map(|_| Value::Array(vec![Value::Int(0), Value::Bool(true)]))
+                .collect(),
+        );
+        let valid = crate::msgmap! {
+            key::SNAPSHOT_VALID => Value::Bool(true),
+            key::SNAPSHOT_SLOTS => states,
+            key::SNAPSHOT_NAME => Value::Str("Verse".into()),
+            key::SNAPSHOT_TEMPO => Value::F32(120.0),
+            key::SNAPSHOT_NAMED => Value::Bool(true),
+        };
+        assert!(Preset::parse(&document(valid.clone())).is_some());
+
+        let mut bad_name = valid.clone();
+        *bad_name.get_mut(key::SNAPSHOT_NAME).unwrap() = Value::Nil;
+        assert!(Preset::parse(&document(bad_name)).is_none());
+
+        let mut bad_tempo = valid.clone();
+        *bad_tempo.get_mut(key::SNAPSHOT_TEMPO).unwrap() = Value::F32(f32::NAN);
+        assert!(Preset::parse(&document(bad_tempo)).is_none());
+
+        let mut short_states = valid;
+        *short_states.get_mut(key::SNAPSHOT_SLOTS).unwrap() = Value::Array(Vec::new());
+        assert!(Preset::parse(&document(short_states)).is_none());
     }
 
     #[test]
