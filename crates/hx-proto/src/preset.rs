@@ -414,6 +414,9 @@ impl Preset {
         if !snapshots_are_well_formed(&tone, raw_slots.len()) {
             return None;
         }
+        if !settings_are_well_formed(&tone) {
+            return None;
+        }
         let slots = collect_slots(slot_values);
 
         let preset = Preset {
@@ -1303,8 +1306,7 @@ fn snapshots_are_well_formed(tone: &Value, slot_count: usize) -> bool {
             .is_some_and(|name| !name.is_empty());
         let valid_tempo = entry
             .get(key::SNAPSHOT_TEMPO)
-            .and_then(Value::as_f32)
-            .is_some_and(f32::is_finite);
+            .is_some_and(tempo_is_well_formed);
         let valid_flags = [key::SNAPSHOT_VALID, key::SNAPSHOT_NAMED]
             .into_iter()
             .all(|field| matches!(entry.get(field), Some(Value::Bool(_))));
@@ -1319,6 +1321,20 @@ fn snapshots_are_well_formed(tone: &Value, slot_count: usize) -> bool {
         };
         valid_name && valid_tempo && valid_flags && valid_slots
     })
+}
+
+fn tempo_is_well_formed(value: &Value) -> bool {
+    value
+        .as_f32()
+        .is_some_and(|tempo| tempo.is_finite() && (40.0..=240.0).contains(&tempo))
+}
+
+fn settings_are_well_formed(tone: &Value) -> bool {
+    match tone.get(key::SETTINGS) {
+        None | Some(Value::Nil) => true,
+        Some(settings @ Value::Map(_)) => settings.get(key::TEMPO).is_none_or(tempo_is_well_formed),
+        Some(_) => false,
+    }
 }
 
 fn slot_is_well_formed(raw: &Value) -> bool {
@@ -2031,6 +2047,21 @@ mod tests {
     }
 
     #[test]
+    fn invalid_preset_tempos_are_rejected() {
+        let document = |tempo: Value| {
+            let mut preset = Preset::parse(&sample()).unwrap();
+            *preset.tone.get_mut(key::SETTINGS).unwrap() = crate::msgmap! { key::TEMPO => tempo };
+            preset.encode()
+        };
+        assert!(Preset::parse(&document(Value::F32(40.0))).is_some());
+        assert!(Preset::parse(&document(Value::F32(240.0))).is_some());
+        assert!(Preset::parse(&document(Value::F32(39.9))).is_none());
+        assert!(Preset::parse(&document(Value::F32(240.1))).is_none());
+        assert!(Preset::parse(&document(Value::F32(f32::NAN))).is_none());
+        assert!(Preset::parse(&document(Value::Str("fast".into()))).is_none());
+    }
+
+    #[test]
     fn snapshots_can_be_renamed() {
         let mut preset = Preset::parse(&sample()).unwrap();
         preset.tone = crate::msgmap! {
@@ -2445,6 +2476,10 @@ mod tests {
         let mut bad_tempo = valid.clone();
         *bad_tempo.get_mut(key::SNAPSHOT_TEMPO).unwrap() = Value::F32(f32::NAN);
         assert!(Preset::parse(&document(bad_tempo)).is_none());
+
+        let mut out_of_range_tempo = valid.clone();
+        *out_of_range_tempo.get_mut(key::SNAPSHOT_TEMPO).unwrap() = Value::F32(241.0);
+        assert!(Preset::parse(&document(out_of_range_tempo)).is_none());
 
         let mut short_states = valid;
         *short_states.get_mut(key::SNAPSHOT_SLOTS).unwrap() = Value::Array(Vec::new());
