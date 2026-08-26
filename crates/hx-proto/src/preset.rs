@@ -1468,8 +1468,27 @@ fn slot_is_well_formed(raw: &Value) -> bool {
             Some(_) => return false,
             None => None,
         };
-        if matches!((has_paired, paired), (Some(flag), Some(model)) if flag != (model >= 0)) {
-            return false;
+        if let Some(flag) = has_paired {
+            let Some(model) = paired else {
+                return false;
+            };
+            if flag != (model >= 0) {
+                return false;
+            }
+        }
+        if let Some(model) = paired {
+            match (model >= 0, body.get(key::PAIRED_VALUES)) {
+                (true, None) => return false,
+                (false, Some(values))
+                    if !matches!(
+                        values.get(key::ARRAY_VALUES),
+                        Some(Value::Array(items)) if items.is_empty()
+                    ) =>
+                {
+                    return false
+                }
+                _ => {}
+            }
         }
     }
     [key::VALUES, key::IO_VALUES, key::PAIRED_VALUES]
@@ -2868,6 +2887,35 @@ mod tests {
         };
         assert!(Preset::parse(&paired_flag(Value::Str("yes".into()))).is_none());
         assert!(Preset::parse(&paired_flag(Value::Bool(true))).is_none());
+
+        let mut unpaired_values = Preset::parse(FIXTURE).unwrap();
+        let block = unpaired_values.blocks().next().unwrap().0;
+        *unpaired_values
+            .slot_body_mut(block)
+            .and_then(|body| body.get_mut(key::PAIRED_VALUES))
+            .unwrap() = crate::msgmap! {
+            key::ARRAY_VALUES => Value::Array(vec![Value::F32(0.5)]),
+        };
+        assert!(Preset::parse(&unpaired_values.encode()).is_none());
+
+        let mut missing_paired_values = Preset::parse(FIXTURE).unwrap();
+        let block = missing_paired_values.blocks().next().unwrap().0;
+        let body = missing_paired_values.slot_body_mut(block).unwrap();
+        *body
+            .get_mut(key::MODEL_REF)
+            .and_then(|reference| reference.get_mut(key::HAS_PAIRED))
+            .unwrap() = Value::Bool(true);
+        *body
+            .get_mut(key::MODEL_REF)
+            .and_then(|reference| reference.get_mut(key::PAIRED_MODEL))
+            .unwrap() = Value::Int(100);
+        let Value::Map(fields) = body else {
+            panic!("slot body");
+        };
+        fields.retain(
+            |(field, _)| !matches!(field, crate::msgpack::Key::Int(k) if *k == key::PAIRED_VALUES),
+        );
+        assert!(Preset::parse(&missing_paired_values.encode()).is_none());
 
         let mut trailing = FIXTURE.to_vec();
         trailing.push(0xc0);
