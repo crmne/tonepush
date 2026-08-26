@@ -405,7 +405,11 @@ impl Preset {
         let Value::Array(raw_slots) = slot_values else {
             return None;
         };
-        if raw_slots.is_empty() || raw_slots.iter().any(|slot| !slot_is_well_formed(slot)) {
+        if raw_slots.is_empty()
+            || raw_slots
+                .iter()
+                .any(|slot| !slot_is_well_formed(slot) || !endpoint_route_is_well_formed(slot))
+        {
             return None;
         }
         if !assignments_are_well_formed(&tone) {
@@ -1339,6 +1343,25 @@ fn settings_are_well_formed(tone: &Value) -> bool {
     match tone.get(key::SETTINGS) {
         None | Some(Value::Nil) => true,
         Some(settings @ Value::Map(_)) => settings.get(key::TEMPO).is_none_or(tempo_is_well_formed),
+        Some(_) => false,
+    }
+}
+
+fn endpoint_route_is_well_formed(raw: &Value) -> bool {
+    let route_key = match raw
+        .get(key::KIND)
+        .and_then(Value::as_i64)
+        .map(Kind::from_wire)
+    {
+        Some(Kind::Input) => key::INPUT_FROM,
+        Some(Kind::Output) => key::OUTPUT_TO,
+        _ => return true,
+    };
+    match raw.get(key::BODY) {
+        None | Some(Value::Nil) => true,
+        Some(body @ Value::Map(_)) => body
+            .get(route_key)
+            .is_none_or(|route| route.as_i64().is_some_and(|route| route >= 0)),
         Some(_) => false,
     }
 }
@@ -2282,6 +2305,22 @@ mod tests {
         // offsets it carries stay valid.
         let before = Preset::parse(FIXTURE).unwrap().encode().len();
         assert_eq!(preset.encode().len(), before);
+    }
+
+    #[test]
+    fn malformed_endpoint_routes_are_rejected() {
+        let document = |route: Value| {
+            let mut preset = Preset::parse(FIXTURE).unwrap();
+            let input = preset.layout().paths[0].input.unwrap();
+            *preset
+                .slot_body_mut(input)
+                .and_then(|body| body.get_mut(key::INPUT_FROM))
+                .unwrap() = route;
+            preset.encode()
+        };
+        assert!(Preset::parse(&document(Value::Int(0))).is_some());
+        assert!(Preset::parse(&document(Value::Int(-1))).is_none());
+        assert!(Preset::parse(&document(Value::Str("guitar".into()))).is_none());
     }
 
     /// The section table is not opaque: it can be rebuilt from the document
