@@ -1326,7 +1326,7 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "hx-catalog"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "flate2",
  "hx-proto",
@@ -1337,11 +1337,11 @@ dependencies = [
 
 [[package]]
 name = "hx-proto"
-version = "0.5.6"
+version = "0.6.0"
 
 [[package]]
 name = "hx-ruby"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "hx-catalog",
  "hx-proto",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "hx-usb"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "atomic-write-file",
  "hx-proto",
@@ -3485,7 +3485,7 @@ dependencies = [
 
 [[package]]
 name = "tonepush-cli"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "atomic-write-file",
@@ -3500,7 +3500,7 @@ dependencies = [
 
 [[package]]
 name = "tonepush-gui"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "atomic-write-file",
  "eframe",
@@ -3729,7 +3729,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voidx-client"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "atomic-write-file",
  "flate2",
@@ -3743,7 +3743,7 @@ dependencies = [
 
 [[package]]
 name = "voidx-proto"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",

@@ -12,18 +12,18 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.6"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/crmne/tonepush"
 rust-version = "1.87"
 
 [workspace.dependencies]
-hx-proto = { path = "crates/hx-proto", version = "0.5.6" }
-hx-usb = { path = "crates/hx-usb", version = "0.5.6" }
-hx-catalog = { path = "crates/hx-catalog", version = "0.5.6" }
-voidx-proto = { path = "crates/voidx-proto", version = "0.5.6" }
-voidx-client = { path = "crates/voidx-client", version = "0.5.6" }
+hx-proto = { path = "crates/hx-proto", version = "0.6.0" }
+hx-usb = { path = "crates/hx-usb", version = "0.6.0" }
+hx-catalog = { path = "crates/hx-catalog", version = "0.6.0" }
+voidx-proto = { path = "crates/voidx-proto", version = "0.6.0" }
+voidx-client = { path = "crates/voidx-client", version = "0.6.0" }
 nusb = "0.2"
 anyhow = "1"
 thiserror = "2"
