@@ -401,11 +401,18 @@ impl Preset {
             return None;
         }
 
-        let slots = tone
-            .get(key::PATH)
-            .and_then(|p| p.get(key::SLOTS))
-            .map(collect_slots)
-            .unwrap_or_default();
+        let slot_values = tone.get(key::PATH)?.get(key::SLOTS)?;
+        let Value::Array(raw_slots) = slot_values else {
+            return None;
+        };
+        if raw_slots.is_empty()
+            || raw_slots
+                .iter()
+                .any(|slot| slot.get(key::KIND).and_then(Value::as_i64).is_none())
+        {
+            return None;
+        }
+        let slots = collect_slots(slot_values);
 
         let preset = Preset {
             sections,
@@ -2233,6 +2240,17 @@ mod tests {
             preset.tone.clone(),
         ))
         .is_none());
+
+        let mut no_slots = Preset::parse(FIXTURE).unwrap();
+        *no_slots.tone.get_mut(key::PATH).unwrap() = Value::Nil;
+        assert!(Preset::parse(&no_slots.encode()).is_none());
+
+        let mut malformed_slot = Preset::parse(FIXTURE).unwrap();
+        *malformed_slot
+            .tone
+            .at_mut(&[key::PATH, key::SLOTS])
+            .unwrap() = Value::Array(vec![Value::Nil]);
+        assert!(Preset::parse(&malformed_slot.encode()).is_none());
 
         let mut trailing = FIXTURE.to_vec();
         trailing.push(0xc0);
