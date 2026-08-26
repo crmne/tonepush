@@ -648,6 +648,9 @@ impl Preset {
     /// document back afterwards. That is only safe because re-encoding is
     /// byte-exact - see `tests/roundtrip.rs`.
     pub fn set_tempo(&mut self, bpm: f32) -> bool {
+        if !bpm.is_finite() || !(40.0..=240.0).contains(&bpm) {
+            return false;
+        }
         match self.tone.at_mut(&[key::SETTINGS, key::TEMPO]) {
             Some(slot) => {
                 *slot = Value::F32(bpm);
@@ -2159,6 +2162,17 @@ mod tests {
         assert!(preset.set_tempo(96.0));
         assert_eq!(preset.tempo(), Some(96.0));
         assert_eq!(Preset::parse(&preset.encode()).unwrap().tempo(), Some(96.0));
+    }
+
+    #[test]
+    fn invalid_tempo_edits_leave_the_preset_unchanged() {
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+        let before = preset.tempo().unwrap();
+
+        for invalid in [39.9, 240.1, f32::NAN, f32::INFINITY] {
+            assert!(!preset.set_tempo(invalid));
+            assert_eq!(preset.tempo(), Some(before));
+        }
     }
 
     #[test]
