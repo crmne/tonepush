@@ -1099,12 +1099,12 @@ impl Preset {
         }
 
         let mut out = Vec::with_capacity(table_len);
-        out.extend_from_slice(&(tone_at as u32).to_le_bytes());
+        out.extend_from_slice(&section_word(tone_at)?);
         for key in SLOT_ORDER {
-            out.extend_from_slice(&(*key_at.get(&key)? as u32).to_le_bytes());
+            out.extend_from_slice(&section_word(*key_at.get(&key)?)?);
         }
-        out.extend_from_slice(&(total as u32).to_le_bytes());
-        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&section_word(total)?);
+        out.extend_from_slice(&section_word(total)?);
         Some(out)
     }
 
@@ -1250,6 +1250,10 @@ fn collect_slots(slots: &Value) -> Vec<Slot> {
         return Vec::new();
     };
     items.iter().map(read_slot).collect()
+}
+
+fn section_word(offset: usize) -> Option<[u8; 4]> {
+    u32::try_from(offset).ok().map(u32::to_le_bytes)
 }
 
 fn assignments_are_well_formed(tone: &Value) -> bool {
@@ -2394,6 +2398,16 @@ mod tests {
             preset.sections,
             "the recomputed section table does not match the device's own"
         );
+    }
+
+    #[test]
+    fn section_offsets_do_not_wrap_past_u32() {
+        assert_eq!(
+            section_word(u32::MAX as usize),
+            Some(u32::MAX.to_le_bytes())
+        );
+        #[cfg(target_pointer_width = "64")]
+        assert!(section_word(u32::MAX as usize + 1).is_none());
     }
 
     #[test]
