@@ -406,9 +406,11 @@ impl Preset {
             return None;
         };
         if raw_slots.is_empty()
-            || raw_slots
-                .iter()
-                .any(|slot| !slot_is_well_formed(slot) || !endpoint_route_is_well_formed(slot))
+            || raw_slots.iter().any(|slot| {
+                !slot_is_well_formed(slot)
+                    || !endpoint_route_is_well_formed(slot)
+                    || !junction_is_well_formed(slot)
+            })
         {
             return None;
         }
@@ -1366,6 +1368,34 @@ fn endpoint_route_is_well_formed(raw: &Value) -> bool {
     }
 }
 
+fn junction_is_well_formed(raw: &Value) -> bool {
+    let body_key = match raw
+        .get(key::KIND)
+        .and_then(Value::as_i64)
+        .map(Kind::from_wire)
+    {
+        Some(Kind::Split) => key::SPLIT_BODY,
+        Some(Kind::Join) => key::JOIN_BODY,
+        _ => return true,
+    };
+    let Some(body @ Value::Map(_)) = raw.get(key::BODY).and_then(|body| body.get(body_key)) else {
+        return false;
+    };
+    let valid_model = body
+        .get(key::JUNCTION_MODEL)
+        .and_then(Value::as_i64)
+        .and_then(|model| u32::try_from(model).ok())
+        .is_some();
+    let valid_attach = body
+        .get(key::ATTACH)
+        .and_then(Value::as_i64)
+        .is_some_and(|attach| attach >= 0);
+    let valid_snapshot_flag = body
+        .get(key::JUNCTION_SNAPSHOTS)
+        .is_none_or(|flag| matches!(flag, Value::Bool(_)));
+    valid_model && valid_attach && valid_snapshot_flag
+}
+
 fn slot_is_well_formed(raw: &Value) -> bool {
     let Some(kind) = raw.get(key::KIND).and_then(Value::as_i64) else {
         return false;
@@ -2060,6 +2090,37 @@ mod tests {
         assert_eq!(path.head, Vec::<usize>::new());
         assert_eq!(path.lanes[0].blocks, vec![1, 2], "the fork moved to slot 1");
         assert_eq!(path.tail, vec![3], "the merge moved to slot 3");
+    }
+
+    #[test]
+    fn malformed_junction_records_are_rejected() {
+        let kinds = [IN, BLOCK, BLOCK, OUT, SPLIT, BLOCK, JOIN];
+
+        let mut bad_attach = shaped_at(&kinds, 1, 2);
+        let split = bad_attach.layout().paths[0].split.unwrap();
+        *bad_attach
+            .slot_body_mut(split)
+            .and_then(|body| body.get_mut(key::SPLIT_BODY))
+            .and_then(|body| body.get_mut(key::ATTACH))
+            .unwrap() = Value::Str("first".into());
+        assert!(Preset::parse(&bad_attach.encode()).is_none());
+
+        let mut bad_model = shaped_at(&kinds, 1, 2);
+        let split = bad_model.layout().paths[0].split.unwrap();
+        *bad_model
+            .slot_body_mut(split)
+            .and_then(|body| body.get_mut(key::SPLIT_BODY))
+            .and_then(|body| body.get_mut(key::JUNCTION_MODEL))
+            .unwrap() = Value::Int(-1);
+        assert!(Preset::parse(&bad_model.encode()).is_none());
+
+        let mut missing_body = shaped_at(&kinds, 1, 2);
+        let split = missing_body.layout().paths[0].split.unwrap();
+        *missing_body
+            .slot_body_mut(split)
+            .and_then(|body| body.get_mut(key::SPLIT_BODY))
+            .unwrap() = Value::Nil;
+        assert!(Preset::parse(&missing_body.encode()).is_none());
     }
 
     #[test]
