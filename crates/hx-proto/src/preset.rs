@@ -618,6 +618,9 @@ impl Preset {
             Some(Kind::Join) => key::JOIN_BODY,
             _ => return false,
         };
+        let Ok(before) = i64::try_from(before) else {
+            return false;
+        };
         let Some(field) = self
             .slot_body_mut(position)
             .and_then(|b| b.get_mut(body_key))
@@ -627,8 +630,8 @@ impl Preset {
         };
         *field = match field {
             Value::Wide(_, w) => Value::Wide(before as u64, *w),
-            Value::WideInt(_, w) => Value::WideInt(before as i64, *w),
-            _ => Value::Int(before as i64),
+            Value::WideInt(_, w) => Value::WideInt(before, *w),
+            _ => Value::Int(before),
         };
         true
     }
@@ -2022,6 +2025,9 @@ mod tests {
         assert!(preset.set_attach(5, 1), "the split accepts a new attach");
         assert!(preset.set_attach(7, 3), "so does the join");
         assert!(!preset.set_attach(1, 2), "a block does not");
+        let before = preset.attach_of(5);
+        assert!(!preset.set_attach(5, usize::MAX));
+        assert_eq!(preset.attach_of(5), before, "overflow changes nothing");
 
         let layout = Preset::parse(&preset.encode()).unwrap().layout();
         let path = &layout.paths[0];
