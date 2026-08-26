@@ -39,11 +39,32 @@ pub(crate) fn catalog(dir: &Path) -> Result<Catalog, Error> {
     }
 
     let displays = read::<HashMap<String, Display>>(&dir.join("HelixControls.json"))?;
+    let symbols = symbols(dir, &models)?;
+    let categories = categories(dir, &models)?;
+
+    if models.is_empty() {
+        return Err(Error::Invalid {
+            path: dir.to_owned(),
+            reason: "the model files contain no models".to_owned(),
+        });
+    }
+    if categories.is_empty() {
+        return Err(Error::Invalid {
+            path: dir.join("HX_ModelCatalog.json"),
+            reason: "the model catalog contains no categories".to_owned(),
+        });
+    }
+    if symbols.is_empty() {
+        return Err(Error::Invalid {
+            path: dir.join("Helix.sym"),
+            reason: "the symbol table contains no symbols".to_owned(),
+        });
+    }
 
     Ok(Catalog {
         resources: dir.to_owned(),
-        symbols: symbols(dir, &models)?,
-        categories: categories(dir, &models)?,
+        symbols,
+        categories,
         models,
         displays,
     })
@@ -517,6 +538,24 @@ mod tests {
                 assert!(reason.contains("name"), "{reason}");
             }
             _ => panic!("a malformed parameter should be reported"),
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn structurally_empty_catalogs_are_rejected() {
+        let dir = scratch("empty-catalog");
+        std::fs::write(dir.join("HX_ModelCatalog.json"), r#"{"categories": []}"#).unwrap();
+        std::fs::write(dir.join("HelixControls.json"), b"{}").unwrap();
+        std::fs::write(dir.join("Helix.sym"), b"[]").unwrap();
+
+        match catalog(&dir) {
+            Err(Error::Invalid { path, reason }) => {
+                assert_eq!(path, dir);
+                assert!(reason.contains("no models"), "{reason}");
+            }
+            _ => panic!("an empty catalog should be reported"),
         }
 
         let _ = std::fs::remove_dir_all(dir);

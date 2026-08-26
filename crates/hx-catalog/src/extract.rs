@@ -538,9 +538,13 @@ mod tests {
     }
 
     fn valid_source(dir: &Path) {
-        std::fs::write(dir.join("HX_ModelCatalog.json"), r#"{"categories": []}"#).unwrap();
+        std::fs::write(
+            dir.join("HX_ModelCatalog.json"),
+            r#"{"categories":[{"id":11,"name":"Amp","models":[{"id":"TestAmp"}]}]}"#,
+        )
+        .unwrap();
         std::fs::write(dir.join("HelixControls.json"), b"{}").unwrap();
-        std::fs::write(dir.join("Helix.sym"), b"[]").unwrap();
+        std::fs::write(dir.join("Helix.sym"), r#"[{"symbol":"TestAmp"}]"#).unwrap();
         std::fs::write(
             dir.join("amp.models"),
             r#"[{"symbolicID":"TestAmp","name":"Test Amp"}]"#,
@@ -585,7 +589,7 @@ mod tests {
         std::fs::write(src.join("Helix.sym"), b"[]").unwrap();
 
         let error = validate_source(&src).unwrap_err();
-        assert!(error.contains("contains no models"));
+        assert!(error.contains("no models"));
 
         let _ = std::fs::remove_dir_all(src);
     }
