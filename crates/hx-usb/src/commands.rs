@@ -20,6 +20,15 @@ fn block_param(block: i64, param: i64) -> Result<()> {
     non_negative(param, "parameter index")
 }
 
+fn favourite_index(index: i64) -> Result<()> {
+    if !(0..16).contains(&index) {
+        return Err(Error::Protocol(format!(
+            "favourite index must be 0 to 15; got {index}"
+        )));
+    }
+    Ok(())
+}
+
 fn finite_value(value: &Value, name: &str) -> Result<()> {
     let finite = match value {
         Value::F32(number) => number.is_finite(),
@@ -298,7 +307,7 @@ impl Session {
     /// nothing to send but where it is and what to call it.
     pub fn save_favourite(&mut self, block: i64, index: i64, name: &str) -> Result<()> {
         non_negative(block, "block")?;
-        non_negative(index, "favourite index")?;
+        favourite_index(index)?;
         self.bootstrap()?;
         self.command(
             ChannelId::CONTROL,
@@ -316,7 +325,7 @@ impl Session {
 
     /// Rename a favourite.
     pub fn rename_favourite(&mut self, index: i64, name: &str) -> Result<()> {
-        non_negative(index, "favourite index")?;
+        favourite_index(index)?;
         self.command(
             ChannelId::DATA,
             rpc::op::RENAME_FAVOURITE,
@@ -331,7 +340,7 @@ impl Session {
 
     /// Forget a favourite.
     pub fn clear_favourite(&mut self, index: i64) -> Result<()> {
-        non_negative(index, "favourite index")?;
+        favourite_index(index)?;
         self.command(
             ChannelId::DATA,
             rpc::op::CLEAR_FAVOURITE,
@@ -1265,6 +1274,14 @@ mod validation_tests {
         assert!(preset_index(&hx_proto::HX_STOMP, 125).is_ok());
         assert!(preset_index(&hx_proto::HX_STOMP, -1).is_err());
         assert!(preset_index(&hx_proto::HX_STOMP, 126).is_err());
+    }
+
+    #[test]
+    fn favourite_indexes_match_the_sixteen_device_slots() {
+        assert!(favourite_index(0).is_ok());
+        assert!(favourite_index(15).is_ok());
+        assert!(favourite_index(-1).is_err());
+        assert!(favourite_index(16).is_err());
     }
 
     #[test]
