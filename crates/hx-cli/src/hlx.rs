@@ -249,11 +249,14 @@ fn read_block(
         // not parameters.
         if key.starts_with('@') {
             if key == "@enabled" && bypass == Bypass::Has {
-                if let Some(on) = value.as_bool() {
-                    plan.steps.push(Step::Enabled {
+                match value.as_bool() {
+                    Some(on) => plan.steps.push(Step::Enabled {
                         block: position,
                         enabled: on,
-                    });
+                    }),
+                    None => plan
+                        .skipped
+                        .push(format!("{name}: @enabled is not a boolean value")),
                 }
             }
             continue;
@@ -645,5 +648,28 @@ mod tests {
             .steps
             .iter()
             .any(|step| matches!(step, Step::Param { name, .. } if name == "Gain")));
+    }
+
+    #[test]
+    fn reports_a_malformed_bypass_flag_from_a_tone_file() {
+        let Some(catalog) = catalog() else { return };
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": {
+                    "@model": "HD2_DistScream808Mono",
+                    "@enabled": "yes"
+                }
+            }}}
+        });
+
+        let plan = plan(&json, &catalog).unwrap();
+        assert!(plan
+            .skipped
+            .iter()
+            .any(|why| why.contains("@enabled") && why.contains("not a boolean")));
+        assert!(!plan
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::Enabled { .. })));
     }
 }
