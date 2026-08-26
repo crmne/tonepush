@@ -1266,16 +1266,30 @@ fn paint_arc(
 /// the pedal, and the same amber dot therefore meant two opposite things
 /// depending on where you were standing.
 pub fn place(ui: &mut Ui, icon: Icon, state: Sync) -> Response {
-    let sense = if matches!(state, Sync::Unknown | Sync::Working) {
-        Sense::hover()
-    } else {
+    place_enabled(
+        ui,
+        icon,
+        state,
+        !matches!(state, Sync::Unknown | Sync::Working),
+    )
+}
+
+/// Draw a place whose actionability is decided by its caller.
+///
+/// Most place marks derive this from their sync state, but a Push column is
+/// still useful before presence is known. Keeping the two facts separate also
+/// means a visible action never silently ignores a click.
+pub fn place_enabled(ui: &mut Ui, icon: Icon, state: Sync, enabled: bool) -> Response {
+    let sense = if enabled {
         Sense::click()
+    } else {
+        Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(Vec2::new(18.0, 16.0), sense);
     if !ui.is_rect_visible(rect) {
         return response;
     }
-    let hot = response.hovered() && !matches!(state, Sync::Unknown | Sync::Working);
+    let hot = response.hovered() && enabled;
     let tint = match state {
         Sync::Differs => ACCENT,
         Sync::Working => {

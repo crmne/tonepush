@@ -701,7 +701,13 @@ impl LibColumn {
         }
     }
 
-    fn cell(self, entry: &LibEntry, state: theme::Sync, cloud: theme::Sync) -> table::Cell {
+    fn cell(
+        self,
+        entry: &LibEntry,
+        state: theme::Sync,
+        cloud: theme::Sync,
+        can_send: bool,
+    ) -> table::Cell {
         match self {
             // This row is a tone in the library, so the computer is not one of
             // the icons: it shows the pedal, and the cloud once the tone
@@ -719,8 +725,10 @@ impl LibColumn {
                             "On the pedal under this name, but different. Send this one"
                         }
                         theme::Sync::Working => "Sending to the pedal…",
-                        theme::Sync::Unknown => "",
+                        theme::Sync::Unknown if can_send => "Send it to the pedal",
+                        theme::Sync::Unknown => "Not available for the connected pedal",
                     },
+                    can_send && state != theme::Sync::Working,
                 )];
                 if cloud != theme::Sync::Unknown {
                     places.push((
@@ -735,6 +743,7 @@ impl LibColumn {
                             theme::Sync::Working => "Publishing…",
                             theme::Sync::Unknown => "",
                         },
+                        cloud != theme::Sync::Working,
                     ));
                 }
                 table::Cell::Places(places)
@@ -3875,6 +3884,9 @@ impl App {
                                 } else {
                                     "Audition this Tone on the pedal"
                                 },
+                                audition_blocker.is_none()
+                                    && !downloading
+                                        .is_some_and(|job| job.action == CloudAction::Audition),
                             ),
                             (
                                 theme::Icon::Computer,
@@ -3892,6 +3904,7 @@ impl App {
                                 } else {
                                     "Keep this Tone in your library"
                                 },
+                                !downloading.is_some_and(|job| job.action == CloudAction::Computer),
                             ),
                         ]),
                         _ => column.value_cell(local),
@@ -4572,17 +4585,20 @@ impl App {
             let held = tone.is_some_and(|tone| tone.held);
             grid.rows.push(vec![
                 table::Cell::Places(vec![(
-                    theme::Icon::Computer,
-                    if held {
-                        theme::Sync::Same
-                    } else {
+                    theme::Icon::Pedal,
+                    if held && live {
                         theme::Sync::Absent
-                    },
-                    if held {
-                        "kept for this setlist"
                     } else {
-                        "missing from the library"
+                        theme::Sync::Unknown
                     },
+                    if !held {
+                        "Missing from the library"
+                    } else if !live {
+                        "Connect a compatible pedal to send this preset"
+                    } else {
+                        "Send this preset to its slot"
+                    },
+                    held && live,
                 )]),
                 table::Cell::Dim(self.active_slot_label(*slot as i64)),
                 table::Cell::Text(entry.name.clone()),
@@ -4598,7 +4614,7 @@ impl App {
         let did = table::show(ui, "setlist-slots", &mut grid);
         // A row is one preset out of the setlist, and the one repair anybody
         // needs is putting it back where it came from.
-        let send = did.double_clicked.or(did.chose.map(|(row, _)| row));
+        let send = setlist_send_row(&did);
         if let Some(row) = send.filter(|_| live) {
             if let Some((slot, entry)) = played.get(row).cloned() {
                 self.send_one_slot(slot as i64, &entry);
@@ -4881,6 +4897,7 @@ impl App {
                 (entry.hash.clone(), entry.name.clone())
             };
             let state = self.tone_sync(&hash, &name);
+            let can_send = self.pedal_online() && self.tone_kind_compatible(&hash);
             let cloud = if self
                 .publishing
                 .as_ref()
@@ -4891,8 +4908,12 @@ impl App {
                 self.cloud_sync(&hash)
             };
             let entry = &self.lib_entries[i];
-            grid.rows
-                .push(shown.iter().map(|c| c.cell(entry, state, cloud)).collect());
+            grid.rows.push(
+                shown
+                    .iter()
+                    .map(|c| c.cell(entry, state, cloud, can_send))
+                    .collect(),
+            );
             grid.chosen.push(self.lib_chosen.contains(&entry.hash));
         }
 
@@ -10646,6 +10667,18 @@ fn setlist_rail_columns() -> Vec<table::Column> {
     ]
 }
 
+/// Turn every gesture offered by a setlist row into the row to restore.
+///
+/// The first place is the pedal icon in the Push column. Keeping that path
+/// explicit prevents the icon from looking actionable while only double-click
+/// and the context menu are actually wired.
+fn setlist_send_row(did: &table::Did) -> Option<usize> {
+    did.place
+        .and_then(|(row, place)| (place == 0).then_some(row))
+        .or(did.double_clicked)
+        .or(did.chose.map(|(row, _)| row))
+}
+
 fn bypass_popup_id(block: i64) -> egui::Id {
     egui::Id::new(("bypass-assign", block))
 }
@@ -11630,6 +11663,21 @@ mod tests {
             app.library_lookup.setlist_tones[&hash].meta.artist,
             "Someone else"
         );
+    }
+
+    #[test]
+    fn a_setlist_push_icon_restores_its_own_row() {
+        let pushed = table::Did {
+            place: Some((7, 0)),
+            ..Default::default()
+        };
+        assert_eq!(setlist_send_row(&pushed), Some(7));
+
+        let unrelated_place = table::Did {
+            place: Some((7, 1)),
+            ..Default::default()
+        };
+        assert_eq!(setlist_send_row(&unrelated_place), None);
     }
 
     #[test]

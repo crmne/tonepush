@@ -54,8 +54,12 @@ pub enum Cell {
         key: String,
         dim: bool,
     },
-    /// Where a tone is: one icon per place, each its own button.
-    Places(Vec<(theme::Icon, theme::Sync, &'static str)>),
+    /// Where a tone is: one icon per place, each its own button. The last
+    /// value says whether this particular view offers an action there. Sync
+    /// can still be unknown while sending is useful (for example before the
+    /// first pedal backup has finished), so actionability cannot be inferred
+    /// from the sync state alone.
+    Places(Vec<(theme::Icon, theme::Sync, &'static str, bool)>),
     /// The same small chip the chain paints on a block: FS1, EXP2, MIDI. The
     /// long name is on hover, because the short one is the one you learn.
     Tag {
@@ -104,7 +108,7 @@ impl Cell {
             // Sorted so everything with something to do gathers at the top.
             Cell::Places(places) => places
                 .iter()
-                .map(|(_, state, _)| match state {
+                .map(|(_, state, _, _)| match state {
                     theme::Sync::Working => '0',
                     theme::Sync::Differs => '1',
                     theme::Sync::Absent => '2',
@@ -533,16 +537,14 @@ impl egui_table::TableDelegate for Delegate<'_> {
                 // On the row's centre line, like the text beside them.
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    for (n, (icon, state, hover)) in places.iter().enumerate() {
-                        let hit = theme::place(ui, *icon, *state);
+                    for (n, (icon, state, hover, enabled)) in places.iter().enumerate() {
+                        let hit = theme::place_enabled(ui, *icon, *state, *enabled);
                         let hit = if hover.is_empty() {
                             hit
                         } else {
                             hit.on_hover_text(*hover)
                         };
-                        if !matches!(state, theme::Sync::Unknown | theme::Sync::Working)
-                            && hit.clicked()
-                        {
+                        if *enabled && hit.clicked() {
                             self.did.place = Some((row, n));
                             claimed = true;
                         }
