@@ -271,8 +271,21 @@ fn read_block(
         // conversion - but a switch is written as a bool.
         let native = match value {
             serde_json::Value::Bool(b) => *b as u8 as f32,
-            serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) as f32,
-            _ => continue,
+            serde_json::Value::Number(n) => match n.as_f64() {
+                Some(number) => number as f32,
+                None => {
+                    plan.skipped
+                        .push(format!("{name}: {} is not a finite number", param.name));
+                    continue;
+                }
+            },
+            _ => {
+                plan.skipped.push(format!(
+                    "{name}: {} is not a numeric parameter value",
+                    param.name
+                ));
+                continue;
+            }
         };
         if !param.accepts(native) {
             plan.skipped.push(format!(
@@ -605,6 +618,29 @@ mod tests {
             .skipped
             .iter()
             .any(|why| why.contains("Gain") && why.contains("outside")));
+        assert!(!plan
+            .steps
+            .iter()
+            .any(|step| matches!(step, Step::Param { name, .. } if name == "Gain")));
+    }
+
+    #[test]
+    fn reports_nonnumeric_parameter_values_from_a_tone_file() {
+        let Some(catalog) = catalog() else { return };
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": {
+                    "@model": "HD2_DistScream808Mono",
+                    "Gain": "loud"
+                }
+            }}}
+        });
+
+        let plan = plan(&json, &catalog).unwrap();
+        assert!(plan
+            .skipped
+            .iter()
+            .any(|why| why.contains("Gain") && why.contains("not a numeric")));
         assert!(!plan
             .steps
             .iter()
