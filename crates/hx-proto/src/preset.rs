@@ -1000,6 +1000,9 @@ impl Preset {
     /// Point an endpoint slot somewhere else. Returns false if the slot is not
     /// an input or output, or has no routing field to change.
     pub fn set_routing(&mut self, position: usize, to: i64) -> bool {
+        if to < 0 {
+            return false;
+        }
         let Some(key) = self
             .slots
             .get(position)
@@ -2263,6 +2266,14 @@ mod tests {
         // A block has no routing field of its own.
         assert_eq!(preset.routing(1), None);
         assert!(!preset.set_routing(1, 3));
+
+        let before = preset.routing(input);
+        assert!(!preset.set_routing(input, -1));
+        assert_eq!(
+            preset.routing(input),
+            before,
+            "negative routes change nothing"
+        );
 
         assert!(preset.set_routing(output, 6));
         assert_eq!(preset.routing(output), Some(6));
