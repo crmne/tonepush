@@ -837,8 +837,10 @@ fn to_json(value: &Value) -> Option<serde_json::Value> {
 fn from_json(want: &serde_json::Value, current: &Value) -> Option<Value> {
     Some(match current {
         Value::Bool(_) => Value::Bool(want.as_bool()?),
-        Value::Int(_) | Value::WideInt(..) => Value::Int(want.as_i64()?),
-        Value::UInt(_) | Value::Wide(..) => Value::UInt(want.as_u64()?),
+        Value::Int(_) => Value::Int(want.as_i64()?),
+        Value::WideInt(_, width) => Value::WideInt(want.as_i64()?, *width),
+        Value::UInt(_) => Value::UInt(want.as_u64()?),
+        Value::Wide(_, width) => Value::Wide(want.as_u64()?, *width),
         Value::F32(_) => {
             let value = want.as_f64()? as f32;
             Value::F32(value.is_finite().then_some(value)?)
@@ -1198,12 +1200,15 @@ mod tests {
             (Value::Bool(true), Value::Bool(false)),
             (Value::Int(120), Value::Int(0)),
             (Value::UInt(u64::MAX), Value::UInt(0)),
+            (Value::WideInt(-120, 4), Value::WideInt(0, 4)),
+            (Value::Wide(120, 2), Value::Wide(0, 2)),
             (Value::F32(113.1), Value::F32(0.0)),
+            (Value::F64(113.1), Value::F64(0.0)),
         ];
         for (value, shape) in cases {
             let json = to_json(&value).expect("serialises");
             let back = from_json(&json, &shape).expect("deserialises");
-            assert_eq!(format!("{back:?}"), format!("{value:?}"));
+            assert_eq!(back, value);
         }
 
         // A value of the wrong shape is refused rather than coerced.
