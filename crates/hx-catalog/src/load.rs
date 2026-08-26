@@ -22,7 +22,12 @@ pub(crate) fn catalog(dir: &Path) -> Result<Catalog, Error> {
             continue;
         }
         for raw in read::<Vec<RawModel>>(&path)? {
-            models.insert(raw.symbolic_id.clone(), raw.into());
+            let id = raw.symbolic_id.clone();
+            let model = Model::try_from(raw).map_err(|reason| Error::Invalid {
+                path: path.clone(),
+                reason,
+            })?;
+            models.insert(id, model);
         }
     }
 
@@ -301,29 +306,47 @@ struct RawModel {
 /// has a parameter with two `assign` fields - which a derived deserialiser
 /// rejects outright; taking the last value is both tolerant and obviously
 /// right. And bounds are written as whichever type suits the parameter, so
-/// `false`/`true` for a switch and numbers for a knob, which one lenient
-/// accessor handles without special cases spreading through the loader.
+/// `false`/`true` for a switch, strings for text, and numbers for a knob. The
+/// checked conversion below handles those shapes after the raw map is read.
 type Fields = serde_json::Map<String, serde_json::Value>;
 
-fn text(fields: &Fields, key: &str) -> String {
-    fields
-        .get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_owned()
-}
-
-fn number(fields: &Fields, key: &str, fallback: f32) -> f32 {
-    match fields.get(key) {
-        Some(serde_json::Value::Bool(b)) => *b as u8 as f32,
-        Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0) as f32,
-        _ => fallback,
+fn required_text(fields: &Fields, key: &str) -> Result<String, String> {
+    match fields.get(key).and_then(|value| value.as_str()) {
+        Some(value) if !value.is_empty() => Ok(value.to_owned()),
+        _ => Err(format!("parameter {key} must be a non-empty string")),
     }
 }
 
-impl From<RawModel> for Model {
-    fn from(m: RawModel) -> Model {
-        Model {
+fn required_number(fields: &Fields, key: &str) -> Result<f32, String> {
+    let number = match fields.get(key) {
+        Some(serde_json::Value::Bool(value)) => *value as u8 as f32,
+        Some(serde_json::Value::Number(value)) => value
+            .as_f64()
+            .map(|value| value as f32)
+            .ok_or_else(|| format!("parameter {key} is not a representable number"))?,
+        _ => return Err(format!("parameter {key} must be a number or boolean")),
+    };
+    number
+        .is_finite()
+        .then_some(number)
+        .ok_or_else(|| format!("parameter {key} must be finite"))
+}
+
+impl TryFrom<RawModel> for Model {
+    type Error = String;
+
+    fn try_from(m: RawModel) -> Result<Model, String> {
+        let params = m
+            .params
+            .into_iter()
+            .enumerate()
+            .map(|(index, fields)| {
+                Param::try_from(fields).map_err(|reason| {
+                    format!("model {} parameter {index}: {reason}", m.symbolic_id)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Model {
             id: m.symbolic_id,
             name: m.name,
             category: m.category,
@@ -334,30 +357,62 @@ impl From<RawModel> for Model {
             load: m.load.or(m.load_mono).or(m.load_stereo).unwrap_or_default(),
             image: None,
             cab_link: m.cab_link,
-            params: m.params.into_iter().map(Param::from).collect(),
-        }
+            params,
+        })
     }
 }
 
-impl From<Fields> for Param {
-    fn from(f: Fields) -> Param {
-        Param {
-            kind: match number(&f, "valueType", 1.0) as u8 {
-                0 => Kind::Enum,
-                2 => Kind::Switch,
-                3 => Kind::Text,
-                _ => Kind::Continuous,
-            },
-            min: number(&f, "min", 0.0),
-            max: number(&f, "max", 1.0),
-            default: number(&f, "default", 0.0),
-            display: f
-                .get("displayType")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned),
-            id: text(&f, "symbolicID"),
-            name: text(&f, "name"),
+impl TryFrom<Fields> for Param {
+    type Error = String;
+
+    fn try_from(f: Fields) -> Result<Param, String> {
+        let value_type = required_number(&f, "valueType")?;
+        if value_type.fract() != 0.0 || !(0.0..=3.0).contains(&value_type) {
+            return Err(format!("parameter valueType {value_type} is not supported"));
         }
+        let kind = match value_type as u8 {
+            0 => Kind::Enum,
+            2 => Kind::Switch,
+            3 => Kind::Text,
+            _ => Kind::Continuous,
+        };
+        let (min, max, default) = if kind == Kind::Text {
+            for key in ["min", "max", "default"] {
+                if !matches!(f.get(key), Some(serde_json::Value::String(_))) {
+                    return Err(format!("text parameter {key} must be a string"));
+                }
+            }
+            // Text parameters are not sent through the numeric edit paths,
+            // but Param keeps one uniform representation for every kind.
+            (0.0, 1.0, 0.0)
+        } else {
+            let min = required_number(&f, "min")?;
+            let max = required_number(&f, "max")?;
+            let default = required_number(&f, "default")?;
+            if min > max {
+                return Err(format!("parameter range is reversed: {min} to {max}"));
+            }
+            if !(min..=max).contains(&default) {
+                return Err(format!(
+                    "parameter default {default} is outside {min} to {max}"
+                ));
+            }
+            (min, max, default)
+        };
+        let display = match f.get("displayType") {
+            Some(serde_json::Value::String(display)) => Some(display.clone()),
+            Some(_) => return Err("parameter displayType must be a string".to_owned()),
+            None => None,
+        };
+        Ok(Param {
+            kind,
+            min,
+            max,
+            default,
+            display,
+            id: required_text(&f, "symbolicID")?,
+            name: required_text(&f, "name")?,
+        })
     }
 }
 
@@ -376,7 +431,10 @@ mod tests {
     }
 
     fn model(json: &str) -> Model {
-        serde_json::from_str::<RawModel>(json).unwrap().into()
+        serde_json::from_str::<RawModel>(json)
+            .unwrap()
+            .try_into()
+            .unwrap()
     }
 
     #[test]
@@ -436,6 +494,29 @@ mod tests {
                 assert_eq!(path, dir.join("Helix.sym"));
             }
             _ => panic!("a malformed symbol table should be reported"),
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn malformed_parameter_records_are_not_filled_with_defaults() {
+        let dir = scratch("bad-parameter");
+        std::fs::write(dir.join("HX_ModelCatalog.json"), r#"{"categories": []}"#).unwrap();
+        std::fs::write(dir.join("HelixControls.json"), b"{}").unwrap();
+        std::fs::write(dir.join("Helix.sym"), b"[]").unwrap();
+        std::fs::write(
+            dir.join("amp.models"),
+            r#"[{"symbolicID":"Amp","params":[{"symbolicID":"Drive","valueType":1,"min":0,"max":1,"default":0.5}]}]"#,
+        )
+        .unwrap();
+
+        match catalog(&dir) {
+            Err(Error::Invalid { path, reason }) => {
+                assert_eq!(path, dir.join("amp.models"));
+                assert!(reason.contains("name"), "{reason}");
+            }
+            _ => panic!("a malformed parameter should be reported"),
         }
 
         let _ = std::fs::remove_dir_all(dir);

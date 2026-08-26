@@ -219,6 +219,8 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+    #[error("invalid catalog data in {path}: {reason}")]
+    Invalid { path: PathBuf, reason: String },
     /// An `.hxb` backup bundle could not be read - not the expected container,
     /// or holding no setlist.
     #[error("{0}")]
