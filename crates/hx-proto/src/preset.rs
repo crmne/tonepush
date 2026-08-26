@@ -1415,18 +1415,22 @@ fn junction_is_well_formed(raw: &Value) -> bool {
 }
 
 fn slot_is_well_formed(raw: &Value) -> bool {
-    let Some(kind) = raw.get(key::KIND).and_then(Value::as_i64) else {
+    let Some(kind) = raw
+        .get(key::KIND)
+        .and_then(Value::as_i64)
+        .map(Kind::from_wire)
+    else {
         return false;
     };
     let Some(body) = raw.get(key::BODY) else {
-        return true;
+        return !matches!(kind, Kind::Block | Kind::Looper);
     };
-    let body = match Kind::from_wire(kind) {
+    let body = match kind {
         Kind::Split => body.get(key::SPLIT_BODY).unwrap_or(body),
         Kind::Join => body.get(key::JOIN_BODY).unwrap_or(body),
         _ => body,
     };
-    if matches!(Kind::from_wire(kind), Kind::Block | Kind::Looper) && model_number(body).is_none() {
+    if matches!(kind, Kind::Block | Kind::Looper) && model_number(body).is_none() {
         return false;
     }
     if body
@@ -2740,6 +2744,22 @@ mod tests {
             .and_then(|slot| slot.at_mut(&[key::BODY, key::MODEL_REF, key::MODEL]))
             .unwrap() = Value::Int(-1);
         assert!(Preset::parse(&missing_model.encode()).is_none());
+
+        let mut missing_block_body = Preset::parse(&sample()).unwrap();
+        let Value::Map(fields) = missing_block_body
+            .tone
+            .at_mut(&[key::PATH, key::SLOTS])
+            .and_then(|slots| match slots {
+                Value::Array(slots) => slots.first_mut(),
+                _ => None,
+            })
+            .unwrap()
+        else {
+            panic!("slot map");
+        };
+        fields
+            .retain(|(field, _)| !matches!(field, crate::msgpack::Key::Int(k) if *k == key::BODY));
+        assert!(Preset::parse(&missing_block_body.encode()).is_none());
 
         let mut malformed_enabled = Preset::parse(&sample()).unwrap();
         *malformed_enabled
