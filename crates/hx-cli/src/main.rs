@@ -1063,6 +1063,14 @@ fn save_preset(
 }
 
 /// Show one device setting, or survey the whole namespace.
+fn optional_device_value<T>(result: hx_usb::Result<T>) -> hx_usb::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(hx_usb::Error::Device(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn show_setting(session: &mut hx_usb::Session, id: Option<i64>) -> Result<()> {
     match id {
         Some(id) => {
@@ -1072,7 +1080,7 @@ fn show_setting(session: &mut hx_usb::Session, id: Option<i64>) -> Result<()> {
             // The namespace is flat and undocumented, so the useful thing is
             // to show what answers rather than pretend to name it.
             for id in 0..256 {
-                if let Ok(v) = session.object(id) {
+                if let Some(v) = optional_device_value(session.object(id))? {
                     if v != hx_proto::msgpack::Value::Nil {
                         println!("{id:>4}: {v:?}");
                     }
@@ -2076,5 +2084,18 @@ mod tests {
 
         assert!(parse_setting_value(7, &Value::Str("old".into()), "new").is_err());
         assert!(parse_setting_value(7, &Value::F64(0.0), "NaN").is_err());
+    }
+
+    #[test]
+    fn setting_surveys_skip_only_device_refusals() {
+        assert_eq!(optional_device_value(Ok(7)).unwrap(), Some(7));
+        assert_eq!(
+            optional_device_value::<()>(Err(hx_usb::Error::Device(-3))).unwrap(),
+            None
+        );
+        assert!(matches!(
+            optional_device_value::<()>(Err(hx_usb::Error::Timeout(11))),
+            Err(hx_usb::Error::Timeout(11))
+        ));
     }
 }
