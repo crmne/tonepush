@@ -80,6 +80,16 @@ impl Error {
     }
 }
 
+/// A complete refusal keeps the request stream aligned and may be retried;
+/// silence or malformed transport does not.
+fn retry_device_refusal<T>(result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(Error::Device(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// A device found on the bus.
 #[derive(Debug, Clone)]
 pub struct Found {
@@ -687,11 +697,15 @@ impl Session {
         // an answer as proof. Only silence here is a real failure.
         let deadline = Instant::now() + Self::READY_BUDGET;
         while Instant::now() < deadline {
-            if self
-                .request_raw(id, rpc::op::PRESET_INFO, Value::Nil)
-                .is_ok()
-            {
-                return Ok(());
+            match retry_device_refusal(self.request_raw(id, rpc::op::PRESET_INFO, Value::Nil)) {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    self.poisoned = Some(format!(
+                        "the session was lost while checking deferred transaction {txn}: {error}"
+                    ));
+                    return Err(error);
+                }
             }
             std::thread::sleep(Duration::from_millis(200));
         }
@@ -1264,6 +1278,23 @@ mod tests {
         assert!(Error::Usb("read timed out".into()).loses_session());
         assert!(Error::NotFound.loses_session());
         assert!(Error::Claim("busy".into()).loses_session());
+    }
+
+    #[test]
+    fn only_device_refusals_are_retryable() {
+        assert_eq!(retry_device_refusal(Ok(7)).unwrap(), Some(7));
+        assert_eq!(
+            retry_device_refusal::<()>(Err(Error::Device(-3))).unwrap(),
+            None
+        );
+        assert!(matches!(
+            retry_device_refusal::<()>(Err(Error::Timeout(7))),
+            Err(Error::Timeout(7))
+        ));
+        assert!(matches!(
+            retry_device_refusal::<()>(Err(Error::Protocol("bad reply".into()))),
+            Err(Error::Protocol(_))
+        ));
     }
 
     /// The control channel opens two services in turn and talks on the second;
