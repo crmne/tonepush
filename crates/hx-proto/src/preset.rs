@@ -1224,6 +1224,9 @@ impl Preset {
     /// is for, and copying settings from one part to another should not
     /// relabel where you are.
     pub fn paste_snapshot(&mut self, index: usize, snapshot: &Value) -> bool {
+        if !snapshot_is_well_formed(snapshot, self.slots.len()) {
+            return false;
+        }
         let name = self.snapshots().get(index).cloned().unwrap_or_default();
         let Some(Value::Array(entries)) =
             self.tone.at_mut(&[key::SNAPSHOT_SECTION, key::SNAPSHOTS])
@@ -1319,31 +1322,35 @@ fn snapshots_are_well_formed(tone: &Value, slot_count: usize) -> bool {
     let Some(Value::Array(entries)) = section.get(key::SNAPSHOTS) else {
         return false;
     };
-    entries.iter().all(|entry| {
-        if !matches!(entry, Value::Map(_)) {
-            return false;
+    entries
+        .iter()
+        .all(|entry| snapshot_is_well_formed(entry, slot_count))
+}
+
+fn snapshot_is_well_formed(entry: &Value, slot_count: usize) -> bool {
+    if !matches!(entry, Value::Map(_)) {
+        return false;
+    }
+    let valid_name = entry
+        .get(key::SNAPSHOT_NAME)
+        .and_then(Value::as_str)
+        .is_some_and(|name| !name.is_empty());
+    let valid_tempo = entry
+        .get(key::SNAPSHOT_TEMPO)
+        .is_some_and(tempo_is_well_formed);
+    let valid_flags = [key::SNAPSHOT_VALID, key::SNAPSHOT_NAMED]
+        .into_iter()
+        .all(|field| matches!(entry.get(field), Some(Value::Bool(_))));
+    let valid_slots = match entry.get(key::SNAPSHOT_SLOTS) {
+        Some(Value::Array(slots)) if slots.len() == slot_count => {
+            slots.iter().all(|slot| match slot {
+                Value::Array(pair) => matches!(pair.get(1), Some(Value::Bool(_))),
+                _ => false,
+            })
         }
-        let valid_name = entry
-            .get(key::SNAPSHOT_NAME)
-            .and_then(Value::as_str)
-            .is_some_and(|name| !name.is_empty());
-        let valid_tempo = entry
-            .get(key::SNAPSHOT_TEMPO)
-            .is_some_and(tempo_is_well_formed);
-        let valid_flags = [key::SNAPSHOT_VALID, key::SNAPSHOT_NAMED]
-            .into_iter()
-            .all(|field| matches!(entry.get(field), Some(Value::Bool(_))));
-        let valid_slots = match entry.get(key::SNAPSHOT_SLOTS) {
-            Some(Value::Array(slots)) if slots.len() == slot_count => {
-                slots.iter().all(|slot| match slot {
-                    Value::Array(pair) => matches!(pair.get(1), Some(Value::Bool(_))),
-                    _ => false,
-                })
-            }
-            _ => false,
-        };
-        valid_name && valid_tempo && valid_flags && valid_slots
-    })
+        _ => false,
+    };
+    valid_name && valid_tempo && valid_flags && valid_slots
 }
 
 fn tempo_is_well_formed(value: &Value) -> bool {
@@ -2547,6 +2554,20 @@ mod tests {
         // where you are in the song rather than what the settings are.
         assert_eq!(preset.snapshots()[1], "Chorus");
         assert_eq!(preset.snapshots()[0], "Verse");
+    }
+
+    #[test]
+    fn a_snapshot_with_the_wrong_slot_count_cannot_be_pasted() {
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+        let mut snapshot = preset.copy_snapshot(0).unwrap();
+        let Some(Value::Array(slots)) = snapshot.get_mut(key::SNAPSHOT_SLOTS) else {
+            panic!("snapshot slots");
+        };
+        slots.pop();
+        let before = preset.copy_snapshot(1).unwrap();
+
+        assert!(!preset.paste_snapshot(1, &snapshot));
+        assert_eq!(preset.copy_snapshot(1), Some(before));
     }
 
     #[test]
