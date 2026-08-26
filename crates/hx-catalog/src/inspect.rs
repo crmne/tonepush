@@ -251,8 +251,23 @@ fn read_block(
         // conversion; a switch is written as a bool and folds to 0.0/1.0.
         let native = match value {
             Value::Bool(b) => *b as u8 as f32,
-            Value::Number(n) => n.as_f64().unwrap_or(0.0) as f32,
-            _ => continue,
+            Value::Number(n) => match n.as_f64() {
+                Some(number) => number as f32,
+                None => {
+                    skipped.push(format!(
+                        "{model_name}: {} is not a finite number",
+                        param.name
+                    ));
+                    continue;
+                }
+            },
+            _ => {
+                skipped.push(format!(
+                    "{model_name}: {} is not a numeric parameter value",
+                    param.name
+                ));
+                continue;
+            }
         };
         if !param.accepts(native) {
             skipped.push(format!(
@@ -367,6 +382,26 @@ mod tests {
             .skipped
             .iter()
             .any(|why| why.contains("block0") && why.contains("@model")));
+    }
+
+    #[test]
+    fn reports_a_nonnumeric_parameter_value() {
+        let Some(catalog) = catalog() else { return };
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": {
+                    "@model": "HD2_DistScream808Mono",
+                    "Gain": "loud"
+                }
+            }}}
+        });
+
+        let tone = inspect(&json, &catalog);
+        assert!(tone
+            .skipped
+            .iter()
+            .any(|why| why.contains("Gain") && why.contains("not a numeric")));
+        assert!(!tone.blocks[0].params.iter().any(|(name, _)| name == "Gain"));
     }
 
     #[test]
