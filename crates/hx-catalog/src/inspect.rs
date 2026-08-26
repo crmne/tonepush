@@ -211,10 +211,18 @@ fn read_block(
         skipped.push(format!("dsp{path}/block{position}: no valid @model"));
         return;
     };
-    let stereo = block
-        .get("@stereo")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let stereo = match block.get("@stereo") {
+        None => false,
+        Some(value) => match value.as_bool() {
+            Some(stereo) => stereo,
+            None => {
+                skipped.push(format!(
+                    "dsp{path}/block{position}: @stereo is not a boolean value"
+                ));
+                return;
+            }
+        },
+    };
 
     let Some(number) = resolve(catalog, symbol, stereo) else {
         skipped.push(format!("dsp{path}/block{position}: unknown model {symbol}"));
@@ -430,6 +438,26 @@ mod tests {
             .skipped
             .iter()
             .any(|why| why.contains("@enabled") && why.contains("not a boolean")));
+    }
+
+    #[test]
+    fn reports_a_malformed_stereo_flag() {
+        let Some(catalog) = catalog() else { return };
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": {
+                    "@model": "HD2_DistScream808",
+                    "@stereo": "wide"
+                }
+            }}}
+        });
+
+        let tone = inspect(&json, &catalog);
+        assert!(tone.blocks.is_empty());
+        assert!(tone
+            .skipped
+            .iter()
+            .any(|why| why.contains("@stereo") && why.contains("not a boolean")));
     }
 
     #[test]
