@@ -90,6 +90,13 @@ fn retry_device_refusal<T>(result: Result<T>) -> Result<Option<T>> {
     }
 }
 
+fn refusal_code(result: &Value) -> Result<i64> {
+    result
+        .get(rpc::key::ERROR_CODE)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| Error::Protocol("device refusal has no valid error code".into()))
+}
+
 fn preset_matches(info: &(i64, i64, String), setlist: i64, index: i64) -> bool {
     info.0 == setlist && info.1 == index
 }
@@ -831,11 +838,7 @@ impl Session {
                         // Edit's own traffic shows is 0 or 1; the refusals only
                         // appeared once we sent deliberately bad requests.
                         if status == 255 {
-                            let code = result
-                                .get(rpc::key::ERROR_CODE)
-                                .and_then(Value::as_i64)
-                                .unwrap_or(0);
-                            return Err(Error::Device(code));
+                            return Err(Error::Device(refusal_code(&result)?));
                         }
                         return Ok((txn, status, result));
                     }
@@ -1318,6 +1321,22 @@ mod tests {
             retry_device_refusal::<()>(Err(Error::Protocol("bad reply".into()))),
             Err(Error::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn refusals_require_an_integer_error_code() {
+        let refusal = hx_proto::msgmap! {
+            rpc::key::ERROR_CODE => Value::Int(-302),
+        };
+        assert_eq!(refusal_code(&refusal).unwrap(), -302);
+
+        let missing = Value::Map(Vec::new());
+        assert!(matches!(refusal_code(&missing), Err(Error::Protocol(_))));
+
+        let wrong_type = hx_proto::msgmap! {
+            rpc::key::ERROR_CODE => Value::Str("bad reference".into()),
+        };
+        assert!(matches!(refusal_code(&wrong_type), Err(Error::Protocol(_))));
     }
 
     #[test]
