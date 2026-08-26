@@ -1431,6 +1431,9 @@ fn slot_is_well_formed(raw: &Value) -> bool {
     let Some(body) = raw.get(key::BODY) else {
         return !matches!(kind, Kind::Block | Kind::Looper);
     };
+    if !matches!(kind, Kind::Unknown(_)) && !matches!(body, Value::Map(_) | Value::Nil) {
+        return false;
+    }
     let body = match kind {
         Kind::Split => body.get(key::SPLIT_BODY).unwrap_or(body),
         Kind::Join => body.get(key::JOIN_BODY).unwrap_or(body),
@@ -2739,6 +2742,22 @@ mod tests {
             .and_then(|slot| slot.at_mut(&[key::BODY, key::VALUES, key::ARRAY_VALUES]))
             .unwrap() = Value::Array(vec![Value::Str("not a parameter".into())]);
         assert!(Preset::parse(&malformed_values.encode()).is_none());
+
+        let mut malformed_empty_body = Preset::parse(FIXTURE).unwrap();
+        let empty = malformed_empty_body
+            .slots
+            .iter()
+            .position(|slot| slot.kind == Kind::Empty)
+            .unwrap();
+        let Value::Array(slots) = malformed_empty_body
+            .tone
+            .at_mut(&[key::PATH, key::SLOTS])
+            .unwrap()
+        else {
+            panic!("slot array");
+        };
+        *slots[empty].get_mut(key::BODY).unwrap() = Value::Bool(false);
+        assert!(Preset::parse(&malformed_empty_body.encode()).is_none());
 
         let mut stale_value_count = Preset::parse(&sample()).unwrap();
         *stale_value_count
