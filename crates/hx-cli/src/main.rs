@@ -1485,7 +1485,7 @@ fn show_chain(session: &mut hx_usb::Session) -> Result<()> {
     let preset = session.read_preset()?;
     let catalog = hx_catalog::Catalog::load().ok();
 
-    if let Ok((_, index, name)) = session.preset_info() {
+    if let Some((_, index, name)) = optional_device_value(session.preset_info())? {
         print!("{} {}", hx_proto::rpc::slot_label(index), name);
     }
     if let Some(tempo) = preset.tempo() {
