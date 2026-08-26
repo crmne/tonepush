@@ -567,7 +567,7 @@ impl CloudClient {
         // does not embed their Tones. Expand it in a few bounded lanes rather
         // than making discovery wait on dozens of serial round trips.
         let lane_size = songs.len().div_ceil(8).max(1);
-        let fetched = std::thread::scope(|scope| {
+        let fetched = std::thread::scope(|scope| -> Result<Vec<_>, String> {
             let handles: Vec<_> = songs
                 .chunks(lane_size)
                 .map(|lane| {
@@ -579,11 +579,16 @@ impl CloudClient {
                     })
                 })
                 .collect();
-            handles
-                .into_iter()
-                .flat_map(|handle| handle.join().unwrap_or_default())
-                .collect::<Vec<_>>()
-        });
+            let mut fetched = Vec::new();
+            for handle in handles {
+                fetched.extend(
+                    handle
+                        .join()
+                        .map_err(|_| "the Song catalog search stopped".to_owned())?,
+                );
+            }
+            Ok(fetched)
+        })?;
         let mut found = Vec::new();
         let mut first_error = None;
         for details in fetched {
