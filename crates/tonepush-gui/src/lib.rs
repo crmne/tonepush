@@ -1842,11 +1842,7 @@ impl App {
             // than minutes now, but silence for seconds still reads as
             // a window that has stopped answering.
             if let Some((what, progress)) = self.working.clone() {
-                ui.add(
-                    egui::ProgressBar::new(progress)
-                        .desired_width(120.0)
-                        .text(RichText::new(what).small()),
-                );
+                processor::operation_progress(ui, &what, progress);
             }
 
             // Laid out right to left, so what is added first sits
@@ -2193,11 +2189,8 @@ impl App {
     /// mistaken for one that touches all 126.
     fn backup_actions(&mut self, ui: &mut egui::Ui) {
         let live = matches!(self.connection, Connection::Online);
-        if ui
-            .add_enabled(live, egui::Button::new("Back up pedal…"))
-            .on_hover_text("save every preset, setting and impulse response")
-            .clicked()
-        {
+        let actions = processor::backup_section(ui, live, live);
+        if actions.backup {
             if let Some(dir) = rfd::FileDialog::new()
                 .set_title("Where to put the backup")
                 .set_file_name(format!("{}.hxbundle", sanitise(&self.device)))
@@ -2207,11 +2200,7 @@ impl App {
                 self.send(Cmd::BackUp(dir));
             }
         }
-        if ui
-            .add_enabled(live, egui::Button::new("Restore pedal…"))
-            .on_hover_text("replace the pedal with a complete backup")
-            .clicked()
-        {
+        if actions.restore {
             if let Some(dir) = rfd::FileDialog::new()
                 .set_title("Choose a backup to restore")
                 .pick_folder()
@@ -3860,6 +3849,7 @@ impl App {
                 self.cloud_sort.1,
             ),
             sticky: 3.min(shown.len()),
+            column_choices: self.column_choices(),
             nothing_yet: if self.cloud_searching.is_some() {
                 "Searching TonePush…"
             } else {
@@ -3939,6 +3929,7 @@ impl App {
         let rows: Vec<usize> = order.iter().map(|&row| source_rows[row]).collect();
 
         let did = table::show(ui, "cloud-library", &mut grid);
+        self.apply_column_visibility(did.column_visibility);
         // The feed stops after page one. Only approaching the end of the rows
         // already painted asks TonePush for another page; leaving this tab does
         // not cancel that request, and returning does not restart the feed.
@@ -4128,7 +4119,7 @@ impl App {
     /// search fixed to the true centre, actions on the right. These are three
     /// child UIs over one row so a growing window adds space around search
     /// instead of dragging it away from the centre.
-    fn library_header(&mut self, ui: &mut egui::Ui, capture: &mut bool) {
+    fn library_header(&mut self, ui: &mut egui::Ui) {
         let available = ui.available_rect_before_wrap();
         let row = egui::Rect::from_min_size(
             available.min,
@@ -4207,41 +4198,24 @@ impl App {
                 .max_rect(right_rect)
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
             |ui| {
-                let live = self.pedal_online();
-                match self.lib_showing {
-                    // Keeping a preset lives on the preset list now, beside
-                    // the star: it is a thing you do to a preset, not a thing
-                    // the library does. What remains belongs to the table.
-                    LibraryView::Tones => {
-                        self.column_menu(ui);
-                        self.account_control(ui);
+                // Refresh is the Cloud view's one extra action. Pedal scope
+                // and account identity stay put as the view changes.
+                if self.lib_showing == LibraryView::Cloud {
+                    if self.cloud_searching.is_some() || self.cloud_download.is_some() {
+                        theme::spinner(ui);
                     }
-                    LibraryView::Setlists => {
-                        if ui
-                            .add_enabled(live, egui::Button::new("Capture the pedal"))
-                            .on_hover_text("keep every preset on the pedal, in order, as a setlist")
-                            .clicked()
-                        {
-                            *capture = true;
-                        }
+                    if self.auditioning.is_some() && ui.button("Done auditioning").clicked() {
+                        self.end_audition();
                     }
-                    LibraryView::Cloud => {
-                        self.column_menu(ui);
-                        if ui
-                            .button("Refresh")
-                            .on_hover_text("fetch this search and order from TonePush again")
-                            .clicked()
-                        {
-                            self.refresh_cloud();
-                        }
-                        if self.auditioning.is_some() && ui.button("Done auditioning").clicked() {
-                            self.end_audition();
-                        }
-                        if self.cloud_searching.is_some() || self.cloud_download.is_some() {
-                            theme::spinner(ui);
-                        }
+                    if ui
+                        .button("Refresh")
+                        .on_hover_text("fetch this search and order from TonePush again")
+                        .clicked()
+                    {
+                        self.refresh_cloud();
                     }
                 }
+                self.account_control(ui);
                 let selected = self
                     .library_device_filter
                     .as_deref()
@@ -4293,14 +4267,13 @@ impl App {
     /// does not close.
     fn library_strip(&mut self, root_ui: &mut egui::Ui) {
         let ctx = root_ui.ctx().clone();
-        let mut capture = false;
         egui::Panel::bottom("library")
             .resizable(true)
             .default_size(260.0)
             .size_range(96.0..=680.0)
             .show(root_ui, |ui| {
                 ui.add_space(4.0);
-                self.library_header(ui, &mut capture);
+                self.library_header(ui);
                 ui.separator();
                 match self.lib_showing {
                     // Local and public Tones are the same screen shape: a
@@ -4377,14 +4350,6 @@ impl App {
                     }
                 }
             });
-        if capture {
-            self.note("reading the whole setlist off the pedal".to_owned());
-            if self.pro_active() {
-                self.pro.capture_setlist();
-            } else {
-                self.send(Cmd::CaptureSetlist);
-            }
-        }
         self.confirm_push_window(&ctx);
         self.confirm_delete_window(&ctx);
         self.name_clash_window(&ctx);
@@ -4938,6 +4903,7 @@ impl App {
             // sideways: a row whose name has gone off the left edge is a row you
             // cannot act on.
             sticky: 3.min(shown.len()),
+            column_choices: self.column_choices(),
             menu: vec![if self.lib_chosen.len() > 1 {
                 format!("Delete {} tones", self.lib_chosen.len())
             } else {
@@ -4995,6 +4961,7 @@ impl App {
         let rows: Vec<usize> = order.iter().map(|&row| rows[row]).collect();
 
         let did = table::show(ui, "library", &mut grid);
+        self.apply_column_visibility(did.column_visibility);
         self.lib_draft_edit(&grid, &did, &rows, &shown);
 
         if let Some(col) = did.sort {
@@ -5487,25 +5454,42 @@ impl App {
         }
     }
 
-    /// The menu that turns columns on and off.
-    fn column_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button(RichText::new("COLUMNS").small(), |ui| {
-            for column in LibColumn::ALL {
-                if column.always()
-                    || (self.lib_showing != LibraryView::Cloud && column == LibColumn::Downloads)
-                {
-                    continue;
-                }
-                let mut on = !self.lib_hidden.contains(&column);
-                if ui.checkbox(&mut on, column.title()).changed() {
-                    if on {
-                        self.lib_hidden.remove(&column);
-                    } else {
-                        self.lib_hidden.insert(column);
-                    }
-                }
-            }
-        });
+    /// The choices every tone-table header offers on right-click. Push and
+    /// Name are structural, and Downloads only exists in the Cloud view.
+    fn column_choices(&self) -> Vec<(usize, String, bool)> {
+        LibColumn::ALL
+            .into_iter()
+            .enumerate()
+            .filter(|(_, column)| {
+                !column.always()
+                    && (self.lib_showing == LibraryView::Cloud || *column != LibColumn::Downloads)
+            })
+            .map(|(key, column)| {
+                (
+                    key,
+                    column.title().to_owned(),
+                    !self.lib_hidden.contains(&column),
+                )
+            })
+            .collect()
+    }
+
+    fn apply_column_visibility(&mut self, changed: Option<(usize, bool)>) {
+        let Some((key, visible)) = changed else {
+            return;
+        };
+        let Some(column) = LibColumn::ALL
+            .get(key)
+            .copied()
+            .filter(|column| !column.always())
+        else {
+            return;
+        };
+        if visible {
+            self.lib_hidden.remove(&column);
+        } else {
+            self.lib_hidden.insert(column);
+        }
     }
 
     /// What a click on a row means, with and without modifiers.
@@ -6052,9 +6036,7 @@ impl App {
                     .id_salt("device")
                     .show(ui, |ui| {
                         ui.add_space(8.0);
-                        ui.label(RichText::new("BACK UP & RESTORE").small().color(theme::DIM));
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| self.backup_actions(ui));
+                        self.backup_actions(ui);
 
                         theme::section_break(ui);
 

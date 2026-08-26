@@ -208,7 +208,6 @@ enum Evt {
 enum Tab {
     Library(Library),
     Settings,
-    Backup,
 }
 
 struct Confirmation {
@@ -493,10 +492,6 @@ impl Panel {
 
     pub(crate) fn take_captured_setlists(&mut self) -> Vec<Vec<(String, Option<Vec<u8>>)>> {
         std::mem::take(&mut self.captured_setlists)
-    }
-
-    pub(crate) fn capture_setlist(&self) {
-        let _ = self.tx.send(Cmd::CaptureSetlist);
     }
 
     pub(crate) fn reconnect(&self) {
@@ -813,6 +808,9 @@ impl Panel {
             } else if ui.small_button("Reconnect").clicked() {
                 let _ = self.tx.send(Cmd::Connect);
             }
+            if let Some((what, progress)) = &self.working {
+                processor::operation_progress(ui, what, *progress);
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
                 crate::version_label_ui(ui, update_available);
@@ -831,14 +829,6 @@ impl Panel {
                 if !self.status.is_empty() {
                     ui.separator();
                     ui.label(RichText::new(&self.status).small().color(theme::DIM));
-                }
-                if let Some((what, progress)) = &self.working {
-                    ui.separator();
-                    ui.add(
-                        egui::ProgressBar::new(*progress)
-                            .desired_width(150.0)
-                            .text(RichText::new(what).small()),
-                    );
                 }
             });
         });
@@ -1244,7 +1234,6 @@ impl Panel {
                             self.selected_group == *group,
                             block_enabled(snapshot, group),
                         )
-                        .on_hover_text(format!("root\\app\\{group}"))
                         .clicked()
                         {
                             self.selected_group = group.clone();
@@ -1275,11 +1264,10 @@ impl Panel {
             .unwrap_or(Value::Null);
         let choices = selector_choices(snapshot, &description);
         ui.add_space(8.0);
-        ui.heading(friendly_group(&self.selected_group));
-        ui.label(RichText::new("MODELS").small().color(theme::DIM));
+        ui.heading(format!("{} models", friendly_group(&self.selected_group)));
         ui.add(
             egui::TextEdit::singleline(&mut self.shelf_search)
-                .hint_text("Search")
+                .hint_text("Search models or slots")
                 .desired_width(f32::INFINITY),
         );
         let needle = self.shelf_search.trim().to_ascii_lowercase();
@@ -1382,6 +1370,9 @@ impl Panel {
                     ))
                     .color(theme::DIM),
                 );
+                ui.add_space(8.0);
+                self.backup_actions(ui, snapshot);
+                theme::section_break(ui);
                 ui.horizontal_wrapped(|ui| {
                     tab_button(ui, &mut self.tab, Tab::Library(Library::Irs), "IRs");
                     tab_button(ui, &mut self.tab, Tab::Library(Library::Amps), "NAM amps");
@@ -1392,13 +1383,11 @@ impl Panel {
                         "NAM drives",
                     );
                     tab_button(ui, &mut self.tab, Tab::Settings, "Settings");
-                    tab_button(ui, &mut self.tab, Tab::Backup, "Backup & restore");
                 });
                 ui.separator();
                 ui.add_enabled_ui(self.online && !self.busy, |ui| match self.tab {
                     Tab::Library(library) => self.library_ui(ui, snapshot, library),
                     Tab::Settings => self.nodes_ui(ui, snapshot, true, None),
-                    Tab::Backup => self.backup_ui(ui, snapshot),
                 });
             });
         self.show_device = open;
@@ -1864,34 +1853,32 @@ impl Panel {
     }
 
     fn slot_count_header(&self, ui: &mut egui::Ui, state: &LibraryState) {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("SLOTS").small().color(theme::DIM));
-            let occupied = state.info.occupied().count();
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "{occupied} installed · {} empty",
-                        state.info.count.saturating_sub(occupied)
-                    ))
-                    .small()
-                    .color(theme::DIM),
-                );
-            });
-        });
+        let occupied = state.info.occupied().count();
+        ui.label(
+            RichText::new(format!(
+                "{occupied} installed · {} empty",
+                state.info.count.saturating_sub(occupied)
+            ))
+            .small()
+            .color(theme::DIM),
+        );
     }
 
     fn slot_tools_ui(&mut self, ui: &mut egui::Ui, state: &LibraryState, index: usize) {
         let library = state.library;
         let occupied = state.info.names.get(index).and_then(Option::as_deref);
-        ui.add_space(3.0);
-        ui.label(
-            RichText::new(format!("SLOT {}", index + 1))
-                .small()
-                .color(theme::DIM),
-        );
         let Some(original) = occupied else {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Empty and ready for an import").color(theme::DIM));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(format!("Slot {}", index + 1))
+                            .small()
+                            .color(theme::DIM),
+                    );
+                });
+            });
+            ui.horizontal(|ui| {
                 if ui
                     .add_enabled(self.rollback.is_some(), egui::Button::new("Import here…"))
                     .on_disabled_hover_text("automatic backup must be ready first")
@@ -1911,14 +1898,32 @@ impl Panel {
             .cloned()
             .unwrap_or_else(|| original.to_owned());
         if editing_name {
-            if ui
-                .add(egui::TextEdit::singleline(&mut draft).hint_text("Slot name"))
-                .changed()
-            {
-                self.names.insert(key, draft.clone());
-            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::TextEdit::singleline(&mut draft).hint_text("Model name"))
+                    .changed()
+                {
+                    self.names.insert(key, draft.clone());
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(format!("Slot {}", index + 1))
+                            .small()
+                            .color(theme::DIM),
+                    );
+                });
+            });
         } else {
-            ui.label(RichText::new(original).strong());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(original).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(format!("Slot {}", index + 1))
+                            .small()
+                            .color(theme::DIM),
+                    );
+                });
+            });
         }
 
         let mut begin_rename = false;
@@ -2227,53 +2232,20 @@ impl Panel {
         }
     }
 
-    fn backup_ui(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
-        ui.heading("Backup & restore");
-        ui.label(
-            RichText::new(
-                "Bundles contain exact preset, stereo IR, NAM amp/drive bytes and safe device settings. They are private on disk and verified before use.",
-            )
-            .color(theme::DIM),
-        );
-        ui.add_space(12.0);
-        if ui.button("Capture complete backup…").clicked() {
-            if let Some(parent) = rfd::FileDialog::new().pick_folder() {
-                let stamp = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|time| time.as_secs())
-                    .unwrap_or_default();
-                let name = format!(
-                    "stompstation-pro-{}-{stamp}.vxbundle",
-                    snapshot.identity.version
-                );
-                let _ = self.tx.send(Cmd::Backup(parent.join(name)));
+    fn backup_actions(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
+        let available = self.online && !self.busy;
+        let actions =
+            processor::backup_section(ui, available, available && self.rollback.is_some());
+        if actions.backup {
+            if let Some(path) = rfd::FileDialog::new()
+                .set_title("Where to put the backup")
+                .set_file_name(format!("{}.vxbundle", sanitise(&snapshot.identity.name)))
+                .save_file()
+            {
+                let _ = self.tx.send(Cmd::Backup(path));
             }
         }
-        ui.add_space(8.0);
-        if ui.button("Load current rollback bundle…").clicked() {
-            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                let _ = self.tx.send(Cmd::UseRollback(path));
-            }
-        }
-        if let Some(path) = &self.rollback {
-            ui.label(RichText::new(path.display().to_string()).monospace());
-        } else {
-            ui.label(
-                RichText::new(
-                    "Live editing remains available. Save and other persistent controls unlock after a bundle is verified against the pedal's current names, boundary chunks, settings and firmware.",
-                )
-                .color(theme::DIM),
-            );
-        }
-        ui.add_space(16.0);
-        if ui
-            .add_enabled(
-                self.rollback.is_some(),
-                egui::Button::new("Restore a bundle…"),
-            )
-            .on_disabled_hover_text("load a current rollback bundle first")
-            .clicked()
-        {
+        if actions.restore {
             if let Some(path) = rfd::FileDialog::new().pick_folder() {
                 self.confirmation = Some(Confirmation {
                     question: format!(
@@ -2283,6 +2255,24 @@ impl Panel {
                     command: Cmd::Restore(path),
                 });
             }
+        }
+        if self.rollback.is_none() {
+            ui.add_space(5.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new("A current backup is required before persistent writes.")
+                        .small()
+                        .color(theme::DIM),
+                );
+                if ui
+                    .add_enabled(available, egui::Button::new("Use existing backup…"))
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        let _ = self.tx.send(Cmd::UseRollback(path));
+                    }
+                }
+            });
         }
     }
 

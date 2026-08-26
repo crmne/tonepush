@@ -176,6 +176,9 @@ pub struct Grid {
     /// menu can be drawn inside the cell where egui wants it without the table
     /// having to borrow the app that owns the actions.
     pub menu: Vec<String>,
+    /// Optional columns offered by right-clicking any column header. The
+    /// caller-provided key is returned unchanged when visibility is toggled.
+    pub column_choices: Vec<(usize, String, bool)>,
     /// Said before the optional cue icon when there are no rows. The headers
     /// still show, because an empty table should still say what it would hold.
     pub nothing_yet: &'static str,
@@ -246,6 +249,8 @@ pub struct Did {
     pub committed: bool,
     pub cancelled: bool,
     pub sort: Option<usize>,
+    /// A header context-menu choice: caller key and new visibility.
+    pub column_visibility: Option<(usize, bool)>,
     /// A right-click, and which item of the menu it ended on.
     pub context: Option<usize>,
     pub chose: Option<(usize, usize)>,
@@ -268,7 +273,7 @@ pub fn show(ui: &mut Ui, id: &str, grid: &mut Grid) -> Did {
         // Headers first, then the sentence under them: an empty table that
         // shows nothing at all looks broken, and one that shows only a sentence
         // does not say what it is for.
-        draw_headers(ui, grid);
+        let column_visibility = draw_headers(ui, grid);
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new(grid.nothing_yet).color(theme::DIM));
@@ -279,7 +284,10 @@ pub fn show(ui: &mut Ui, id: &str, grid: &mut Grid) -> Did {
                 }
             }
         });
-        return Did::default();
+        return Did {
+            column_visibility,
+            ..Default::default()
+        };
     }
 
     let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
@@ -363,7 +371,8 @@ fn row_height(grid: &Grid) -> f32 {
 }
 
 /// The header row on its own, for when there are no rows to hang it above.
-fn draw_headers(ui: &mut Ui, grid: &Grid) {
+fn draw_headers(ui: &mut Ui, grid: &Grid) -> Option<(usize, bool)> {
+    let mut changed = None;
     ui.horizontal(|ui| {
         for (i, column) in grid.columns.iter().enumerate() {
             let width = if column.fills {
@@ -371,8 +380,8 @@ fn draw_headers(ui: &mut Ui, grid: &Grid) {
             } else {
                 column.width
             };
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::hover());
+            let (rect, hit) =
+                ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
             if ui.is_rect_visible(rect) && !column.title.is_empty() {
                 ui.painter().text(
                     rect.left_center() + egui::vec2(PADDING, 0.0),
@@ -386,9 +395,36 @@ fn draw_headers(ui: &mut Ui, grid: &Grid) {
                     },
                 );
             }
+            if let Some(choice) = column_context_menu(&hit, &grid.column_choices) {
+                changed = Some(choice);
+            }
         }
     });
     ui.separator();
+    changed
+}
+
+/// The same visibility menu belongs to every header cell. Keeping it here
+/// also gives an empty table—whose headers are drawn without `egui_table`—the
+/// identical interaction.
+fn column_context_menu(
+    response: &egui::Response,
+    choices: &[(usize, String, bool)],
+) -> Option<(usize, bool)> {
+    if choices.is_empty() {
+        return None;
+    }
+    let mut changed = None;
+    response.context_menu(|ui| {
+        ui.label(RichText::new("Columns").small().color(theme::DIM));
+        for (key, title, shown) in choices {
+            let mut visible = *shown;
+            if ui.checkbox(&mut visible, title).changed() {
+                changed = Some((*key, visible));
+            }
+        }
+    });
+    changed
 }
 
 struct Delegate<'a> {
@@ -446,7 +482,16 @@ impl egui_table::TableDelegate for Delegate<'_> {
                 },
             );
         }
-        if hit.on_hover_text("sort by this column").clicked() {
+        let hover = if self.grid.column_choices.is_empty() {
+            "sort by this column"
+        } else {
+            "sort by this column · right-click to choose columns"
+        };
+        let hit = hit.on_hover_text(hover);
+        if let Some(choice) = column_context_menu(&hit, &self.grid.column_choices) {
+            self.did.column_visibility = Some(choice);
+        }
+        if hit.clicked() {
             self.did.sort = Some(index);
         }
     }

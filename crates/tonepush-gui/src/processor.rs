@@ -60,6 +60,48 @@ pub(crate) fn device_button(
         .on_hover_text(hover)
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BackupActions {
+    pub(crate) backup: bool,
+    pub(crate) restore: bool,
+}
+
+/// Whole-device backup lives at the top of every Device window with the same
+/// names, hierarchy, and progress location. Adapters decide only whether each
+/// operation is currently safe and what command the click starts.
+pub(crate) fn backup_section(
+    ui: &mut Ui,
+    backup_enabled: bool,
+    restore_enabled: bool,
+) -> BackupActions {
+    ui.label(
+        egui::RichText::new("BACK UP & RESTORE")
+            .small()
+            .color(theme::DIM),
+    );
+    ui.add_space(4.0);
+    let mut actions = BackupActions::default();
+    ui.horizontal(|ui| {
+        actions.backup = ui
+            .add_enabled(backup_enabled, egui::Button::new("Back up pedal…"))
+            .on_hover_text("save every preset, setting, and device library")
+            .clicked();
+        actions.restore = ui
+            .add_enabled(restore_enabled, egui::Button::new("Restore pedal…"))
+            .on_hover_text("replace the pedal with a complete backup")
+            .clicked();
+    });
+    actions
+}
+
+pub(crate) fn operation_progress(ui: &mut Ui, what: &str, progress: f32) {
+    ui.add(
+        egui::ProgressBar::new(progress.clamp(0.0, 1.0))
+            .desired_width(120.0)
+            .text(egui::RichText::new(what).small()),
+    );
+}
+
 /// A short wire for a fixed chain. HX chains reserve room between blocks for
 /// insertion targets; the PRO cannot insert or move processors.
 pub(crate) fn fixed_connector(ui: &mut Ui) {

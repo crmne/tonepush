@@ -353,7 +353,7 @@ pub fn block_button_tinted(
                 Vec2::new(76.0, 58.0),
             );
             let tint = if enabled {
-                Color32::WHITE
+                accent
             } else {
                 Color32::from_gray(110)
             };
@@ -456,7 +456,7 @@ pub fn fixed_block_button_tinted(
             ui,
             icon,
             if enabled {
-                Color32::WHITE
+                accent
             } else {
                 Color32::from_gray(110)
             },
