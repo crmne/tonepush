@@ -7,7 +7,8 @@ pub const FLAG_DATA: u8 = 0x18;
 /// Channel handshake, sent when a channel is first opened.
 pub const FLAG_HANDSHAKE: u8 = 0x28;
 
-/// One bulk transfer on endpoint `0x01`/`0x81`.
+/// One protocol frame carried by a bulk transfer on endpoint `0x01`/`0x81`.
+/// A device-to-host transfer may coalesce more than one of these.
 ///
 /// ```text
 /// 0..3  payload length, u24 LE (excluding this 8-byte header)
@@ -47,7 +48,7 @@ pub enum FrameError {
     TooShort(usize),
     /// The declared payload length does not fit the transfer.
     LengthMismatch { declared: usize, available: usize },
-    /// The transfer has bytes beyond the one padded frame it declares.
+    /// A single-frame input has bytes beyond the padded frame it declares.
     TransferLength { expected: usize, actual: usize },
     /// The on-wire length field has only 24 bits.
     PayloadTooLarge(usize),
@@ -66,7 +67,7 @@ impl fmt::Display for FrameError {
             ),
             FrameError::TransferLength { expected, actual } => write!(
                 f,
-                "one padded frame should occupy {expected} bytes, but the transfer has {actual}"
+                "one padded frame should occupy {expected} bytes, but the input has {actual}"
             ),
             FrameError::PayloadTooLarge(size) => {
                 write!(
@@ -96,7 +97,7 @@ impl Frame {
         }
     }
 
-    pub fn decode(buf: &[u8]) -> Result<Frame, FrameError> {
+    fn decode_prefix(buf: &[u8]) -> Result<(Frame, usize), FrameError> {
         if buf.len() < 8 {
             return Err(FrameError::TooShort(buf.len()));
         }
@@ -109,19 +110,45 @@ impl Frame {
         }
         let frame_end = 8 + len;
         let expected = pad4(frame_end);
-        if buf.len() != expected {
+        if buf.len() < expected {
             return Err(FrameError::TransferLength {
                 expected,
                 actual: buf.len(),
             });
         }
-        Ok(Frame {
-            flags: buf[3],
-            dst: u16::from_le_bytes([buf[4], buf[5]]),
-            src: u16::from_le_bytes([buf[6], buf[7]]),
-            payload: buf[8..frame_end].to_vec(),
-            padding: buf[frame_end..].to_vec(),
-        })
+        Ok((
+            Frame {
+                flags: buf[3],
+                dst: u16::from_le_bytes([buf[4], buf[5]]),
+                src: u16::from_le_bytes([buf[6], buf[7]]),
+                payload: buf[8..frame_end].to_vec(),
+                padding: buf[frame_end..expected].to_vec(),
+            },
+            expected,
+        ))
+    }
+
+    /// Decode exactly one frame, rejecting any bytes after it.
+    pub fn decode(buf: &[u8]) -> Result<Frame, FrameError> {
+        let (frame, consumed) = Self::decode_prefix(buf)?;
+        if consumed != buf.len() {
+            return Err(FrameError::TransferLength {
+                expected: consumed,
+                actual: buf.len(),
+            });
+        }
+        Ok(frame)
+    }
+
+    /// Decode every frame coalesced into one USB bulk transfer.
+    pub fn decode_transfer(mut buf: &[u8]) -> Result<Vec<Frame>, FrameError> {
+        let mut frames = Vec::new();
+        while !buf.is_empty() {
+            let (frame, consumed) = Self::decode_prefix(buf)?;
+            frames.push(frame);
+            buf = &buf[consumed..];
+        }
+        Ok(frames)
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
@@ -328,6 +355,21 @@ mod tests {
         let mut padded = PADDED.to_vec();
         *padded.last_mut().unwrap() = 1;
         assert_eq!(Frame::decode(&padded).unwrap().encode().unwrap(), padded);
+    }
+
+    #[test]
+    fn decodes_frames_coalesced_into_one_transfer() {
+        let mut transfer = HELLO.to_vec();
+        transfer.extend_from_slice(PADDED);
+
+        let frames = Frame::decode_transfer(&transfer).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].encode().unwrap(), HELLO);
+        assert_eq!(frames[1].encode().unwrap(), PADDED);
+
+        let mut trailing_junk = HELLO.to_vec();
+        trailing_junk.extend_from_slice(&[0; 4]);
+        assert!(Frame::decode_transfer(&trailing_junk).is_err());
     }
 
     #[test]

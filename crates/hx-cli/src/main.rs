@@ -1943,28 +1943,30 @@ fn decode_capture(path: &std::path::Path) -> Result<()> {
     let mut messages = 0usize;
 
     for block in parse_hexdumps(&text) {
-        let Ok(frame) = hx_proto::Frame::decode(&block) else {
+        let Ok(decoded) = hx_proto::Frame::decode_transfer(&block) else {
             continue;
         };
-        frames += 1;
-        let Some((hdr, rest)) = hx_proto::ChannelHeader::decode(&frame.payload) else {
-            continue;
-        };
-        if hdr.msg_type != hx_proto::frame::MSG_DATA || rest.len() < 8 {
-            continue;
-        }
-        let len = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]) as usize;
-        if rest.len() < 8 + len {
-            continue; // spans transfers; the live reader reassembles these
-        }
-        if let Ok(v) = hx_proto::msgpack::Decoder::new(&rest[8..8 + len]).value() {
-            messages += 1;
-            println!(
-                "{:#06x} -> {:#06x}  {:?}",
-                frame.src,
-                frame.dst,
-                hx_proto::Message::from_value(v)
-            );
+        for frame in decoded {
+            frames += 1;
+            let Some((hdr, rest)) = hx_proto::ChannelHeader::decode(&frame.payload) else {
+                continue;
+            };
+            if hdr.msg_type != hx_proto::frame::MSG_DATA || rest.len() < 8 {
+                continue;
+            }
+            let len = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]) as usize;
+            if rest.len() < 8 + len {
+                continue; // spans transfers; the live reader reassembles these
+            }
+            if let Ok(v) = hx_proto::msgpack::Decoder::new(&rest[8..8 + len]).value() {
+                messages += 1;
+                println!(
+                    "{:#06x} -> {:#06x}  {:?}",
+                    frame.src,
+                    frame.dst,
+                    hx_proto::Message::from_value(v)
+                );
+            }
         }
     }
     eprintln!("\n{frames} frames, {messages} single-transfer messages decoded");

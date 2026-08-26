@@ -556,7 +556,7 @@ impl Session {
         self.wire.send(&bytes)
     }
 
-    /// Read one frame and route its payload into the owning channel.
+    /// Read one USB transfer and route every frame it contains.
     fn read_once(&mut self, timeout: Duration) -> Result<Option<Frame>> {
         let data = self.wire.recv(timeout)?;
         if data.is_empty() {
@@ -565,9 +565,12 @@ impl Session {
         if debug() {
             eprintln!("RX {}", hex(&data));
         }
-        let frame = Frame::decode(&data).map_err(|e| Error::Protocol(e.to_string()))?;
-        self.route(&frame);
-        Ok(Some(frame))
+        let frames = Frame::decode_transfer(&data).map_err(|e| Error::Protocol(e.to_string()))?;
+        let first = frames.first().cloned();
+        for frame in &frames {
+            self.route(frame);
+        }
+        Ok(first)
     }
 
     /// Read when silence is expected, distinguishing an idle endpoint from an
