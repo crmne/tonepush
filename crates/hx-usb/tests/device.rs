@@ -301,6 +301,100 @@ fn reading_every_preset_is_quick() {
     assert_healthy(&mut s, "reading every preset");
 }
 
+/// The complete read-only surface, in the order the GUI opens it.
+///
+/// This is deliberately broader than the focused protocol tests. Real pedals
+/// carry valid shapes the recorded fixtures do not: occupied preset slots,
+/// absent settings, controller ranges and USB transfers can all differ. One
+/// sweep makes those differences fail here instead of one at a time in the UI.
+#[test]
+#[ignore = "needs an HX device"]
+fn live_read_only_surface_is_compatible() {
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let Some(mut s) = device() else { return };
+
+    // Worker::connect: current document, one known global, then the preset
+    // names. These finish before commands queued by the UI can run.
+    let preset = s.read_preset().expect("GUI startup: loaded preset");
+    let info = s.preset_info().expect("GUI startup: preset metadata");
+    assert!(matches!(
+        s.object(203).expect("GUI startup: Global EQ"),
+        hx_proto::msgpack::Value::Bool(_)
+    ));
+    let names = s.presets(0).expect("GUI startup: preset names");
+
+    // Evt::Connected queues these in this exact order. The backup is the wide
+    // scan: every stored preset, object id, and occupied impulse response.
+    let listed_irs = s.irs().expect("GUI startup: IR names");
+    let setlists = s.setlists().expect("GUI startup: setlist names");
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let scratch = Scratch(std::env::temp_dir().join(format!(
+        "tonepush-read-only-{}-{unique}",
+        std::process::id()
+    )));
+    std::fs::create_dir_all(&scratch.0).expect("creating scratch directory");
+    let bundle = scratch.0.join("pedal.hxbundle");
+    let manifest =
+        hx_usb::backup::capture(&mut s, &bundle, 0, |_| {}).expect("GUI startup: automatic backup");
+    assert_eq!(manifest.presets.len(), names.len());
+    assert_eq!(manifest.irs.len(), listed_irs.len());
+
+    // Presenting the loaded document queues the remaining startup read.
+    let switches = s.switches().expect("GUI startup: footswitches");
+
+    // The rest of the public read-only commands are reached from secondary
+    // panels and the CLI. Exercise every setlist and every loaded parameter,
+    // not just whichever factory fixture happened to be recorded.
+    for setlist in 0..setlists.len() as i64 {
+        let listed = s
+            .presets(setlist)
+            .unwrap_or_else(|e| panic!("preset names for setlist {setlist}: {e}"));
+        assert_eq!(listed.len(), usize::from(s.profile.presets));
+    }
+    let assignments: Vec<_> = preset
+        .blocks()
+        .flat_map(|(block, slot)| (0..slot.values.len()).map(move |param| (block, param)))
+        .collect();
+    for (block, param) in &assignments {
+        s.read_assignment(*block as i64, *param as i64)
+            .unwrap_or_else(|e| panic!("assignment for block {block}, parameter {param}: {e}"));
+    }
+    let favourites = s.favourites().expect("favourites");
+    s.tempo_is_external().expect("external tempo flag");
+    s.poll_notifications().expect("notifications");
+    s.keepalive().expect("keepalive");
+
+    eprintln!(
+        "read-only sweep: {:?}, {} presets, {} settings, {} IRs, {} switches, \
+         {} favourites, {} parameter assignments",
+        info.2,
+        manifest
+            .presets
+            .iter()
+            .filter(|name| !name.is_empty())
+            .count(),
+        manifest.globals,
+        manifest.irs.len(),
+        switches.len(),
+        favourites.len(),
+        assignments.len(),
+    );
+    assert_healthy(&mut s, "the read-only compatibility sweep");
+    assert_control_healthy(&mut s, "the read-only compatibility sweep");
+    drop(s);
+    assert_reconnectable("the read-only compatibility sweep");
+}
+
 /// The exact sequence that wedged the device: clicking through blocks quickly.
 ///
 /// Selecting a block used to move the device's own cursor, so every click was a
