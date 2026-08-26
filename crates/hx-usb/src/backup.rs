@@ -284,7 +284,9 @@ fn capture_into(
             // absent; carrying on would bless a partial capture as complete.
             Err(error) => return Err(error),
         };
-        globals.insert(id.to_string(), setting_json(id, &value)?);
+        if let Some(json) = setting_json(id, &value)? {
+            globals.insert(id.to_string(), json);
+        }
     }
     atomic_write(
         dir.join("globals.json"),
@@ -829,8 +831,11 @@ fn to_json(value: &Value) -> Option<serde_json::Value> {
     })
 }
 
-fn setting_json(id: i64, value: &Value) -> Result<serde_json::Value> {
-    to_json(value).ok_or_else(|| {
+fn setting_json(id: i64, value: &Value) -> Result<Option<serde_json::Value>> {
+    if matches!(value, Value::Nil) {
+        return Ok(None);
+    }
+    to_json(value).map(Some).ok_or_else(|| {
         Error::Protocol(format!(
             "device setting {id} returned an unsupported value {value:?}"
         ))
@@ -1224,8 +1229,11 @@ mod tests {
 
     #[test]
     fn unsupported_setting_shapes_cannot_be_silently_omitted() {
-        assert_eq!(setting_json(7, &Value::Bool(true)).unwrap(), true);
-        assert!(setting_json(7, &Value::Nil).is_err());
+        assert_eq!(
+            setting_json(7, &Value::Bool(true)).unwrap(),
+            Some(serde_json::Value::Bool(true))
+        );
+        assert_eq!(setting_json(7, &Value::Nil).unwrap(), None);
         assert!(setting_json(7, &Value::Array(Vec::new())).is_err());
         assert!(setting_json(7, &Value::Map(Vec::new())).is_err());
     }
