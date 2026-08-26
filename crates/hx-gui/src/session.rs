@@ -1266,14 +1266,8 @@ impl Worker {
 
     /// The loaded preset exactly as the device holds it.
     fn preset_bytes(&mut self) -> Option<Vec<u8>> {
-        let device = self.device.as_mut()?;
-        match device.read_preset() {
-            Ok(preset) => Some(preset.encode()),
-            Err(e) => {
-                self.send(Evt::Failed(format!("reading the preset: {e}")));
-                None
-            }
-        }
+        self.try_on_device(|device| device.read_preset())
+            .map(|preset| preset.encode())
     }
 
     /// Put the device on `dest` so a load lands there, not over the open
