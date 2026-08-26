@@ -1350,7 +1350,9 @@ fn snapshot_is_well_formed(entry: &Value, slot_count: usize) -> bool {
     let valid_slots = match entry.get(key::SNAPSHOT_SLOTS) {
         Some(Value::Array(slots)) if slots.len() == slot_count => {
             slots.iter().all(|slot| match slot {
-                Value::Array(pair) => matches!(pair.get(1), Some(Value::Bool(_))),
+                Value::Array(pair) => {
+                    pair.len() == 2 && matches!(pair.get(1), Some(Value::Bool(_)))
+                }
                 _ => false,
             })
         }
@@ -2689,6 +2691,26 @@ mod tests {
         let mut short_states = valid;
         *short_states.get_mut(key::SNAPSHOT_SLOTS).unwrap() = Value::Array(Vec::new());
         assert!(Preset::parse(&document(short_states)).is_none());
+
+        let mut trailing_state = crate::msgmap! {
+            key::SNAPSHOT_VALID => Value::Bool(true),
+            key::SNAPSHOT_SLOTS => Value::Array(
+                (0..slot_count)
+                    .map(|_| Value::Array(vec![Value::Int(0), Value::Bool(true)]))
+                    .collect(),
+            ),
+            key::SNAPSHOT_NAME => Value::Str("Verse".into()),
+            key::SNAPSHOT_TEMPO => Value::F32(120.0),
+            key::SNAPSHOT_NAMED => Value::Bool(true),
+        };
+        let Value::Array(states) = trailing_state.get_mut(key::SNAPSHOT_SLOTS).unwrap() else {
+            panic!("snapshot states");
+        };
+        let Value::Array(first) = &mut states[0] else {
+            panic!("snapshot state pair");
+        };
+        first.push(Value::Nil);
+        assert!(Preset::parse(&document(trailing_state)).is_none());
     }
 
     #[test]
