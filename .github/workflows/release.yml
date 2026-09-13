@@ -94,9 +94,7 @@ jobs:
     name: macOS universal app
     runs-on: macos-latest
     env:
-      # Signing and notarization run only when the Apple credentials exist as
-      # repository secrets; without them the DMG ships unsigned and the
-      # download page explains the right-click dance.
+      # Complete Apple credentials enable native-packages signing/notarization.
       APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
       APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -130,61 +128,35 @@ jobs:
             target/x86_64-apple-darwin/release/tonepush-gui \
             -output universal/tonepush-gui
 
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+      - name: Install native packaging
+        run: gem install native-packages --version 0.5.0 --no-document
+
       - name: App bundle
         run: |
           version="${GITHUB_REF_NAME#v}"
-          bash packaging/macos/bundle.sh universal/tonepush-gui TonePush.app "$version"
+          mkdir -p dist/macos-input
+          bash packaging/macos/bundle.sh universal/tonepush-gui dist/macos-input/TonePush.app "$version"
+          cp README.md LICENSE dist/macos-input/
+          cp universal/tonepush dist/macos-input/
 
-      - name: Import signing certificate
-        if: env.APPLE_CERTIFICATE_P12 != ''
+      - name: Package, sign and notarize macOS app
         run: |
-          keychain="$RUNNER_TEMP/signing.keychain-db"
-          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security create-keychain -p ci "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p ci "$keychain"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
-            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -k ci "$keychain"
-          security list-keychains -d user -s "$keychain" login.keychain
+          native-packages --config native-packages.macos.yaml build \
+            --version "${GITHUB_REF_NAME#v}" --target macos-universal \
+            --output "$RUNNER_TEMP/macos-packages"
+          cp "$RUNNER_TEMP/macos-packages/packages/macos-universal/dmg/"*.dmg dist/
 
-      - name: Sign
-        if: env.APPLE_CERTIFICATE_P12 != ''
-        run: |
-          codesign --force --options runtime --timestamp \
-            --sign "$APPLE_SIGNING_IDENTITY" universal/tonepush
-          codesign --force --deep --options runtime --timestamp \
-            --sign "$APPLE_SIGNING_IDENTITY" TonePush.app
-
-      - name: DMG
+      - name: Sign and notarize universal portable binaries
         run: |
           name="tonepush-${GITHUB_REF_NAME}-macos-universal"
-          stage="$RUNNER_TEMP/dmg"
-          mkdir -p "$stage"
-          cp -R TonePush.app "$stage/"
-          cp universal/tonepush "$stage/tonepush"
-          cp README.md LICENSE "$stage/"
-          ln -s /Applications "$stage/Applications"
-          mkdir -p dist
-          hdiutil create -volname TonePush -srcfolder "$stage" -ov \
-            -format UDZO "dist/$name.dmg"
-
-      - name: Notarize
-        if: env.APPLE_CERTIFICATE_P12 != ''
-        run: |
-          name="tonepush-${GITHUB_REF_NAME}-macos-universal"
-          xcrun notarytool submit "dist/$name.dmg" --wait \
-            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_PASSWORD"
-          xcrun stapler staple "dist/$name.dmg"
-
-      - name: Universal tarball
-        run: |
-          name="tonepush-${GITHUB_REF_NAME}-macos-universal"
-          mkdir -p "dist/$name"
-          cp universal/tonepush universal/tonepush-gui README.md LICENSE "dist/$name/"
-          tar czf "dist/$name.tar.gz" -C dist "$name"
-          rm -r "dist/$name"
+          mkdir -p "$RUNNER_TEMP/portable-input"
+          cp universal/tonepush universal/tonepush-gui README.md LICENSE "$RUNNER_TEMP/portable-input/"
+          native-packages notarize-macos "$RUNNER_TEMP/portable-input" \
+            --output "$RUNNER_TEMP/signed-portable/$name"
+          tar czf "dist/$name.tar.gz" -C "$RUNNER_TEMP/signed-portable" "$name"
 
       - uses: actions/upload-artifact@v7
         with:

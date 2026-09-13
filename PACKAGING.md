@@ -6,7 +6,7 @@ DEB/RPM contents, dependencies, recipe templates and downstream repositories.
 Application assets and native recipes stay in `packaging/`.
 
 ```sh
-gem install native-packages --version 0.4.0
+gem install native-packages --version 0.5.0
 native-packages validate
 native-packages doctor
 native-packages build --release v1.2.3
@@ -42,14 +42,14 @@ AUR automation needs `PUBLISH_AUR=true`, `AUR_SSH_KEY` and `AUR_KNOWN_HOSTS`;
 Homebrew automation needs `PUBLISH_HOMEBREW=true` and
 `HOMEBREW_TAP_GITHUB_TOKEN`. Enable only configured destinations.
 
-The existing macOS, Windows and Flatpak build/signing steps remain responsible
+The native macOS configuration, Windows and Flatpak build steps remain responsible
 for their native artifacts. Additional nFPM formats require suitable platform
 inputs and dependencies; adding a format does not port the application.
-See the [shared CLI documentation](https://github.com/crmne/native-packages/tree/v0.4.0)
+See the [shared CLI documentation](https://github.com/crmne/native-packages/tree/v0.5.0)
 for commands and supported formats.
 
-To upgrade the tool, change `tool.version` in `native-packages.yaml`, the
-matching immutable workflow reference, and any release-job gem installation
+To upgrade the tool, change `tool.version` in both `native-packages.yaml` and
+`native-packages.macos.yaml`, the matching immutable workflow reference, and any release-job gem installation
 pin together. Applications need no packaging Gemfile, lockfile or Ruby wrapper.
 
 ## Upstream Release Assets
@@ -75,18 +75,6 @@ The Linux binary archives contain:
 - `packaging/applications/tonepush.desktop`
 - `packaging/icons/tonepush.svg`
 - `packaging/udev/70-line6-hx.rules`
-
-## macOS Signing and Notarization
-
-The macOS job signs and notarizes the DMG when these repository secrets
-exist; without them it ships the same DMG unsigned:
-
-- `APPLE_CERTIFICATE_P12`: a Developer ID Application certificate with its
-  key, exported as .p12 and base64-encoded
-- `APPLE_CERTIFICATE_PASSWORD`: the .p12 password
-- `APPLE_SIGNING_IDENTITY`: e.g. `Developer ID Application: Name (TEAMID)`
-- `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`: notarytool credentials;
-  the password is an app-specific password from appleid.apple.com
 
 ## Dependencies
 
@@ -193,3 +181,37 @@ With an HX device on USB and HX Edit closed, also verify:
 tonepush list
 tonepush chain
 ```
+
+## Automatic macOS notarization
+
+The macOS release job builds the app first, then uses
+`native-packages.macos.yaml` and `packaging/macos/dmg.rb` to package it.
+The shared gem signs its owned input copy, notarizes the DMG, staples and validates
+Apple's ticket, and only then records final checksums. Configure these repository
+secrets, which the job exposes as environment variables:
+
+- `APPLE_CERTIFICATE_P12`: base64 PKCS#12 Developer ID Application certificate and private key.
+- `APPLE_CERTIFICATE_PASSWORD`: the export password.
+- `APPLE_SIGNING_IDENTITY`: exact `Developer ID Application: Name (TEAMID)` identity.
+- `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`: Apple email, Team ID and app-specific password.
+
+A complete set enables notarization automatically. An incomplete set fails;
+no values retain local builds without Developer ID signing. Application inputs
+and the user's normal keychains remain unchanged. See the shared
+[Apple setup and phase contract](https://github.com/crmne/native-packages/blob/v0.5.0/docs/apple-notarization.md).
+
+After preparing `dist/macos-input` on a Mac, test packaging without publishing:
+
+```sh
+native-packages --config native-packages.macos.yaml build \
+  --version 1.2.3 --target macos-universal --output dist/macos-packages-test
+```
+
+Secret configuration applies to future builds. Existing published DMGs retain
+their original signatures; this setup does not replace release assets.
+
+The universal portable tarball also runs through `native-packages notarize-macos`
+before archiving. The shared command signs and submits the exact executable and
+dylib tree in a temporary ZIP; only its returned signed copy enters the tarball.
+Raw executables use Gatekeeper's online ticket lookup because they cannot carry
+a stapled ticket. Both the CLI and GUI binary remain in the portable archive.

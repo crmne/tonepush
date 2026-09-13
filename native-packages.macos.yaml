@@ -1,0 +1,24 @@
+# Build the complete app input in the native macOS release job first.
+schema: 1
+tool:
+  version: 0.5.0
+  nfpm: 2.47.0
+nfpm:
+  name: tonepush
+  maintainer: Carmine Paolino <carmine@paolino.me>
+  description: TonePush macOS application
+  license: MIT
+release:
+  repository: crmne/tonepush
+  prereleases: true
+targets:
+  macos-universal:
+    platform: macos
+    arch: universal
+    formats: [dmg]
+    input:
+      kind: directory
+      local: dist/macos-input
+    native:
+      command: [ruby, packaging/macos/dmg.rb, '@PAYLOAD@', '@PACKAGE@']
+      output: 'tonepush-@TAG@-macos-universal.dmg'
