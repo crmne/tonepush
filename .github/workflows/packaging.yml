@@ -1,0 +1,46 @@
+name: Packaging
+
+on:
+  push:
+    branches: [main, master]
+    paths: [native-packages.yaml, packaging/**, .github/workflows/packaging.yml, .github/workflows/release.yml]
+  pull_request:
+    paths: [native-packages.yaml, packaging/**, .github/workflows/packaging.yml, .github/workflows/release.yml]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published version (empty validates recipes only)
+        type: string
+        default: ''
+      publish:
+        description: Attach packages and run enabled downstream publishers
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      publish:
+        type: boolean
+        default: true
+    secrets:
+      AUR_SSH_KEY:
+        required: false
+      AUR_KNOWN_HOSTS:
+        required: false
+      HOMEBREW_TAP_GITHUB_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  packaging:
+    permissions:
+      contents: write
+    uses: crmne/native-packages/.github/workflows/package.yml@4ddc1447a1ac2b987cfc101d5b4859f622123c77 # v0.2.0
+    with:
+      version: ${{ inputs.version || '' }}
+      publish: ${{ inputs.publish == true && inputs.version != '' }}
+    secrets: inherit

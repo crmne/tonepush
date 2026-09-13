@@ -1,8 +1,56 @@
-# Packaging TonePush
+# Packaging
 
-This repository is the upstream source of truth for release artifacts and shared
-packaging assets. Distro-specific package recipes should usually live in the
-package repository for that distro, not in this repository.
+[`native-packages.yaml`](native-packages.yaml) is the packaging configuration:
+it pins the shared CLI and nFPM versions and declares Linux amd64/arm64 inputs,
+DEB/RPM contents, dependencies, recipe templates and downstream repositories.
+Application assets and native recipes stay in `packaging/`.
+
+```sh
+gem install native-packages --version 0.2.0
+native-packages validate
+native-packages doctor
+native-packages build --release v1.2.3
+```
+
+Replace `v1.2.3` with an existing stable application release. Local use also
+requires nFPM 2.47.0, `bsdtar` and `readelf`; AUR generation needs `makepkg`
+or Docker. CI installs its tooling. To package local release archives, put
+every configured input and recipe asset under `dist/`, then run
+`native-packages build --version 1.2.3`. Outputs go to
+`dist/packages/1.2.3`; use `--output` for a fresh destination when rebuilding.
+
+Stable tags run the existing native build jobs first. After binaries and
+`checksums.txt` are published, the shared workflow verifies their hashes,
+builds the configured packages, and attaches them to the GitHub release.
+Configured recipes are attached as an archive. Package checksums are separate
+from the original binary checksums. PR validation never publishes.
+
+Review or publish an existing build with the same installed CLI:
+
+```sh
+native-packages publish --from dist/packages/1.2.3 --to github
+native-packages repositories
+native-packages status --offline
+```
+
+For applications with configured AUR or Homebrew destinations, stage the
+recipes with `native-packages stage TARGET dist/packages/1.2.3/recipes`,
+inspect `native-packages diff TARGET`, run native package validation, and
+publish with `native-packages publish TARGET`. These destinations use ignored
+managed Git clones, recorded in this application's YAML configuration.
+AUR automation needs `PUBLISH_AUR=true`, `AUR_SSH_KEY` and `AUR_KNOWN_HOSTS`;
+Homebrew automation needs `PUBLISH_HOMEBREW=true` and
+`HOMEBREW_TAP_GITHUB_TOKEN`. Enable only configured destinations.
+
+The existing macOS, Windows and Flatpak build/signing steps remain responsible
+for their native artifacts. Additional nFPM formats require suitable platform
+inputs and dependencies; adding a format does not port the application.
+See the [shared CLI documentation](https://github.com/crmne/native-packages/tree/v0.2.0)
+for commands and supported formats.
+
+To upgrade the tool, change `tool.version` in `native-packages.yaml`, the
+matching immutable workflow reference, and any release-job gem installation
+pin together. Applications need no packaging Gemfile, lockfile or Ruby wrapper.
 
 ## Upstream Release Assets
 
@@ -109,21 +157,22 @@ your distro; tell the user to replug the device after installing.
 
 ## Package Status
 
-Current status as of 2026-08-06:
+Configured packaging destinations (publication is a separate step):
 
 | Channel | Status | Notes |
 |---|---|---|
-| Arch AUR | Prepared | Stable `tonepush` (release binaries) and VCS `tonepush-git` (source build) recipes are ready in the external packaging workspace. |
+| Arch AUR | Configured | `tonepush`, `tonepush-bin` and `tonepush-git` templates live in `packaging/arch/`. |
 | Fedora COPR | Not started | |
 | Nixpkgs | Not started | |
 | Gentoo GURU | Not started | |
 | Alpine aports | Not started | |
-| Debian and Ubuntu | Not started | |
+| Debian and Ubuntu | Configured | nFPM DEB files attached after stable release packaging succeeds. |
+| RPM downloads | Configured | nFPM RPM files attached after stable release packaging succeeds. |
 | openSUSE OBS | Not started | |
 
-Distro-specific recipes should remain in the distro package repository or the
-external packaging workspace until they are accepted upstream. Keep this
-repository limited to release assets and shared packaging files.
+Edit recipes in this repository, then stage the generated files into their
+downstream repositories. Upstream distribution acceptance remains separate from
+building downloadable packages.
 
 ## Smoke Tests
 

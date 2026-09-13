@@ -1,0 +1,144 @@
+# Shared CLI: gem install native-packages --version 0.2.0
+---
+schema: 1
+tool:
+  version: 0.2.0
+  nfpm: 2.47.0
+nfpm:
+  name: tonepush
+  maintainer: Carmine Paolino <carmine@paolino.me>
+  homepage: https://github.com/crmne/tonepush
+  description: Editor and tone library for Line 6 HX pedals and the StompStation PRO
+  license: MIT
+  contents:
+  - src: "@PAYLOAD@/tonepush-v@VERSION@-@TARGET@/tonepush"
+    dst: "/usr/bin/tonepush"
+    file_info:
+      mode: 493
+  - src: "@PAYLOAD@/tonepush-v@VERSION@-@TARGET@/tonepush-gui"
+    dst: "/usr/bin/tonepush-gui"
+    file_info:
+      mode: 493
+  - src: "@PAYLOAD@/tonepush-v@VERSION@-@TARGET@/LICENSE"
+    dst: "/usr/share/licenses/tonepush/LICENSE"
+    file_info:
+      mode: 420
+  - src: "@PAYLOAD@/tonepush-v@VERSION@-@TARGET@/README.md"
+    dst: "/usr/share/doc/tonepush/README.md"
+    file_info:
+      mode: 420
+  - src: "@PAYLOAD@/tonepush-v@VERSION@-@TARGET@/packaging/applications/tonepush.desktop"
+    dst: "/usr/share/applications/tonepush.desktop"
+    file_info:
+      mode: 420
+  - src: "@PAYLOAD@/tonepush-v@VERSION@-@TARGET@/packaging/icons/tonepush.svg"
+    dst: "/usr/share/icons/hicolor/scalable/apps/tonepush.svg"
+    file_info:
+      mode: 420
+  - src: "@PAYLOAD@/tonepush-v@VERSION@-@TARGET@/packaging/udev/70-line6-hx.rules"
+    dst: "/usr/lib/udev/rules.d/70-line6-hx.rules"
+    file_info:
+      mode: 420
+  overrides:
+    deb:
+      depends:
+      - libc6 (>= 2.39)
+      - libgl1
+      - libxkbcommon0
+      - libwayland-client0
+      - libx11-6
+      - libgcc-s1
+    rpm:
+      depends:
+      - glibc >= 2.39
+      - libglvnd-glx
+      - libxkbcommon
+      - wayland-libs
+      - libX11
+      - libgcc
+  rpm:
+    buildhost: github-actions
+targets:
+  linux-amd64:
+    platform: linux
+    arch: amd64
+    libc: glibc
+    compiler_target: x86_64-unknown-linux-gnu
+    formats:
+    - deb
+    - rpm
+    input:
+      local: dist/tonepush-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+      release_asset: tonepush-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+  linux-arm64:
+    platform: linux
+    arch: arm64
+    libc: glibc
+    compiler_target: aarch64-unknown-linux-gnu
+    formats:
+    - deb
+    - rpm
+    input:
+      local: dist/tonepush-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
+      release_asset: tonepush-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
+release:
+  repository: crmne/tonepush
+  checksums: checksums.txt
+assets:
+  AMD64:
+    file: tonepush-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+    local: dist/tonepush-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+  ARM64:
+    file: tonepush-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
+    local: dist/tonepush-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
+  SOURCE:
+    file: tonepush-@VERSION@.tar.gz
+    url: https://github.com/crmne/tonepush/archive/refs/tags/v@VERSION@.tar.gz
+    checksummed: false
+    local: dist/tonepush-@VERSION@.tar.gz
+templates:
+  arch/tonepush/PKGBUILD: packaging/arch/tonepush/PKGBUILD.in
+  arch/tonepush/tonepush.install: packaging/arch/tonepush.install
+  arch/tonepush-bin/PKGBUILD: packaging/arch/tonepush-bin/PKGBUILD.in
+  arch/tonepush-bin/tonepush-bin.install: packaging/arch/tonepush.install
+  arch/tonepush-git/PKGBUILD: packaging/arch/tonepush-git/PKGBUILD.in
+  arch/tonepush-git/tonepush-git.install: packaging/arch/tonepush.install
+repositories:
+  aur-source:
+    group: aur
+    url: https://aur.archlinux.org/tonepush.git
+    push_url: ssh://aur@aur.archlinux.org/tonepush.git
+    branch: master
+    package_path: "."
+    files:
+      arch/tonepush: "."
+    version_file: ".SRCINFO"
+    version_pattern: "^\\s*pkgver = (\\S+)"
+    publish: push
+  aur-bin:
+    group: aur
+    url: https://aur.archlinux.org/tonepush-bin.git
+    push_url: ssh://aur@aur.archlinux.org/tonepush-bin.git
+    branch: master
+    package_path: "."
+    files:
+      arch/tonepush-bin: "."
+    version_file: ".SRCINFO"
+    version_pattern: "^\\s*pkgver = (\\S+)"
+    publish: push
+  aur-git:
+    group: aur
+    url: https://aur.archlinux.org/tonepush-git.git
+    push_url: ssh://aur@aur.archlinux.org/tonepush-git.git
+    branch: master
+    package_path: "."
+    files:
+      arch/tonepush-git: "."
+    version_file: ".SRCINFO"
+    version_pattern: "^\\s*pkgver = (\\S+)"
+    publish: push
+revisions:
+  0.6.0:
+    arch/tonepush/PKGBUILD: 2
+version_file: Cargo.toml
+version_section: workspace.package

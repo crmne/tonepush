@@ -73,8 +73,7 @@ jobs:
           cp README.md LICENSE "dist/$name/"
           if [ "${{ runner.os }}" = "Linux" ]; then
             # Desktop integration for package builds and hand-installs.
-            cp -r packaging "dist/$name/"
-            rm -rf "dist/$name/packaging/macos"
+            cp --parents packaging/applications/tonepush.desktop packaging/icons/tonepush.svg packaging/udev/70-line6-hx.rules "dist/$name/"
           fi
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -398,3 +397,11 @@ jobs:
           files: dist/*
           generate_release_notes: true
           draft: false
+
+  packaging:
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    needs: release
+    uses: ./.github/workflows/packaging.yml
+    with:
+      version: ${{ github.ref_name }}
+    secrets: inherit
