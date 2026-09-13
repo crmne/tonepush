@@ -1,7 +1,7 @@
 # Build the complete app input in the native macOS release job first.
 schema: 1
 tool:
-  version: 0.5.0
+  version: 0.5.1
   nfpm: 2.47.0
 nfpm:
   name: tonepush

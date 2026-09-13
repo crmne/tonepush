@@ -39,7 +39,7 @@ jobs:
   packaging:
     permissions:
       contents: write
-    uses: crmne/native-packages/.github/workflows/package.yml@5776754efb4a7108dac2e1567b930afee259ad28 # v0.5.0
+    uses: crmne/native-packages/.github/workflows/package.yml@5caecbb702d6605cb48f83c380ea8b8196c9909e # v0.5.1
     with:
       version: ${{ inputs.version || '' }}
       publish: ${{ inputs.publish == true && inputs.version != '' }}

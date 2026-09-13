@@ -132,7 +132,7 @@ jobs:
         with:
           ruby-version: '4.0'
       - name: Install native packaging
-        run: gem install native-packages --version 0.5.0 --no-document
+        run: gem install native-packages --version 0.5.1 --no-document
 
       - name: App bundle
         run: |
