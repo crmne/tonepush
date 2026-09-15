@@ -499,18 +499,22 @@ fn main() -> Result<()> {
         Cmd::ExportHxb { bundle, output } => export_hxb(&bundle, &output),
         Cmd::IrInfo { file } => ir_info(&file),
         Cmd::List => list_devices(),
-        // Reject a malformed preset address before opening anything: failing
-        // after a five-second connect to say "that is not a preset" is rude.
-        Cmd::Select { ref index, .. } | Cmd::Rename { ref index, .. } if slot(index).is_err() => {
-            slot(index).map(|_| ())
+        // Reject addresses no supported device can understand before paying
+        // the connection delay. The attached profile validates it again.
+        Cmd::Select { ref index, .. } | Cmd::Rename { ref index, .. }
+            if !hx_proto::PROFILES
+                .iter()
+                .any(|profile| profile.parse_slot(index).is_some()) =>
+        {
+            bail!("{index:?} is not a preset; use a label like 03B or an index like 7")
         }
         cmd => on_device(cmd),
     }
 }
 
 /// Accept whichever form of preset address the user has to hand.
-fn slot(text: &str) -> Result<i64> {
-    hx_proto::rpc::parse_slot(text).with_context(|| {
+fn slot(profile: &hx_proto::DeviceProfile, text: &str) -> Result<i64> {
+    profile.parse_slot(text).with_context(|| {
         format!("{text:?} is not a preset; use a label like 03B or an index like 7")
     })
 }
@@ -854,19 +858,19 @@ fn validate_switch(session: &hx_usb::Session, switch: u8) -> Result<()> {
 }
 
 fn select(session: &mut hx_usb::Session, setlist: i64, index: &str) -> Result<()> {
-    let index = slot(index)?;
+    let index = slot(&session.profile, index)?;
     session.select_preset(setlist, index)?;
     println!(
         "selected {} (setlist {setlist})",
-        hx_proto::rpc::slot_label(index)
+        session.profile.slot_label(index)
     );
     Ok(())
 }
 
 fn rename(session: &mut hx_usb::Session, setlist: i64, index: &str, name: &str) -> Result<()> {
-    let index = slot(index)?;
+    let index = slot(&session.profile, index)?;
     session.rename_preset(setlist, index, name)?;
-    println!("{} renamed to {name}", hx_proto::rpc::slot_label(index));
+    println!("{} renamed to {name}", session.profile.slot_label(index));
     Ok(())
 }
 
@@ -960,7 +964,7 @@ fn show_preset(session: &mut hx_usb::Session, raw: bool) -> Result<()> {
     match session.preset_info() {
         Ok((setlist, index, name)) => println!(
             "preset:   {} {}  (setlist {setlist}, index {index})",
-            hx_proto::rpc::slot_label(index),
+            session.profile.slot_label(index),
             name
         ),
         Err(e) => println!("preset:   (metadata unavailable: {e})"),
@@ -980,7 +984,7 @@ fn list_presets(session: &mut hx_usb::Session, setlist: i64) -> Result<()> {
         let index = index as i64;
         println!(
             "{} {:<24} {}",
-            hx_proto::rpc::slot_label(index),
+            session.profile.slot_label(index),
             name,
             if index == current { "<- loaded" } else { "" }
         );
@@ -1074,12 +1078,15 @@ fn save_preset(
 ) -> Result<()> {
     let (_, loaded, current) = session.preset_info()?;
     let target = match index {
-        Some(text) => slot(text)?,
+        Some(text) => slot(&session.profile, text)?,
         None => loaded,
     };
     let name = name.unwrap_or(&current);
     session.save_preset(setlist, target, name)?;
-    println!("saved to {} as {name:?}", hx_proto::rpc::slot_label(target));
+    println!(
+        "saved to {} as {name:?}",
+        session.profile.slot_label(target)
+    );
     Ok(())
 }
 
@@ -1141,7 +1148,7 @@ fn backup_all(
             .read_preset()
             .with_context(|| format!("reading preset {index}"))?;
 
-        let label = hx_proto::rpc::slot_label(index);
+        let label = session.profile.slot_label(index);
         let file = directory.join(format!("{label}-{}.hxpreset", sanitise(name)));
         write_file(&file, preset.encode()).with_context(|| format!("writing {file:?}"))?;
         println!("  {label}  {name}");
@@ -1157,10 +1164,11 @@ fn back_up(session: &mut hx_usb::Session, directory: &std::path::Path) -> Result
     use hx_usb::backup::Step;
 
     let started = std::time::Instant::now();
+    let profile = session.profile;
     let manifest = hx_usb::backup::capture(session, directory, now(), |step| match step {
         Step::Presets { done, total, name } => {
             if !name.is_empty() {
-                println!("  {}  {name}", hx_proto::rpc::slot_label(done as i64));
+                println!("  {}  {name}", profile.slot_label(done as i64));
             }
             let _ = total;
         }
@@ -1507,7 +1515,7 @@ fn show_chain(session: &mut hx_usb::Session) -> Result<()> {
     let catalog = hx_catalog::Catalog::load().ok();
 
     if let Some((_, index, name)) = optional_device_value(session.preset_info())? {
-        print!("{} {}", hx_proto::rpc::slot_label(index), name);
+        print!("{} {}", session.profile.slot_label(index), name);
     }
     if let Some(tempo) = preset.tempo() {
         print!("   {tempo:.1} BPM");
