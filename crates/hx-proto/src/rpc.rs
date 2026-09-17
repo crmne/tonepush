@@ -389,30 +389,49 @@ impl Message {
 /// The tools print `03B`, so they should accept it. Requiring the reader to
 /// convert back to 7 by hand is a small cruelty.
 pub fn parse_slot(text: &str) -> Option<i64> {
+    parse_slot_for(text, 3)
+}
+
+/// Read a preset address for hardware with the given number of slots per bank.
+pub fn parse_slot_for(text: &str, presets_per_bank: u8) -> Option<i64> {
+    if presets_per_bank == 0 || presets_per_bank > 26 {
+        return None;
+    }
     if let Ok(index) = text.trim().parse::<i64>() {
         return (index >= 0).then_some(index);
     }
     let text = text.trim();
     let (bank, slot) = text.split_at(text.len().checked_sub(1)?);
     let letter = slot.chars().next()?.to_ascii_uppercase();
-    let position = "ABC".find(letter)? as i64;
+    if !letter.is_ascii_uppercase() {
+        return None;
+    }
+    let position = (letter as u8).checked_sub(b'A')? as i64;
+    if position >= i64::from(presets_per_bank) {
+        return None;
+    }
     let bank: i64 = bank.parse().ok()?;
     (bank >= 1)
         .then_some(bank)
         .and_then(|bank| bank.checked_sub(1))
-        .and_then(|bank| bank.checked_mul(3))
+        .and_then(|bank| bank.checked_mul(i64::from(presets_per_bank)))
         .and_then(|index| index.checked_add(position))
 }
 
 /// Render a preset index the way the hardware labels it: `03B` for index 7.
 pub fn slot_label(index: i64) -> String {
-    if index < 0 {
+    slot_label_for(index, 3)
+}
+
+/// Render an index for hardware with the given number of slots per bank.
+pub fn slot_label_for(index: i64, presets_per_bank: u8) -> String {
+    if index < 0 || presets_per_bank == 0 || presets_per_bank > 26 {
         return index.to_string();
     }
     format!(
         "{:02}{}",
-        index / 3 + 1,
-        b"ABC"[(index % 3) as usize] as char
+        index / i64::from(presets_per_bank) + 1,
+        (b'A' + (index % i64::from(presets_per_bank)) as u8) as char
     )
 }
 
@@ -773,5 +792,15 @@ mod tests {
         assert_eq!(slot_label(7), "03B");
         assert_eq!(slot_label(125), "42C");
         assert_eq!(slot_label(-1), "-1");
+    }
+
+    #[test]
+    fn four_slot_banks_use_a_through_d() {
+        assert_eq!(slot_label_for(0, 4), "01A");
+        assert_eq!(slot_label_for(3, 4), "01D");
+        assert_eq!(slot_label_for(104, 4), "27A");
+        assert_eq!(parse_slot_for("27A", 4), Some(104));
+        assert_eq!(parse_slot_for("01D", 4), Some(3));
+        assert_eq!(parse_slot_for("01E", 4), None);
     }
 }

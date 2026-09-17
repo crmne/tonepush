@@ -496,6 +496,13 @@ struct Audition {
 }
 
 impl Worker {
+    fn slot_label(&self, index: i64) -> String {
+        self.device.as_ref().map_or_else(
+            || hx_proto::rpc::slot_label(index),
+            |device| device.profile.slot_label(index),
+        )
+    }
+
     fn run(mut self) {
         let mut last_poll = Instant::now();
         loop {
@@ -904,10 +911,7 @@ impl Worker {
                     if self.shown.0 == index {
                         self.reload();
                     }
-                    self.send(Evt::Activity(format!(
-                        "emptied {}",
-                        hx_proto::rpc::slot_label(index)
-                    )));
+                    self.send(Evt::Activity(format!("emptied {}", self.slot_label(index))));
                 }
             }
             Cmd::ClearBlock(block) => {
@@ -1589,7 +1593,7 @@ impl Worker {
                     None => {
                         self.send(Evt::Failed(format!(
                             "{} is not a preset document",
-                            hx_proto::rpc::slot_label(index)
+                            self.slot_label(index)
                         )));
                         false
                     }
