@@ -38,12 +38,11 @@ fn main() -> eframe::Result<()> {
         "TonePush",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 640.0]),
-            // A Wayland compositor stops sending frame callbacks to a hidden
-            // window. Waiting for vsync here then blocks the event loop, so it
-            // cannot answer the compositor and is marked unresponsive. Busy
-            // indicators are paced in `theme::spinner` instead.
+            // Pace frames with the display wherever a hidden window cannot
+            // block the wait in swap_buffers; see `vsync`. Busy indicators are
+            // also paced in `theme::spinner`, for drivers that ignore it.
             glow_options: eframe::egui_glow::GlowConfiguration {
-                vsync: false,
+                vsync: tonepush_gui::vsync::vsync(),
                 ..Default::default()
             },
             ..Default::default()

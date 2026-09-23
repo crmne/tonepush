@@ -38,5 +38,11 @@ serde_json = "1"
 # back to the local sources keeps `cargo build` here meaning what it has always
 # meant, while the gem still resolves them from crates.io.
 [patch.crates-io]
+# winit 0.30.13 plus Wayland `Occluded` events for the xdg-shell suspended
+# state, without a redraw request while suspended. eframe then stops painting
+# a hidden window instead of blocking in eglSwapBuffers, so vsync stays safe on
+# Wayland. Proposed upstream as rust-windowing/winit#4709; drop the fork when a
+# release includes it.
+winit = { git = "https://github.com/crmne/winit", rev = "c8df61a52b8b563e1bb65e0f1d8630289d1c1bd6" }
 hx-proto = { path = "crates/hx-proto" }
 hx-catalog = { path = "crates/hx-catalog" }

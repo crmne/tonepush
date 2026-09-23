@@ -20,6 +20,7 @@ mod session;
 mod table;
 mod theme;
 mod update;
+pub mod vsync;
 mod wav;
 
 pub use session::{spawn, spawn_repainting, ApplyBlock, Cmd, Evt};
@@ -1517,8 +1518,9 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+    /// Background work that must go on while the window is hidden: eframe
+    /// calls this even when it does not paint.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
         self.pro.drain();
         self.poll_update_check();
@@ -1553,6 +1555,10 @@ impl eframe::App for App {
         // an otherwise idle editor does not rebuild the whole immediate-mode
         // interface several times per second.
         ctx.request_repaint_after(Duration::from_secs(1));
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
 
         let pro_active = self.pro.claims_ui() && self.connection != Connection::Online;
         if pro_active {
