@@ -42,8 +42,8 @@ ordinary double-click. This whole step disappears once notarized builds ship.
 Homebrew users can instead run:
 
 ```sh
-brew install --cask crmne/tap/tonepush-app   # the app
-brew install crmne/tap/tonepush              # the CLI
+brew install --cask crmne/tap/tonepush   # the app
+brew install crmne/tap/tonepush          # the CLI
 ```
 
 ## Windows

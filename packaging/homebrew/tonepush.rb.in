@@ -1,0 +1,38 @@
+cask "tonepush" do
+  version "@VERSION@"
+  sha256 "@MACOS_SHA256@"
+
+  url "https://github.com/crmne/tonepush/releases/download/v#{version}/tonepush-v#{version}-macos-universal.dmg"
+  name "TonePush"
+  desc "Editor and tone library for Line 6 HX pedals and the StompStation PRO"
+  homepage "https://tonepush.rocks/"
+
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
+  depends_on :macos
+
+  app "TonePush.app"
+
+  zap trash: [
+    "~/.config/stompchain",
+    "~/.config/tonepush",
+    "~/.local/share/stompchain",
+    "~/.local/share/tonepush",
+    "~/Library/Saved Application State/rocks.tonepush.editor.savedState",
+  ]
+
+  caveats <<~EOS
+    Quit HX Edit before connecting; only one editor can hold the device.
+  EOS
+
+  # Releases up to 0.6.0 predate signing and notarization.
+  caveats <<~EOS if ::Version.new(version) <= ::Version.new("0.6.0")
+    This build is not notarized, so macOS blocks the first launch. Open it once
+    through System Settings, Privacy & Security: double-click the app, click
+    Done, then scroll to the Security section and click "Open Anyway" next to
+    the TonePush message. macOS remembers the choice.
+  EOS
+end

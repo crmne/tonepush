@@ -150,6 +150,7 @@ Configured packaging destinations (publication is a separate step):
 | Channel | Status | Notes |
 |---|---|---|
 | Arch AUR | Configured | `tonepush`, `tonepush-bin` and `tonepush-git` templates live in `packaging/arch/`. |
+| Homebrew | Configured | The `tonepush` cask (the app, from the DMG) and the `tonepush` formula (the universal binaries) in `crmne/homebrew-tap`; templates live in `packaging/homebrew/`. |
 | Fedora COPR | Not started | |
 | Nixpkgs | Not started | |
 | Gentoo GURU | Not started | |

@@ -96,6 +96,14 @@ assets:
     url: https://github.com/crmne/tonepush/archive/refs/tags/v@VERSION@.tar.gz
     checksummed: false
     local: dist/tonepush-@VERSION@.tar.gz
+  # Built by the release workflow's native macOS job, then published with the
+  # release and its checksums; the Homebrew cask and formula pin these hashes.
+  MACOS:
+    file: tonepush-v@VERSION@-macos-universal.dmg
+    local: dist/tonepush-v@VERSION@-macos-universal.dmg
+  MACOS_CLI:
+    file: tonepush-v@VERSION@-macos-universal.tar.gz
+    local: dist/tonepush-v@VERSION@-macos-universal.tar.gz
 templates:
   arch/tonepush/PKGBUILD: packaging/arch/tonepush/PKGBUILD.in
   arch/tonepush/tonepush.install: packaging/arch/tonepush.install
@@ -103,6 +111,8 @@ templates:
   arch/tonepush-bin/tonepush-bin.install: packaging/arch/tonepush.install
   arch/tonepush-git/PKGBUILD: packaging/arch/tonepush-git/PKGBUILD.in
   arch/tonepush-git/tonepush-git.install: packaging/arch/tonepush.install
+  homebrew/Casks/tonepush.rb: packaging/homebrew/tonepush.rb.in
+  homebrew/Formula/tonepush.rb: packaging/homebrew/tonepush-cli.rb.in
 repositories:
   aur-source:
     group: aur
@@ -136,6 +146,18 @@ repositories:
       arch/tonepush-git: "."
     version_file: ".SRCINFO"
     version_pattern: "^\\s*pkgver = (\\S+)"
+    publish: push
+  homebrew:
+    url: https://github.com/crmne/homebrew-tap.git
+    push_url: https://github.com/crmne/homebrew-tap.git
+    branch: main
+    # The cask and the formula live in sibling directories of the tap.
+    package_path: "."
+    files:
+      homebrew/Casks/tonepush.rb: Casks/tonepush.rb
+      homebrew/Formula/tonepush.rb: Formula/tonepush.rb
+    version_file: Casks/tonepush.rb
+    version_pattern: version "([^"]+)"
     publish: push
 revisions:
   0.6.0:
