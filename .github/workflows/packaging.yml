@@ -41,7 +41,7 @@ jobs:
   packaging:
     permissions:
       contents: write
-    uses: crmne/native-packages/.github/workflows/package.yml@b7bb6a8615223d3139547f634975ecd50febf0c3 # main after v0.7.0: tap deploy key
+    uses: crmne/native-packages/.github/workflows/package.yml@8025372579b1864b09b579255484f4e15f65bc78 # main after v0.7.0: tap deploy key
     with:
       version: ${{ inputs.version || '' }}
       publish: ${{ inputs.publish == true && inputs.version != '' }}
