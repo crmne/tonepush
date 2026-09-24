@@ -63,7 +63,7 @@ On Arch and its derivatives, install from the AUR, which also sets up the
 udev rule and desktop entry:
 
 ```sh
-paru -S tonepush-bin    # ready made; tonepush builds the release from source, tonepush-git the latest commit
+yay -S tonepush-bin     # ready made; tonepush builds the release from source, tonepush-git the latest commit
 ```
 
 On any other distro, grab the archive for your machine:
