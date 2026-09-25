@@ -455,7 +455,8 @@ mod tests {
     /// be the editor's binary and not the `tonepush` command-line tool.
     #[test]
     fn the_portable_executable_is_the_editor() {
-        let manifest = include_str!("../Cargo.toml");
+        // Windows checks text out with CRLF line endings.
+        let manifest = include_str!("../Cargo.toml").replace("\r\n", "\n");
         let name = CONFIG.portable_executable.unwrap();
         assert!(
             manifest.contains(&format!("[[bin]]\nname = \"{name}\"")),
