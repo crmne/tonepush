@@ -38,13 +38,6 @@ fn main() -> eframe::Result<()> {
         "TonePush",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 640.0]),
-            // Pace frames with the display wherever a hidden window cannot
-            // block the wait in swap_buffers; see `vsync`. Busy indicators are
-            // also paced in `theme::spinner`, for drivers that ignore it.
-            glow_options: eframe::egui_glow::GlowConfiguration {
-                vsync: tonepush_gui::vsync::vsync(),
-                ..Default::default()
-            },
             ..Default::default()
         },
         Box::new(move |cc| {

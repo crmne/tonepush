@@ -54,9 +54,3 @@ name = "tonepush_gui"
 [[bin]]
 name = "tonepush-gui"
 path = "src/main.rs"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-# Asks the Wayland compositor at startup whether it reports hidden windows as
-# suspended (xdg-shell v6), which decides whether vsync is safe. winit already
-# compiles this version.
-wayland-client = "0.31"

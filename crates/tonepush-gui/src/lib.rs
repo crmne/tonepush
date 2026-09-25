@@ -20,7 +20,6 @@ mod session;
 mod table;
 mod theme;
 mod update;
-pub mod vsync;
 mod wav;
 
 pub use session::{spawn, spawn_repainting, ApplyBlock, Cmd, Evt};

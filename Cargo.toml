@@ -38,11 +38,29 @@ serde_json = "1"
 # back to the local sources keeps `cargo build` here meaning what it has always
 # meant, while the gem still resolves them from crates.io.
 [patch.crates-io]
-# winit 0.30.13 plus Wayland `Occluded` events for the xdg-shell suspended
-# state, without a redraw request while suspended. eframe then stops painting
-# a hidden window instead of blocking in eglSwapBuffers, so vsync stays safe on
-# Wayland. Proposed upstream as rust-windowing/winit#4709; drop the fork when a
-# release includes it.
-winit = { git = "https://github.com/crmne/winit", rev = "c8df61a52b8b563e1bb65e0f1d8630289d1c1bd6" }
 hx-proto = { path = "crates/hx-proto" }
 hx-catalog = { path = "crates/hx-catalog" }
+
+# crmne/egui apps-0.36, shared with ZapFast, Spotifast and RekordFlash: egui
+# 0.36.1 with right-to-left shaping (emilk/egui#8577), egui's busy-loop fix
+# (emilk/egui#8398), and eframe pacing Wayland frames by the compositor's frame
+# callbacks, so a window the compositor stops showing never blocks in a vsync
+# swap (emilk/egui#8631). Every egui crate comes from the same revision so they
+# share one emath and epaint. Drop this once egui releases all three.
+ecolor = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+eframe = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+egui = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+egui-wgpu = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+egui-winit = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+egui_extras = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+egui_glow = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+emath = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+epaint = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+# crmne/winit apps-0.30, shared with the same apps: winit 0.30.13 plus Wayland
+# `Occluded` for the xdg-shell suspended state with commits on the app's behalf
+# while it isn't presenting (rust-windowing/winit#4709, #4710), which eframe
+# from the fork above uses. The fork's other changes (macOS Quit through close
+# requests behind a feature, Wayland file drag and drop) are unused here. Drop
+# it when a winit release includes the Wayland changes.
+winit = { git = "https://github.com/crmne/winit", rev = "fc4f39ff0993dd235952b749dd16b856c0194e1f" }
