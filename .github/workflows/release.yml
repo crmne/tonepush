@@ -47,9 +47,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+      # No compiler cache: published binaries never build from outputs
+      # restored from an Actions cache.
 
       # The two binaries, and not the whole workspace: hx-ruby is a Ruby
       # extension that links against libruby, which a release runner has no
@@ -107,10 +106,7 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: macos-universal
-
+      # No compiler cache, as in the build job above.
       - name: Build both architectures
         run: |
           cargo build --release -p tonepush-cli -p tonepush-gui --target aarch64-apple-darwin

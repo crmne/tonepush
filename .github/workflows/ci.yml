@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -26,14 +29,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-      - uses: Swatinem/rust-cache@v2
+      # After the toolchain, so the cache key follows the pinned rustc. The
+      # key carries no job name, so each job sets its own generation. Saves
+      # only on pushes to main; pull requests restore.
+      - uses: jdx/mr-boxington-action@v1
+        with:
+          cache-generation: test-v1
       # The hardware integration tests are #[ignore]d; nothing here needs a device.
       - name: Test workspace
         if: runner.os != 'Windows'
-        run: cargo test --workspace
+        run: mbx test --workspace
       - name: Test workspace without the Rails extension
         if: runner.os == 'Windows'
-        run: cargo test --workspace --exclude hx-ruby
+        run: mbx test --workspace --exclude hx-ruby
 
   # `cargo test --workspace` compiles the extension, which says nothing about
   # whether the *gem* is still shippable: the package carries only the files the
@@ -52,7 +60,6 @@ jobs:
         with:
           ruby-version: "4.0"
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       # ext/hx_ruby/Cargo.toml is copied into the gem and compiled where there is
       # no workspace and no sibling crate. Anything that only resolves inside
       # this checkout - a path dependency, or a value inherited from the
@@ -113,6 +120,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mr-boxington-action@v1
+        with:
+          cache-generation: lint-v1
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: mbx clippy --all-targets -- -D warnings
