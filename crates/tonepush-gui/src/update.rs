@@ -31,10 +31,14 @@ pub const RELEASES: &str = "https://github.com/crmne/tonepush/releases/latest";
 /// TonePush's releases, as the updater needs to know them.
 ///
 /// The slug names the release assets (`tonepush-v0.7.0-macos-universal.dmg`),
-/// the Homebrew cask, the macOS bundle's executable and the `tonepush 0.7.0`
-/// that `--version` answers. The bundle identifier is the one in
-/// `packaging/macos/Info.plist`.
+/// the Homebrew cask, the portable marker (`tonepush-portable.txt`), the
+/// macOS bundle's executable and the `tonepush 0.7.0` that `--version`
+/// answers. The bundle identifier is the one in `packaging/macos/Info.plist`.
 pub const CONFIG: UpdateConfig = UpdateConfig {
+    // The Linux and Windows archives carry the `tonepush` command-line tool
+    // beside the editor. The editor is the one this updater installs, and only
+    // a running `tonepush-gui` next to the marker replaces itself.
+    portable_executable: Some("tonepush-gui"),
     macos: MacConfig {
         bundle_ids: &["rocks.tonepush.editor"],
         executable_names: &[],
@@ -124,8 +128,8 @@ pub fn advice(reason: &Unsupported) -> String {
         Unsupported::MoveToApplications => {
             "Move TonePush to Applications, then open it again to update it here.".into()
         }
-        // A portable download or a copy built from source: nothing next to it
-        // says which files belong to it, so it is not replaced in place.
+        // A copy built from source, or unpacked without its marker: nothing
+        // next to it says which files belong to it, so it is not replaced.
         _ => "This copy cannot replace itself. Download the new version from the release page."
             .into(),
     }
@@ -445,6 +449,38 @@ mod tests {
         assert_eq!(CONFIG.repository, "crmne/tonepush");
         assert_eq!(CONFIG.slug, "tonepush");
         assert!(CONFIG.publisher_key.is_some());
+    }
+
+    /// The updater installs the file named here from the archive, so it must
+    /// be the editor's binary and not the `tonepush` command-line tool.
+    #[test]
+    fn the_portable_executable_is_the_editor() {
+        let manifest = include_str!("../Cargo.toml");
+        let name = CONFIG.portable_executable.unwrap();
+        assert!(
+            manifest.contains(&format!("[[bin]]\nname = \"{name}\"")),
+            "{name} is not this crate's binary"
+        );
+        assert_ne!(name, CONFIG.slug);
+    }
+
+    /// The marker the release workflow puts next to the portable editor, in
+    /// the exact form fastframe-update reads: `<slug>-portable.txt` holding
+    /// `<slug>-portable-v1`.
+    #[test]
+    fn the_portable_marker_is_the_one_the_updater_reads() {
+        let marker = include_str!("../../../packaging/tonepush-portable.txt");
+        assert_eq!(marker.trim(), format!("{}-portable-v1", CONFIG.slug));
+        // The build job packs the Linux tarballs and the Windows zips from
+        // one script, which must copy the marker beside the binaries. The
+        // macOS app updates as a bundle and needs none.
+        let release = include_str!("../../../.github/workflows/release.yml");
+        assert!(
+            release.lines().any(|line| line.contains("cp ")
+                && line.contains("packaging/tonepush-portable.txt")
+                && line.contains("\"dist/$name/\"")),
+            "release.yml must put the marker into the portable archives"
+        );
     }
 
     /// The bundle identifier the updater insists on is the one the app is

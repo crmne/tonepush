@@ -107,12 +107,12 @@ Ubuntu: `libxkbcommon-dev libwayland-dev libgl1-mesa-dev`.
 
 TonePush asks GitHub (`api.github.com`) once a day whether a newer release
 exists, and nothing else leaves your machine for it. When one does, the version
-in the status bar says so. The macOS app from the DMG can update itself: click
-**Update**, then **Restart to update**; the download is checked against
-TonePush's release signature first, and if the new version does not start the
-old one comes back. Copies installed with Homebrew, the AUR or a .deb/.rpm are
-left to that package manager, and the status bar says which. Linux and Windows
-archives point at the release page.
+in the status bar says so. The macOS app from the DMG and the editor unpacked
+from a Linux or Windows archive can update themselves: click **Update**, then
+**Restart to update**. The download is checked against TonePush's release
+signature first, and if the new version does not start the old one comes back.
+Copies installed with Homebrew, the AUR or a .deb/.rpm are left to that package
+manager, and the status bar says which.
 
 ### HX model names and pictures
 

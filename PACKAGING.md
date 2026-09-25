@@ -72,6 +72,7 @@ The Linux binary archives contain:
 
 - `tonepush`
 - `tonepush-gui`
+- `tonepush-portable.txt` (the self-update marker; do not install it)
 - `README.md`
 - `LICENSE`
 - `packaging/applications/tonepush.desktop`
@@ -148,23 +149,26 @@ your distro; tell the user to replug the device after installing.
 ## Updates
 
 The editor checks `api.github.com` for a newer release once a day and says so
-in its status bar. Only the macOS app from the DMG replaces itself, after the
-user asks: it downloads the DMG, verifies `checksums.txt.sig` against the key
-compiled into the app, checks the bundle's identifier (`rocks.tonepush.editor`),
-version and signing team, and restarts into it, rolling back if the new
-version does not start. The editor answers `--version` with
-`tonepush <version>`; the updater asks the downloaded bundle's executable
+in its status bar. The macOS app from the DMG and the editor unpacked from a
+Linux or Windows archive replace themselves after the user asks: the download
+is verified against `checksums.txt.sig` and the key compiled into the app, and
+if the new version does not start the previous one is restored. On macOS the
+DMG's bundle must also have the identifier `rocks.tonepush.editor`, the
+release's version and the running app's signing team.
+
+A portable copy is recognised by `tonepush-portable.txt`, holding
+`tonepush-portable-v1`, next to `tonepush-gui`. The release workflow adds it to
+the Linux and Windows archives. The updater installs only `tonepush-gui` from
+the new archive, and only a running `tonepush-gui` replaces itself; the
+`tonepush` command-line tool beside it is never touched. Package contents must
+not include the marker. The editor answers `--version` with
+`tonepush <version>`; the updater asks the downloaded editor
 before installing it, so that answer must not change.
 
 Package-managed copies never replace themselves. The updater recognises
 Homebrew (cask and formula), pacman and the AUR, dpkg, rpm, Flatpak, Snap, Nix
 and `cargo install`, and anything else under `/usr`, and tells the user which
 tool updates it. Packages need no patch to turn updates off.
-
-The Linux and Windows archives carry no portable marker, so those copies do
-not replace themselves either: they point at the release page. The updater
-installs the executable named after the slug from an archive, and in
-TonePush's archives `tonepush` is the command-line tool, not the editor.
 
 ## Package Status
 

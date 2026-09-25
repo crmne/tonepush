@@ -69,7 +69,9 @@ jobs:
             cp "target/${{ matrix.target }}/release/tonepush" "dist/$name/"
             cp "target/${{ matrix.target }}/release/tonepush-gui" "dist/$name/"
           fi
-          cp README.md LICENSE "dist/$name/"
+          # The marker lets tonepush-gui replace itself from this archive
+          # (Linux and Windows); package builds never install it.
+          cp README.md LICENSE packaging/tonepush-portable.txt "dist/$name/"
           if [ "${{ runner.os }}" = "Linux" ]; then
             # Desktop integration for package builds and hand-installs.
             cp --parents packaging/applications/tonepush.desktop packaging/icons/tonepush.svg packaging/udev/70-line6-hx.rules "dist/$name/"
