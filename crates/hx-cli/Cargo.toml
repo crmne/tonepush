@@ -1,0 +1,20 @@
+[package]
+name = "hx-cli"
+description = "Edit the presets on a Line 6 Helix or HX guitar pedal from the command line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "tonepush"
+path = "src/main.rs"
+
+[dependencies]
+hx-proto.workspace = true
+hx-usb.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde_json = "1"
+hx-catalog.workspace = true

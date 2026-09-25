@@ -1,6 +1,6 @@
 [package]
-name = "tonepush-gui"
-description = "Edit Line 6 HX and Sonulab StompStation PRO guitar processors on Linux, macOS and Windows"
+name = "hx-gui"
+description = "Edit the presets on a Line 6 Helix or HX guitar pedal, on Linux, macOS and Windows"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,8 +11,6 @@ rust-version.workspace = true
 hx-proto.workspace = true
 hx-usb.workspace = true
 hx-catalog.workspace = true
-voidx-proto.workspace = true
-voidx-client.workspace = true
 # Persist favorites (and, later, rig profiles and preferences) as one small
 # JSON file the user could open and read.
 serde = { version = "1", features = ["derive"] }
@@ -29,16 +27,6 @@ eframe = { version = "0.36", default-features = false, features = [
     "x11",
 ] }
 egui = "0.36"
-# The shared foundation of the family's apps: Inter at the weights used here
-# with system fallbacks for other scripts, and the desktop's text rendering.
-fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.1.0" }
-fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.1.0" }
-# Self-update from GitHub releases: the daily check, refusing copies a package
-# manager owns, the signed download, and the helper that installs, relaunches
-# and rolls back. It talks through ureq below, so no second HTTP client.
-fastframe-update = { git = "https://github.com/crmne/fastframe", tag = "v0.1.0" }
-# The error type fastframe-update's transport returns.
-anyhow.workspace = true
 egui_extras = { version = "0.36", features = ["image", "file", "svg"] }
 # Virtualised rows and sticky columns for the library table. egui_extras'
 # TableBuilder builds every row whether or not it is on screen, which a library
@@ -52,14 +40,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 ureq = { version = "3.4.0", default-features = false, features = ["rustls", "platform-verifier"] }
 sha2 = "0.11"
-# Library metadata is replaced only after its complete new contents have been
-# flushed, so a crash cannot turn the last good index into half a JSON file.
-atomic-write-file = "0.3.1"
 # Human-readable, sortable timestamps in the local library index.
 jiff = "0.2"
 
 [lib]
-name = "tonepush_gui"
+name = "hx_gui"
 
 [[bin]]
 name = "tonepush-gui"

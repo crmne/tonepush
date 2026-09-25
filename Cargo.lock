@@ -139,7 +139,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
  "x11rb",
 ]
 
@@ -1184,7 +1184,7 @@ dependencies = [
 [[package]]
 name = "fastframe-fonts"
 version = "0.1.0"
-source = "git+https://github.com/crmne/fastframe?rev=31d66bb904de6aedd2c269aeac028549d5e49009#31d66bb904de6aedd2c269aeac028549d5e49009"
+source = "git+https://github.com/crmne/fastframe?tag=v0.1.0#08078dbada8fa404f26dc72362934378da24c10f"
 dependencies = [
  "directories",
  "egui",
@@ -1197,7 +1197,7 @@ dependencies = [
 [[package]]
 name = "fastframe-text"
 version = "0.1.0"
-source = "git+https://github.com/crmne/fastframe?rev=31d66bb904de6aedd2c269aeac028549d5e49009#31d66bb904de6aedd2c269aeac028549d5e49009"
+source = "git+https://github.com/crmne/fastframe?tag=v0.1.0#08078dbada8fa404f26dc72362934378da24c10f"
 dependencies = [
  "egui",
  "zbus",
@@ -1206,7 +1206,7 @@ dependencies = [
 [[package]]
 name = "fastframe-update"
 version = "0.1.0"
-source = "git+https://github.com/crmne/fastframe?rev=31d66bb904de6aedd2c269aeac028549d5e49009#31d66bb904de6aedd2c269aeac028549d5e49009"
+source = "git+https://github.com/crmne/fastframe?tag=v0.1.0#08078dbada8fa404f26dc72362934378da24c10f"
 dependencies = [
  "anyhow",
  "ring",
@@ -3715,7 +3715,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
