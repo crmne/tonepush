@@ -29,6 +29,9 @@ eframe = { version = "0.36", default-features = false, features = [
     "x11",
 ] }
 egui = "0.36"
+# The shared foundation of the family's apps: Inter at the weights used here
+# with system fallbacks for other scripts.
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", rev = "43e6cadf634ce928342691422b836d57286f74bf" }
 egui_extras = { version = "0.36", features = ["image", "file", "svg"] }
 # Virtualised rows and sticky columns for the library table. egui_extras'
 # TableBuilder builds every row whether or not it is on screen, which a library

@@ -14,10 +14,6 @@ pub const ACCENT: Color32 = Color32::from_rgb(0xd8, 0xa8, 0x3b);
 /// while the dot says the more specific "unsaved".
 pub const DIRTY: Color32 = Color32::from_rgb(0xff, 0x8c, 0x10);
 
-/// The name of the semibold family, for the few places that want real weight
-/// rather than egui's `strong()` - which only brightens the colour.
-pub const SEMIBOLD: &str = "semibold";
-
 /// A centered question that must be answered before work continues.
 pub fn modal(title: &'static str) -> egui::Window<'static> {
     egui::Window::new(title)
@@ -33,9 +29,10 @@ pub fn section_break(ui: &mut Ui) {
     ui.add_space(10.0);
 }
 
-/// A font id in the semibold family.
+/// A font id in Inter's semibold family, for the few places that want real
+/// weight rather than egui's `strong()`, which only brightens the colour.
 pub fn semibold(size: f32) -> egui::FontId {
-    egui::FontId::new(size, egui::FontFamily::Name(SEMIBOLD.into()))
+    fastframe_fonts::Weight::SemiBold.font_id(size)
 }
 
 /// Inter for the interface, with IBM Plex Mono for changing readings.
@@ -46,53 +43,23 @@ pub fn semibold(size: f32) -> egui::FontId {
 /// shuffling sideways under the control. Both faces are OFL and ship with the
 /// binaries.
 ///
-/// egui's own fonts stay behind them as fallbacks for symbols neither face
-/// carries; a missing glyph must never become an empty box.
+/// egui's own fonts and the installed faces for scripts Inter lacks stay
+/// behind them as fallbacks; a missing glyph must never become an empty box.
 pub fn fonts(ctx: &egui::Context) {
-    use egui::{FontData, FontFamily};
+    font_setup().install(ctx);
+}
 
-    let mut fonts = egui::FontDefinitions::default();
-    for (name, bytes) in [
-        (
-            "inter",
-            &include_bytes!("../assets/fonts/Inter-Regular.ttf")[..],
-        ),
-        (
-            "inter-semibold",
-            &include_bytes!("../assets/fonts/Inter-SemiBold.ttf")[..],
-        ),
-        (
-            "plex-mono",
-            &include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf")[..],
-        ),
-    ] {
-        fonts.font_data.insert(
-            name.to_owned(),
-            std::sync::Arc::new(FontData::from_static(bytes)),
-        );
-    }
+fn font_setup() -> fastframe_fonts::FontSetup {
+    use fastframe_fonts::{FontSetup, Monospace, Weight};
 
-    // First in the list is the primary; what follows is the fallback chain, so
-    // egui's bundled fonts still answer for glyphs Inter does not carry.
-    fonts
-        .families
-        .entry(FontFamily::Proportional)
-        .or_default()
-        .insert(0, "inter".to_owned());
-    fonts
-        .families
-        .entry(FontFamily::Monospace)
-        .or_default()
-        .insert(0, "plex-mono".to_owned());
-    // The semibold cut is its own family: `RichText::strong()` in egui changes
-    // colour, not weight, so anything that wants weight has to ask for it.
-    let mut heavy = vec!["inter-semibold".to_owned()];
-    heavy.extend(fonts.families[&FontFamily::Proportional].iter().cloned());
-    fonts
-        .families
-        .insert(FontFamily::Name(SEMIBOLD.into()), heavy);
-
-    ctx.set_fonts(fonts);
+    FontSetup::default()
+        .weights(&[Weight::SemiBold])
+        .monospace(Monospace::Font {
+            name: "plex-mono".into(),
+            data: std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+                "../assets/fonts/IBMPlexMono-Regular.ttf"
+            ))),
+        })
 }
 
 pub fn apply(ctx: &egui::Context) {
@@ -1719,6 +1686,23 @@ pub fn wire_run(ui: &mut Ui, width: f32, height: f32) {
 #[cfg(test)]
 mod tests {
     use super::knob_drag_delta;
+
+    #[test]
+    fn readings_use_plex_mono_and_headings_inter_semibold() {
+        let fonts = super::font_setup().system_fallbacks(false).definitions();
+        assert_eq!(
+            fonts.families[&egui::FontFamily::Monospace].first(),
+            Some(&"plex-mono".to_owned())
+        );
+        assert_eq!(
+            fonts.families[&super::semibold(13.0).family].first(),
+            Some(&fastframe_fonts::Weight::SemiBold.name().to_owned())
+        );
+        assert_eq!(
+            fonts.families[&egui::FontFamily::Proportional].first(),
+            Some(&fastframe_fonts::INTER_REGULAR.to_owned())
+        );
+    }
 
     #[test]
     fn text_coverage_is_linear() {
