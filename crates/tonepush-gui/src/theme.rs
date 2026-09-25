@@ -38,6 +38,22 @@ pub fn semibold(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name(SEMIBOLD.into()))
 }
 
+/// Fits Inter's stems to the pixel grid and places each glyph on a whole
+/// pixel. egui's default hinting keeps linear metrics, so it never snaps
+/// stems horizontally, and sub-pixel binning then moves glyphs by quarter
+/// pixels: at a fractional scale such as 133% every vertical stem straddled
+/// two pixels and text looked soft. Line breaks are unchanged, since egui
+/// lays text out from the unhinted advances.
+fn crisp(tweak: &mut egui::epaint::text::FontTweak) {
+    use egui::epaint::text::{HintingTarget, SmoothHinting};
+    tweak.hinting_target = HintingTarget::Smooth(SmoothHinting {
+        light: false,
+        symmetric_rendering: true,
+        preserve_linear_metrics: false,
+    });
+    tweak.subpixel_binning = Some(false);
+}
+
 /// Inter for the interface, with IBM Plex Mono for changing readings.
 ///
 /// Labels, buttons, headings, and prose use Inter, which is compact and clear
@@ -66,10 +82,13 @@ pub fn fonts(ctx: &egui::Context) {
             &include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf")[..],
         ),
     ] {
-        fonts.font_data.insert(
-            name.to_owned(),
-            std::sync::Arc::new(FontData::from_static(bytes)),
-        );
+        let mut data = FontData::from_static(bytes);
+        if name.starts_with("inter") {
+            crisp(&mut data.tweak);
+        }
+        fonts
+            .font_data
+            .insert(name.to_owned(), std::sync::Arc::new(data));
     }
 
     // First in the list is the primary; what follows is the fallback chain, so
@@ -1713,7 +1732,25 @@ pub fn wire_run(ui: &mut Ui, width: f32, height: f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::knob_drag_delta;
+    use super::{crisp, knob_drag_delta};
+
+    #[test]
+    fn inter_snaps_to_whole_pixels() {
+        use egui::epaint::text::{FontTweak, HintingTarget, SmoothHinting};
+        let mut tweak = FontTweak::default();
+        crisp(&mut tweak);
+        // Stems fit the pixel grid horizontally, and glyphs are not moved
+        // by fractions of a pixel afterwards (soft text at 133%).
+        assert!(matches!(
+            tweak.hinting_target,
+            HintingTarget::Smooth(SmoothHinting {
+                light: false,
+                preserve_linear_metrics: false,
+                ..
+            })
+        ));
+        assert_eq!(tweak.subpixel_binning, Some(false));
+    }
 
     #[test]
     fn shift_drag_is_ten_times_finer_than_an_ordinary_knob_drag() {
