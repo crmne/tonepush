@@ -343,6 +343,9 @@ jobs:
   release:
     needs: [build, macos, vendor]
     runs-on: ubuntu-latest
+    # Publishing waits for the maintainer's approval, and only this job can
+    # read the release signing key (v* tags only).
+    environment: release-signing
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -352,6 +355,28 @@ jobs:
         run: |
           cd dist
           sha256sum * > checksums.txt
+      - uses: actions/checkout@v7
+        with:
+          path: key
+          sparse-checkout: assets/update-public-key.hex
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+      # Sign checksums.txt (checksums.txt.sig), then check the signature and
+      # every listed file against the committed key. Updaters that carry the
+      # key refuse releases without a valid signature.
+      - name: Sign checksums
+        env:
+          TONEPUSH_UPDATE_SIGNING_KEY: ${{ secrets.TONEPUSH_UPDATE_SIGNING_KEY }}
+        run: |
+          gem install native-packages --version 0.7.0 --no-document
+          native-packages sign-checksums dist/checksums.txt \
+            --public-key key/assets/update-public-key.hex \
+            --key-env TONEPUSH_UPDATE_SIGNING_KEY
+          native-packages verify-checksums dist/checksums.txt \
+            --public-key key/assets/update-public-key.hex
       - name: The version, without the tag's v
         id: version
         run: echo "number=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
