@@ -1,7 +1,32 @@
 //! Desktop entry point.
 
 fn main() -> eframe::Result<()> {
-    // First of all, because everything below reads one of the directories it
+    // Before anything else, the update helper's flags. The previous release's
+    // helper runs this program as `--apply-update <job>` to install an update,
+    // and relaunches it with `--update-receipt` or `--update-error`. The
+    // helper must run before any directory is moved or read, and the other two
+    // are taken off the command line here.
+    let launch = fastframe_update::intercept(&tonepush_gui::update::CONFIG);
+    // The helper runs a downloaded TonePush with `--version` and installs it
+    // only on the exact answer, so this also comes before any state.
+    if launch
+        .arguments
+        .iter()
+        .skip(1)
+        .any(|argument| argument == "--version")
+    {
+        println!("{}", tonepush_gui::update::version_line());
+        return Ok(());
+    }
+    // An update relaunches with the arguments this launch had.
+    let relaunch = launch
+        .arguments
+        .iter()
+        .skip(1)
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect();
+
+    // Then, because everything below reads one of the directories it
     // moves: a machine that knew this program under its old name has its
     // library, its setlists and its extracted resources filed under that name,
     // and looking only under the new one would show an empty library and call
@@ -44,7 +69,9 @@ fn main() -> eframe::Result<()> {
             repaint.bind(&cc.egui_ctx);
             // Lets `ui.image("file://…")` load the model artwork HX Edit ships.
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(tonepush_gui::App::new(&cc.egui_ctx, tx, rx)))
+            let mut app = tonepush_gui::App::new(&cc.egui_ctx, tx, rx);
+            app.launched(launch.receipt, launch.error, relaunch);
+            Ok(Box::new(app))
         }),
     )?;
 

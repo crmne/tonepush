@@ -64,6 +64,8 @@ Each tagged release publishes:
 - `tonepush-v<version>-aarch64-pc-windows-msvc.zip`
 - `tonepush-v<version>-vendor.tar.xz`
 - `checksums.txt`
+- `checksums.txt.sig` (an Ed25519 signature over `checksums.txt`, made with the
+  key whose public half is `assets/update-public-key.hex`)
 - GitHub's automatic source archive for the tag
 
 The Linux binary archives contain:
@@ -142,6 +144,27 @@ The udev rule is what lets a normal user open the USB device; without it every
 connection fails with a permission error that looks like an application bug.
 Do not force a udev reload from package scripts beyond the packaging norm for
 your distro; tell the user to replug the device after installing.
+
+## Updates
+
+The editor checks `api.github.com` for a newer release once a day and says so
+in its status bar. Only the macOS app from the DMG replaces itself, after the
+user asks: it downloads the DMG, verifies `checksums.txt.sig` against the key
+compiled into the app, checks the bundle's identifier (`rocks.tonepush.editor`),
+version and signing team, and restarts into it, rolling back if the new
+version does not start. The editor answers `--version` with
+`tonepush <version>`; the updater asks the downloaded bundle's executable
+before installing it, so that answer must not change.
+
+Package-managed copies never replace themselves. The updater recognises
+Homebrew (cask and formula), pacman and the AUR, dpkg, rpm, Flatpak, Snap, Nix
+and `cargo install`, and anything else under `/usr`, and tells the user which
+tool updates it. Packages need no patch to turn updates off.
+
+The Linux and Windows archives carry no portable marker, so those copies do
+not replace themselves either: they point at the release page. The updater
+installs the executable named after the slug from an archive, and in
+TonePush's archives `tonepush` is the command-line tool, not the editor.
 
 ## Package Status
 

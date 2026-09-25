@@ -96,6 +96,22 @@ Packagers should read
 [PACKAGING.md](https://github.com/crmne/tonepush/blob/main/PACKAGING.md),
 which covers offline builds from the vendored-dependencies archive.
 
+## Updating
+
+TonePush asks GitHub once a day whether a newer version exists; nothing else
+is sent. When there is one, the version in the bottom-right corner turns amber
+and says so.
+
+- **macOS app from the DMG:** click **Update** next to it. TonePush downloads
+  the new version, checks it against its release signature, and offers
+  **Restart to update**. It closes, lets the pedal go and opens the new
+  version; if that does not start, the previous one comes back.
+- **Homebrew, the AUR, .deb or .rpm:** update through that package manager
+  (`brew upgrade`, your AUR helper, apt or dnf). Hovering the version says
+  which.
+- **Windows and the Linux archives:** download the new archive from this page
+  and replace the old files.
+
 ## After installing
 
 Whichever route you took, finish with [Getting Started](/getting-started/):

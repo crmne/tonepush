@@ -19,7 +19,7 @@ mod processor;
 mod session;
 mod table;
 mod theme;
-mod update;
+pub mod update;
 mod wav;
 
 pub use session::{spawn, spawn_repainting, ApplyBlock, Cmd, Evt};
@@ -123,34 +123,6 @@ impl LibraryLookup {
         } else {
             theme::Sync::Absent
         }
-    }
-}
-
-/// Draw the application version identically in every device adapter's status
-/// bar. Device and firmware labels vary; TonePush itself does not.
-fn version_label_ui(ui: &mut egui::Ui, update_available: Option<&str>) {
-    let (text, hover, url) = match update_available {
-        Some(tag) => (
-            RichText::new(format!("TonePush {} · {tag} available", update::VERSION))
-                .small()
-                .color(theme::ACCENT),
-            "A newer TonePush release is available. Click to open it.".to_owned(),
-            update::RELEASES,
-        ),
-        None => (
-            RichText::new(format!("TonePush {}", update::VERSION))
-                .small()
-                .color(theme::DIM),
-            format!("TonePush {} · click for the releases page", update::VERSION),
-            update::RELEASES,
-        ),
-    };
-    if ui
-        .add(egui::Label::new(text).sense(egui::Sense::click()))
-        .on_hover_text(hover)
-        .clicked()
-    {
-        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
     }
 }
 
@@ -541,10 +513,9 @@ pub struct App {
     /// A preset the Remove button is waiting on an answer about. Emptying a
     /// slot writes flash and there is no undo for it, so it asks first.
     confirm_clear: Option<i64>,
-    /// The version check: the answer while it is still coming, then the newer
-    /// release's tag once it has. Both stay `None` when there is nothing to
-    /// say, which is the common case and the quiet one.
-    update_check: Option<std::sync::mpsc::Receiver<String>>,
+    /// The daily release check and, when this copy may replace itself, the
+    /// download and restart. Quiet until there is something to say.
+    updates: update::Updates,
     /// What TonePush already has, by the hash of each published Tone artifact,
     /// and the answer while it is still coming. `None` means the site has not
     /// answered; `Some(empty)` is a real answer saying nothing is published.
@@ -553,7 +524,6 @@ pub struct App {
     /// Each library tone's publishable-artifact hash, worked out once. Reading
     /// and hashing a large library is nothing once and too much every frame.
     portable_hashes: std::collections::HashMap<String, String>,
-    update_available: Option<String>,
 }
 
 /// The global settings the EQ panel drives, by the object id the device holds
@@ -1123,11 +1093,10 @@ impl App {
             confirm_clear: None,
             confirm_switch: None,
             renaming_header: None,
-            update_check: Some(update::check()),
+            updates: update::Updates::default(),
             cloud_check: None,
             cloud_files: None,
             portable_hashes: std::collections::HashMap::new(),
-            update_available: None,
         };
         // The library is on screen from the first frame, so it is read before
         // the first frame rather than when something happens to refresh it.
@@ -1372,6 +1341,18 @@ impl App {
         }
     }
 
+    /// What the update helper passed to this launch: the receipt of an update
+    /// it installed, the message of one it rolled back, and the arguments to
+    /// relaunch with after the next update.
+    pub fn launched(
+        &mut self,
+        receipt: Option<update::Receipt>,
+        error: Option<String>,
+        arguments: Vec<String>,
+    ) {
+        self.updates.launched(receipt, error, arguments);
+    }
+
     fn note(&mut self, line: String) {
         self.log.push(line);
         if self.log.len() > 300 {
@@ -1522,7 +1503,10 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
         self.pro.drain();
-        self.poll_update_check();
+        self.updates.poll(ctx);
+        if let Some(problem) = self.updates.take_problem() {
+            self.problem(problem);
+        }
         for (name, bytes, replace) in self.pro.take_library_documents() {
             if replace {
                 let updated = library::named(&name)
@@ -1585,7 +1569,7 @@ impl eframe::App for App {
         }
         if pro_active {
             self.pro.top_bar(ui);
-            self.pro.status_bar(ui, self.update_available.as_deref());
+            self.pro.status_bar(ui, &mut self.updates);
             // This is the exact TonePush library surface used by HX devices:
             // local Tones, ordered Setlists, and Cloud all occupy the same
             // shared state and the same widgets.
@@ -1605,6 +1589,7 @@ impl eframe::App for App {
             }
             self.pro.body(ui);
             self.pro.windows(&ctx);
+            self.updates.acknowledge();
             return;
         }
         self.top_bar(ui);
@@ -1627,6 +1612,9 @@ impl eframe::App for App {
         self.preview_window(&ctx);
         // Over everything: the one step the app cannot work without.
         self.onboarding_modal(&ctx);
+        // The first frame is up: an update that relaunched into this version
+        // has started, so its helper can stop standing ready to roll back.
+        self.updates.acknowledge();
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1923,24 +1911,12 @@ impl App {
     /// Which TonePush this is, in the corner where a version belongs.
     ///
     /// It says nothing at all until there is something to say. When a newer
-    /// release exists the label picks up the accent and gains a clause, which
-    /// is enough - a modal on startup would be an editor interrupting a person
-    /// to talk about itself.
-    fn poll_update_check(&mut self) {
-        if let Some(rx) = &self.update_check {
-            match rx.try_recv() {
-                Ok(tag) => {
-                    self.update_available = Some(tag);
-                    self.update_check = None;
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.update_check = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            }
-        }
-    }
-
+    /// release exists the label picks up the accent and gains a clause, and a
+    /// copy that can replace itself gets one small button beside it - a modal
+    /// on startup would be an editor interrupting a person to talk about
+    /// itself.
     fn version_label(&mut self, ui: &mut egui::Ui) {
-        version_label_ui(ui, self.update_available.as_deref());
+        self.updates.status_ui(ui);
     }
 
     /// The editing keys every editor answers to. Skipped while something has

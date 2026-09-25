@@ -782,7 +782,7 @@ impl Panel {
         }
     }
 
-    pub(crate) fn status_bar(&mut self, root: &mut egui::Ui, update_available: Option<&str>) {
+    pub(crate) fn status_bar(&mut self, root: &mut egui::Ui, updates: &mut crate::update::Updates) {
         let snapshot = self.snapshot.clone();
         processor::status_bar(root, "pro_status", |ui| {
             ui.add_space(8.0);
@@ -827,7 +827,7 @@ impl Panel {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
-                crate::version_label_ui(ui, update_available);
+                updates.status_ui(ui);
                 let guard = if self.rollback.is_some() {
                     "Automatic backup ready"
                 } else {
