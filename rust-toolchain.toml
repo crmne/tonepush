@@ -4,5 +4,5 @@
 # Upgrading is deliberate: bump the version here, fix what the new lints and
 # formatting find, one commit.
 [toolchain]
-channel = "1.97.1"
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]
