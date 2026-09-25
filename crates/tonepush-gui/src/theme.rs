@@ -45,8 +45,22 @@ pub fn semibold(size: f32) -> egui::FontId {
 ///
 /// egui's own fonts and the installed faces for scripts Inter lacks stay
 /// behind them as fallbacks; a missing glyph must never become an empty box.
+///
+/// Every face is rasterized the way the desktop asks (see [`text_rendering`]).
 pub fn fonts(ctx: &egui::Context) {
-    font_setup().install(ctx);
+    let mut fonts = font_setup().definitions();
+    text_rendering().apply_to(&mut fonts);
+    ctx.set_fonts(fonts);
+}
+
+/// The desktop's font rendering settings: its hinting and, on Linux, glyph
+/// coverage drawn linearly as FreeType and cairo draw it, where egui's dark
+/// default (2c - c²) made TonePush's text heavier than the rest of the
+/// desktop. Asked once per process, since on Linux it is a D-Bus call.
+fn text_rendering() -> fastframe_text::TextRendering {
+    static RENDERING: std::sync::OnceLock<fastframe_text::TextRendering> =
+        std::sync::OnceLock::new();
+    *RENDERING.get_or_init(fastframe_text::detect)
 }
 
 fn font_setup() -> fastframe_fonts::FontSetup {
@@ -68,11 +82,7 @@ pub fn apply(ctx: &egui::Context) {
     let v = &mut style.visuals;
 
     v.dark_mode = true;
-    // Glyph coverage as the rasterizer produced it. egui's dark default
-    // (2c - c²) thickens light text on dark backgrounds, while the desktop
-    // (FreeType and cairo, GTK, browsers) draws coverage as is; side by side
-    // TonePush's text looked heavier than the rest.
-    v.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Off;
+    text_rendering().apply_to_visuals(v);
     v.panel_fill = PANEL;
     v.window_fill = BACKGROUND;
     v.extreme_bg_color = BACKGROUND;
@@ -1705,21 +1715,21 @@ mod tests {
     }
 
     #[test]
-    fn text_coverage_is_linear() {
-        // TonePush draws only the dark theme, the one egui makes non-linear;
-        // the light style is egui's own, which is already linear.
+    fn text_is_drawn_the_way_the_desktop_draws_it() {
         let ctx = egui::Context::default();
         super::apply(&ctx);
-        for theme in [egui::Theme::Dark, egui::Theme::Light] {
-            assert_eq!(
-                ctx.style_of(theme)
-                    .visuals
-                    .text_options
-                    .color_transfer_function,
-                egui::epaint::FontColorTransferFunction::Off,
-                "{theme:?}"
-            );
-        }
+        let options = ctx.style_of(egui::Theme::Dark).visuals.text_options;
+        assert_eq!(
+            options.color_transfer_function,
+            super::text_rendering().color_transfer_function(true)
+        );
+        // Linux desktops draw coverage linearly whatever their hinting; egui's
+        // dark default (2c - c²) made text heavier than GTK's.
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            options.color_transfer_function,
+            egui::epaint::FontColorTransferFunction::Off
+        );
     }
 
     #[test]
