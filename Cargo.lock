@@ -1183,8 +1183,8 @@ dependencies = [
 
 [[package]]
 name = "fastframe-fonts"
-version = "0.1.0"
-source = "git+https://github.com/crmne/fastframe?tag=v0.1.0#08078dbada8fa404f26dc72362934378da24c10f"
+version = "0.1.6"
+source = "git+https://github.com/crmne/fastframe?tag=v0.1.6#8e07d5de2ffe097bc5992896cc15df0b84192cbf"
 dependencies = [
  "directories",
  "egui",
@@ -1196,8 +1196,8 @@ dependencies = [
 
 [[package]]
 name = "fastframe-text"
-version = "0.1.0"
-source = "git+https://github.com/crmne/fastframe?tag=v0.1.0#08078dbada8fa404f26dc72362934378da24c10f"
+version = "0.1.6"
+source = "git+https://github.com/crmne/fastframe?tag=v0.1.6#8e07d5de2ffe097bc5992896cc15df0b84192cbf"
 dependencies = [
  "egui",
  "zbus",
@@ -1205,8 +1205,8 @@ dependencies = [
 
 [[package]]
 name = "fastframe-update"
-version = "0.1.0"
-source = "git+https://github.com/crmne/fastframe?tag=v0.1.0#08078dbada8fa404f26dc72362934378da24c10f"
+version = "0.1.6"
+source = "git+https://github.com/crmne/fastframe?tag=v0.1.6#8e07d5de2ffe097bc5992896cc15df0b84192cbf"
 dependencies = [
  "anyhow",
  "ring",

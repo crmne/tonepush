@@ -31,12 +31,12 @@ eframe = { version = "0.36", default-features = false, features = [
 egui = "0.36"
 # The shared foundation of the family's apps: Inter at the weights used here
 # with system fallbacks for other scripts, and the desktop's text rendering.
-fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.1.0" }
-fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.1.0" }
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.1.6" }
+fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.1.6" }
 # Self-update from GitHub releases: the daily check, refusing copies a package
 # manager owns, the signed download, and the helper that installs, relaunches
 # and rolls back. It talks through ureq below, so no second HTTP client.
-fastframe-update = { git = "https://github.com/crmne/fastframe", tag = "v0.1.0" }
+fastframe-update = { git = "https://github.com/crmne/fastframe", tag = "v0.1.6" }
 # The error type fastframe-update's transport returns.
 anyhow.workspace = true
 egui_extras = { version = "0.36", features = ["image", "file", "svg"] }
