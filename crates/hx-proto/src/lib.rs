@@ -59,6 +59,8 @@ pub struct DeviceProfile {
     pub name: &'static str,
     /// Number of user preset slots.
     pub presets: u16,
+    /// Preset letters shown in each front-panel bank.
+    pub presets_per_bank: u8,
     /// How many footswitches a bypass can be put on. Three on an HX Stomp,
     /// which is why its assign page offers five: FS1 to FS5 counts the two on
     /// the sides that a Stomp does not have and a Helix does.
@@ -68,10 +70,23 @@ pub struct DeviceProfile {
     pub device_id: u32,
 }
 
+impl DeviceProfile {
+    /// Read either a zero-based index or this device's front-panel label.
+    pub fn parse_slot(&self, text: &str) -> Option<i64> {
+        rpc::parse_slot_for(text, self.presets_per_bank)
+    }
+
+    /// Render a zero-based preset index as this device shows it.
+    pub fn slot_label(&self, index: i64) -> String {
+        rpc::slot_label_for(index, self.presets_per_bank)
+    }
+}
+
 pub const HX_STOMP: DeviceProfile = DeviceProfile {
     product_id: 0x4246,
     name: "HX Stomp",
     presets: 126,
+    presets_per_bank: 3,
     switches: 5,
     device_id: 0x0021_0006,
 };
@@ -79,6 +94,7 @@ pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     product_id: 0x4253,
     name: "HX Stomp XL",
     presets: 128,
+    presets_per_bank: 3,
     switches: 8,
     device_id: 0x0021_000B,
 };
@@ -86,6 +102,7 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     product_id: 0x4248,
     name: "Helix Floor",
     presets: 128,
+    presets_per_bank: 3,
     switches: 10,
     device_id: 0x0021_0001,
 };
@@ -93,6 +110,7 @@ pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     product_id: 0x4249,
     name: "Helix Rack",
     presets: 128,
+    presets_per_bank: 3,
     switches: 10,
     device_id: 0x0021_0002,
 };
@@ -100,6 +118,7 @@ pub const HELIX_LT: DeviceProfile = DeviceProfile {
     product_id: 0x424A,
     name: "Helix LT",
     presets: 128,
+    presets_per_bank: 3,
     switches: 10,
     device_id: 0x0021_0004,
 };
@@ -107,6 +126,7 @@ pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     product_id: 0x4245,
     name: "HX Effects",
     presets: 128,
+    presets_per_bank: 4,
     switches: 6,
     device_id: 0x0021_0005,
 };
@@ -146,5 +166,13 @@ mod tests {
         for (product_id, profile) in expected {
             assert_eq!(profile_for(product_id), Some(&profile));
         }
+    }
+
+    #[test]
+    fn hx_effects_uses_four_presets_per_bank() {
+        assert_eq!(HX_EFFECTS.slot_label(3), "01D");
+        assert_eq!(HX_EFFECTS.slot_label(104), "27A");
+        assert_eq!(HX_EFFECTS.parse_slot("27A"), Some(104));
+        assert_eq!(HX_EFFECTS.parse_slot("01D"), Some(3));
     }
 }

@@ -35,8 +35,10 @@ use crate::Error;
 
 /// One preset recovered from a backup.
 pub struct BackupPreset {
-    /// Zero-based slot: 0 is 01A, 1 is 01B, 3 is 02A (three presets to a bank).
+    /// Zero-based slot in front-panel order.
     pub index: usize,
+    /// Number of preset letters in this backup's device banks.
+    pub presets_per_bank: u8,
     /// The preset's name. Truly empty slots read as `""`; a never-edited one as
     /// `"New Preset"`.
     pub name: String,
@@ -48,10 +50,10 @@ pub struct BackupPreset {
 }
 
 impl BackupPreset {
-    /// The front-panel label for this slot, like `03B` - the pedal's own three
-    /// presets to a bank, so it matches what the hardware shows.
+    /// The front-panel label for this slot, using the device id stored in the
+    /// backup rather than assuming every HX family has three presets per bank.
     pub fn label(&self) -> String {
-        hx_proto::rpc::slot_label(self.index as i64)
+        hx_proto::rpc::slot_label_for(self.index as i64, self.presets_per_bank)
     }
 
     /// The `.hlx` document as pretty JSON with a trailing newline, matching how
@@ -132,6 +134,15 @@ fn presets_from(setlist: &Value) -> Result<Backup, Error> {
                 .as_object()
                 .ok_or_else(|| Error::Backup(format!("preset slot {index} is not an object")))?;
             let meta = preset.get("meta");
+            let presets_per_bank = preset
+                .get("device")
+                .and_then(Value::as_u64)
+                .and_then(|device_id| {
+                    hx_proto::PROFILES
+                        .iter()
+                        .find(|profile| u64::from(profile.device_id) == device_id)
+                })
+                .map_or(3, |profile| profile.presets_per_bank);
             let name = match meta {
                 None => String::new(),
                 Some(meta) => meta
@@ -158,6 +169,7 @@ fn presets_from(setlist: &Value) -> Result<Backup, Error> {
             });
             Ok(BackupPreset {
                 index,
+                presets_per_bank,
                 name,
                 hlx,
                 empty,
@@ -443,6 +455,27 @@ mod tests {
             Some("CT-Blackend")
         );
         assert!(hlx.pointer("/data/tone/dsp0").is_some());
+    }
+
+    #[test]
+    fn backup_labels_follow_the_stored_device_family() {
+        let presets: Vec<Value> = (0..105)
+            .map(|index| {
+                json!({
+                    "device": hx_proto::HX_EFFECTS.device_id,
+                    "meta": { "name": format!("Preset {index}") },
+                    "tone": {}
+                })
+            })
+            .collect();
+        let setlist = json!({
+            "schema": "L6Setlist",
+            "data": { "presets": presets }
+        });
+
+        let backup = read_backup(&bundle(&setlist)).expect("reads an HX Effects backup");
+        assert_eq!(backup.presets[3].label(), "01D");
+        assert_eq!(backup.presets[104].label(), "27A");
     }
 
     #[test]

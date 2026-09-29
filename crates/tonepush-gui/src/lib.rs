@@ -936,7 +936,13 @@ impl App {
         if self.pro_active() {
             format!("{}", slot + 1)
         } else {
-            hx_proto::rpc::slot_label(slot)
+            hx_proto::PROFILES
+                .iter()
+                .find(|profile| profile.name == self.device.trim())
+                .map_or_else(
+                    || hx_proto::rpc::slot_label(slot),
+                    |profile| profile.slot_label(slot),
+                )
         }
     }
 
@@ -1705,7 +1711,7 @@ impl App {
             ui.set_max_width(320.0);
             ui.label(format!(
                 "Empty {} - “{name}” - back to a blank preset?",
-                hx_proto::rpc::slot_label(index)
+                self.active_slot_label(index)
             ));
             ui.label(
                 RichText::new("This writes the pedal's flash. Undo does not reach it.")
@@ -2128,7 +2134,7 @@ impl App {
             .get(index as usize)
             .filter(|n| !n.is_empty())
             .cloned()
-            .unwrap_or_else(|| hx_proto::rpc::slot_label(index));
+            .unwrap_or_else(|| self.active_slot_label(index));
         let mut decided = None;
         theme::modal("Unsaved changes").show(ctx, |ui| {
             ui.set_max_width(340.0);
@@ -2228,7 +2234,7 @@ impl App {
         }
         if let Some(name) = processor::preset_title(
             ui,
-            &hx_proto::rpc::slot_label(self.preset_index),
+            &self.active_slot_label(self.preset_index),
             &self.preset_name,
             self.dirty,
             true,
@@ -2403,7 +2409,7 @@ impl App {
                             .cloned()
                             .unwrap_or_default();
                         let selected = index == self.preset_index;
-                        let label = format!("{}  {}", hx_proto::rpc::slot_label(index), name);
+                        let label = format!("{}  {}", self.active_slot_label(index), name);
                         ui.horizontal(|ui| {
                             // One height for the row, and every widget in it
                             // centred on that: a text star, a drawn icon and
@@ -2484,7 +2490,7 @@ impl App {
                                 let text = if empty {
                                     RichText::new(format!(
                                         "{}  empty",
-                                        hx_proto::rpc::slot_label(index)
+                                        self.active_slot_label(index)
                                     ))
                                     .color(theme::ACCENT)
                                 } else {
@@ -7446,7 +7452,7 @@ impl App {
                     let labels: Vec<String> = (0..total)
                         .map(|i| {
                             let name = self.presets.get(i as usize).cloned().unwrap_or_default();
-                            format!("{}  {}", hx_proto::rpc::slot_label(i), name)
+                            format!("{}  {}", self.active_slot_label(i), name)
                         })
                         .collect();
                     egui::ComboBox::from_id_salt("load-dest")
@@ -7504,7 +7510,7 @@ impl App {
             self.note(format!(
                 "loading {} into {}",
                 preview.name,
-                hx_proto::rpc::slot_label(preview.dest)
+                self.active_slot_label(preview.dest)
             ));
             match preview.load {
                 LoadKind::Document(bytes) => self.send(Cmd::LoadDocument {
