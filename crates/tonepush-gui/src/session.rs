@@ -154,7 +154,7 @@ pub enum Cmd {
         block: i64,
         index: i64,
         value: f32,
-        switch: bool,
+        kind: hx_catalog::Kind,
     },
     SetEnabled {
         block: i64,
@@ -347,8 +347,8 @@ pub struct Block {
 pub struct ApplyBlock {
     pub model: u32,
     pub enabled: bool,
-    /// `(parameter index, native value, is a switch)`.
-    pub params: Vec<(i64, f32, bool)>,
+    /// `(parameter index, native value, the catalog's kind for it)`.
+    pub params: Vec<(i64, f32, hx_catalog::Kind)>,
 }
 
 /// Put a model in a slot, with or without a cab riding along.
@@ -606,16 +606,10 @@ impl Worker {
                 block,
                 index,
                 value,
-                switch,
+                kind,
             } => {
-                use hx_proto::msgpack::Value;
                 self.snapshot();
-                let wire = if switch {
-                    Value::Bool(value >= 0.5)
-                } else {
-                    Value::F32(value)
-                };
-                if self.run_on_device(|d| d.set_param(block, index, wire)) {
+                if self.run_on_device(|d| d.set_param(block, index, kind.wire(value))) {
                     self.dirty = true;
                 }
             }
@@ -1447,8 +1441,6 @@ impl Worker {
     /// Clear every block, then set each of the tone's blocks into the run of
     /// slots after the endpoints, with its parameters and bypass state.
     fn apply_steps(&mut self, blocks: &[ApplyBlock]) -> Result<(), String> {
-        use hx_proto::msgpack::Value;
-
         let preset = self.read_settled().ok_or("the device stopped answering")?;
         for (position, slot) in preset.slots.iter().enumerate() {
             if slot.kind == hx_proto::preset::Kind::Block && slot.model.is_some() {
@@ -1497,12 +1489,8 @@ impl Worker {
                     blocks.len()
                 ));
             }
-            for (index, value, switch) in &block.params {
-                let wire = if *switch {
-                    Value::Bool(*value >= 0.5)
-                } else {
-                    Value::F32(*value)
-                };
+            for (index, value, kind) in &block.params {
+                let wire = kind.wire(*value);
                 // A parameter the device declines is a detail; the block is
                 // already right, so keep going rather than tearing down.
                 let (index, wire) = (*index, wire.clone());

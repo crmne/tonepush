@@ -7226,10 +7226,10 @@ impl App {
             for (name, value) in &block.params {
                 match catalog.param_index(block.model_number, name) {
                     Some(index) => {
-                        let switch = catalog
+                        let kind = catalog
                             .param(block.model_number, index)
-                            .is_some_and(|p| p.kind == Kind::Switch);
-                        params.push((index as i64, *value, switch));
+                            .map_or(Kind::Continuous, |p| p.kind);
+                        params.push((index as i64, *value, kind));
                     }
                     None => tone
                         .skipped
@@ -9643,7 +9643,7 @@ impl App {
                                 if param.kind == Kind::Enum {
                                     current = current.round();
                                 }
-                                edit = Some((index as i64, current, param.kind == Kind::Switch));
+                                edit = Some((index as i64, current, param.kind));
                             }
                         });
                     });
@@ -9709,7 +9709,7 @@ impl App {
                 paired: None,
             });
         }
-        if let Some((index, value, switch)) = edit {
+        if let Some((index, value, kind)) = edit {
             let slot = &mut self.chain[self.selected];
             let target = if paired {
                 &mut slot.paired_values
@@ -9724,7 +9724,7 @@ impl App {
                 block: position,
                 index,
                 value,
-                switch,
+                kind,
             });
         }
     }

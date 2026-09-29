@@ -72,7 +72,7 @@ fn a_symbolic_tone_loads_into_the_edit_buffer_and_undo_restores() {
             ApplyBlock {
                 model: 101,
                 enabled: false,
-                params: vec![(0, 0.25, false)],
+                params: vec![(0, 0.25, hx_catalog::Kind::Continuous)],
             },
         ],
     })

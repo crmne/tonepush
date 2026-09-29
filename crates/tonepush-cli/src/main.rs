@@ -1444,8 +1444,6 @@ fn route(session: &mut hx_usb::Session, block: i64, to: &str) -> Result<()> {
 /// write `tonepush set 4 Drive 5.0` rather than counting positions. Values are typed
 /// in the units HX Edit displays, and the catalog converts them.
 fn set_param(session: &mut hx_usb::Session, block: i64, param: &str, value: &str) -> Result<()> {
-    use hx_proto::msgpack::Value;
-
     let preset = session.read_preset()?;
     let slot = preset
         .slots
@@ -1475,12 +1473,7 @@ fn set_param(session: &mut hx_usb::Session, block: i64, param: &str, value: &str
     let native = catalog
         .parse(described, value)
         .with_context(|| format!("{value:?} is not a valid {}", described.name))?;
-    let wire = match described.kind {
-        hx_catalog::Kind::Switch => Value::Bool(native >= 0.5),
-        _ => Value::F32(native),
-    };
-
-    session.set_param(block - 1, index, wire)?;
+    session.set_param(block - 1, index, described.kind.wire(native))?;
     println!(
         "block {block}: {} = {}",
         described.name,

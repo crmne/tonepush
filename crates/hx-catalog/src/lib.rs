@@ -125,6 +125,21 @@ pub enum Kind {
     Text,
 }
 
+impl Kind {
+    /// A native value in the wire type the device stores for this kind.
+    ///
+    /// Presets hold a menu's choice as an integer, and the device refuses a
+    /// float for one with error -3 (#7). Switches are booleans, the rest floats.
+    pub fn wire(self, native: f32) -> hx_proto::msgpack::Value {
+        use hx_proto::msgpack::Value;
+        match self {
+            Kind::Switch => Value::Bool(native >= 0.5),
+            Kind::Enum => Value::Int(native.round() as i64),
+            Kind::Continuous | Kind::Text => Value::F32(native),
+        }
+    }
+}
+
 /// A group in the model browser, matching HX Edit's own left-hand list.
 #[derive(Debug, Clone)]
 pub struct Category {
@@ -636,6 +651,14 @@ pub(crate) mod tests {
         let comp = c.model("HD2_CompressorLAStudioComp").unwrap();
         let ty = comp.params.iter().find(|p| p.name == "Type").unwrap();
         assert_eq!(ty.kind, Kind::Switch);
+    }
+
+    #[test]
+    fn menus_go_to_the_device_as_integers() {
+        use hx_proto::msgpack::Value;
+        assert_eq!(Kind::Enum.wire(2.0), Value::Int(2));
+        assert_eq!(Kind::Switch.wire(1.0), Value::Bool(true));
+        assert_eq!(Kind::Continuous.wire(0.5), Value::F32(0.5));
     }
 
     #[test]
