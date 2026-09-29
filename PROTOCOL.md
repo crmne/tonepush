@@ -27,8 +27,8 @@ Interface 0 has no kernel driver bound to it, and HX Edit holds it exclusively
 while running - so a third-party client must wait for HX Edit to quit.
 
 Known product IDs (`0x0E41` vendor): `0x4246` HX Stomp, `0x4253` HX Stomp XL,
-`0x4248` Helix Floor. No public PID is known for HX Effects, POD Go, Helix LT or
-Helix Rack.
+`0x4248` Helix Floor, `0x4245` HX Effects (reported on a unit at firmware 3.80,
+#9). No public PID is known for POD Go, Helix LT or Helix Rack.
 
 **The editor protocol is not on MIDI. [confirmed]** Every editor transfer in our
 captures is on `0x01`/`0x81` after `libusb_claim_interface(0)`. Interface 4 carries
@@ -295,6 +295,9 @@ brightness.
 Key **74 is the source**, as an ordinal in the order HX Edit lists them: **0
 None**, 1–2 the expression pedals, 3–7 the footswitches, 8 MIDI CC, 9 Snapshots
 - `74: 1` for EXP 1 and `74: 9` for Snapshots are ours, from the assign capture.
+An HX Effects has six footswitches and its stored presets use ordinal **10** as
+well; from the data it looks like 3–8 footswitches, 9 MIDI CC and 10 Snapshots
+there, but that is not confirmed (#9).
 Key **71 is not the constant it looks like**: it is the assignment's on switch,
 `4` when one is made and `0` when it is removed, and removing sends `{74: 0,
 71: 0}` rather than a separate opcode.
@@ -810,7 +813,10 @@ A preset arrives as an opcode-22/24 result: a MessagePack string/blob whose
 contents are *themselves* MessagePack - three top-level values:
 
 1. `'l6-helix'` - magic
-2. a binary section table of u32 LE offsets
+2. a binary section table of u32 LE offsets: twelve words, or ten on presets
+   stored by older firmware (untouched factory presets on an HX Effects at
+   3.80), which lack the two trailing total lengths and so have every offset
+   eight bytes smaller. A write keeps the form the document arrived in (#9).
 3. the preset map
 
 The preset map decodes as:

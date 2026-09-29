@@ -1136,8 +1136,16 @@ impl Preset {
 
         // The prefix the tone will sit behind: magic, then the table itself,
         // whose length is fixed at 9 + 1 + tail entries.
+        // Presets stored by older firmware carry a ten-word table without the
+        // two trailing lengths - 42 of the 119 on an HX Effects at 3.80, the
+        // untouched factory ones. Keep whichever form the document arrived in.
+        let tail = if self.sections.len() == (1 + SLOT_ORDER.len()) * 4 {
+            0
+        } else {
+            2
+        };
         let magic = Encoder::encode(&Value::Str(Self::MAGIC.to_owned()));
-        let table_len = (1 + SLOT_ORDER.len() + 2) * 4;
+        let table_len = (1 + SLOT_ORDER.len() + tail) * 4;
         let table_hdr =
             Encoder::encode(&Value::Bin(vec![0; table_len], self.sections_width)).len() - table_len;
         let tone_at = magic.len() + table_hdr + table_len;
@@ -1169,8 +1177,9 @@ impl Preset {
         for key in SLOT_ORDER {
             out.extend_from_slice(&section_word(*key_at.get(&key)?)?);
         }
-        out.extend_from_slice(&section_word(total)?);
-        out.extend_from_slice(&section_word(total)?);
+        for _ in 0..tail {
+            out.extend_from_slice(&section_word(total)?);
+        }
         Some(out)
     }
 
@@ -1406,7 +1415,9 @@ fn assignments_are_well_formed(tone: &Value) -> bool {
             Value::Array(entries) => entries,
             _ => return false,
         };
-        if !entries.is_empty() && crate::rpc::Source::from_ordinal(ordinal as i64).is_none() {
+        // HX Effects has six footswitches, so its list runs one longer than the
+        // ordinals `Source` knows: 10 is in use there, apparently for Snapshots.
+        if !entries.is_empty() && !(1..=10).contains(&ordinal) {
             return false;
         }
         entries.iter().all(|entry| {
@@ -1466,9 +1477,11 @@ fn snapshot_is_well_formed(entry: &Value, slot_count: usize) -> bool {
     let valid_tempo = entry
         .get(key::SNAPSHOT_TEMPO)
         .is_some_and(tempo_is_well_formed);
-    let valid_flags = [key::SNAPSHOT_VALID, key::SNAPSHOT_NAMED]
-        .into_iter()
-        .all(|field| matches!(entry.get(field), Some(Value::Bool(_))));
+    // HX Effects omits the named flag on a snapshot whose name was never typed
+    // ("SNAPSHOT 1"), which `snapshot_details` already reads as not named. Seen
+    // on hardware, firmware 3.80, in a document read with FETCH_PRESET.
+    let valid_flags = matches!(entry.get(key::SNAPSHOT_VALID), Some(Value::Bool(_)))
+        && matches!(entry.get(key::SNAPSHOT_NAMED), None | Some(Value::Bool(_)));
     let valid_slots = match entry.get(key::SNAPSHOT_SLOTS) {
         Some(Value::Array(slots)) if slots.len() == slot_count => {
             slots.iter().all(|slot| match slot {
@@ -2941,6 +2954,42 @@ mod tests {
         let mut by_source = (0..9).map(|_| Value::Nil).collect::<Vec<_>>();
         by_source[8] = Value::Array(vec![entry(midi)]);
         assert!(Preset::parse(&document(Value::Array(by_source))).is_none());
+
+        // HX Effects uses ordinal 10; nothing uses 11.
+        let snapshot_driven = crate::msgmap! {
+            key::ASSIGNED_KIND => Value::Int(4),
+            key::ASSIGNED_MIN => Value::Int(0),
+            key::ASSIGNED_MAX => Value::Int(1),
+            key::ASSIGNED_ON => Value::Int(0),
+            key::ASSIGNED_TARGET => crate::msgmap! {
+                key::ASSIGNED_PARAM => Value::Int(1),
+            },
+        };
+        let mut by_source = (0..11).map(|_| Value::Nil).collect::<Vec<_>>();
+        by_source[10] = Value::Array(vec![entry(snapshot_driven.clone())]);
+        assert!(Preset::parse(&document(Value::Array(by_source))).is_some());
+        let mut by_source = (0..12).map(|_| Value::Nil).collect::<Vec<_>>();
+        by_source[11] = Value::Array(vec![entry(snapshot_driven)]);
+        assert!(Preset::parse(&document(Value::Array(by_source))).is_none());
+    }
+
+    #[test]
+    fn keeps_the_ten_word_section_table_of_an_older_preset() {
+        // The same document with the table older firmware writes: the first
+        // ten words, each eight bytes earlier because the table is shorter.
+        let modern = Preset::parse(&sample()).unwrap();
+        assert_eq!(modern.sections.len(), 48);
+        let older: Vec<u8> = modern.sections[..40]
+            .chunks(4)
+            .flat_map(|word| (u32::from_le_bytes(word.try_into().unwrap()) - 8).to_le_bytes())
+            .collect();
+        let mut blob = Encoder::encode(&Value::Str(Preset::MAGIC.to_owned()));
+        blob.extend(Encoder::encode(&Value::Bin(older, modern.sections_width)));
+        blob.extend(Encoder::encode(&modern.tone));
+
+        let parsed = Preset::parse(&blob).expect("a ten-word table parses");
+        assert_eq!(parsed.sections.len(), 40);
+        assert_eq!(parsed.encode(), blob, "and is written back byte for byte");
     }
 
     #[test]
@@ -3002,6 +3051,44 @@ mod tests {
         };
         first.push(Value::Nil);
         assert!(Preset::parse(&document(trailing_state)).is_none());
+    }
+
+    #[test]
+    fn accepts_a_snapshot_without_the_named_flag() {
+        // HX Effects 3.80 leaves the flag out when the name was never typed.
+        let slot_count = Preset::parse(&sample()).unwrap().slots.len();
+        let mut preset = Preset::parse(&sample()).unwrap();
+        let mut snapshot = crate::msgmap! {
+            key::SNAPSHOT_VALID => Value::Bool(true),
+            key::SNAPSHOT_SLOTS => Value::Array(
+                (0..slot_count)
+                    .map(|_| Value::Array(vec![Value::Int(0), Value::Bool(true)]))
+                    .collect(),
+            ),
+            key::SNAPSHOT_NAME => Value::Str("SNAPSHOT 1".into()),
+            key::SNAPSHOT_TEMPO => Value::Int(120),
+            key::SNAPSHOT_NAMED => Value::Bool(false),
+        };
+        let Value::Map(fields) = &mut snapshot else {
+            panic!("snapshot map");
+        };
+        fields.retain(|(k, _)| *k != crate::msgpack::Key::Int(key::SNAPSHOT_NAMED));
+        *preset.tone.get_mut(key::SNAPSHOT_SECTION).unwrap() = crate::msgmap! {
+            key::SNAPSHOTS => Value::Array(vec![snapshot.clone()]),
+        };
+
+        let parsed = Preset::parse(&preset.encode()).expect("a device-written snapshot parses");
+        assert!(!parsed.snapshot_details()[0].named);
+
+        // Present but not a boolean is still malformed.
+        let Value::Map(fields) = &mut snapshot else {
+            panic!("snapshot map");
+        };
+        fields.push((crate::msgpack::Key::Int(key::SNAPSHOT_NAMED), Value::Nil));
+        *preset.tone.get_mut(key::SNAPSHOT_SECTION).unwrap() = crate::msgmap! {
+            key::SNAPSHOTS => Value::Array(vec![snapshot]),
+        };
+        assert!(Preset::parse(&preset.encode()).is_none());
     }
 
     #[test]
