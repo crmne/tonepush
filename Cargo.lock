@@ -639,9 +639,9 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "combine"
-version = "4.6.7"
+version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
+checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
  "memchr",
@@ -1595,7 +1595,7 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "hx-catalog"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "flate2",
  "hx-proto",
@@ -1606,11 +1606,11 @@ dependencies = [
 
 [[package]]
 name = "hx-proto"
-version = "0.6.1"
+version = "0.7.0"
 
 [[package]]
 name = "hx-ruby"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "hx-catalog",
  "hx-proto",
@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "hx-usb"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "atomic-write-file",
  "hx-proto",
@@ -2021,7 +2021,7 @@ dependencies = [
  "bitflags 2.13.1",
  "libc",
  "plain",
- "redox_syscall 0.9.2",
+ "redox_syscall 0.9.4",
 ]
 
 [[package]]
@@ -3058,9 +3058,9 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.9.2"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1c93da5bb2c5d4e6c0ef7abeead62c89169a0a4882bfb83ac892f2423aea2fe"
+checksum = "737970939a87c6fa31e7acad13307bccbb017a073b695b6089a2c484f929e20e"
 dependencies = [
  "bitflags 2.13.1",
 ]
@@ -3840,7 +3840,7 @@ dependencies = [
 
 [[package]]
 name = "tonepush-cli"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "atomic-write-file",
@@ -3855,7 +3855,7 @@ dependencies = [
 
 [[package]]
 name = "tonepush-gui"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "atomic-write-file",
@@ -4122,7 +4122,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voidx-client"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "atomic-write-file",
  "flate2",
@@ -4136,7 +4136,7 @@ dependencies = [
 
 [[package]]
 name = "voidx-proto"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
