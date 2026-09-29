@@ -54,6 +54,14 @@ fn main() -> eframe::Result<()> {
         eprintln!("gave {renamed} tones their own names on disk");
     }
 
+    // Colour emoji in the platform's own style: choose the font now and find
+    // it off this thread, so the first frame never waits on a font scan.
+    // Without a colour emoji font, egui's monochrome face draws them as before.
+    fastframe_emoji::EmojiSetup::default()
+        .system(true)
+        .install();
+    std::thread::spawn(fastframe_emoji::warm_up);
+
     let (tx, rx, repaint) = tonepush_gui::spawn_repainting();
     // Closing the window must let the device go cleanly. A process that just
     // disappears leaves the device mid-conversation, and it then refuses new
@@ -69,6 +77,9 @@ fn main() -> eframe::Result<()> {
             repaint.bind(&cc.egui_ctx);
             // Lets `ui.image("file://…")` load the model artwork HX Edit ships.
             egui_extras::install_image_loaders(&cc.egui_ctx);
+            // Paints those colour emoji over every text egui lays out.
+            cc.egui_ctx
+                .add_plugin(fastframe_emoji::EmojiPlugin::default());
             let mut app = tonepush_gui::App::new(&cc.egui_ctx, tx, rx);
             app.launched(launch.receipt, launch.error, relaunch);
             Ok(Box::new(app))
