@@ -1,12 +1,14 @@
 # Packaging
 
 [`native-packages.yaml`](native-packages.yaml) is the packaging configuration:
-it pins the shared CLI and nFPM versions and declares Linux amd64/arm64 inputs,
-DEB/RPM contents, dependencies, recipe templates and downstream repositories.
+it pins the shared CLI and nFPM versions and declares the macOS DMG target,
+Linux amd64/arm64 inputs, DEB/RPM contents, dependencies, recipe templates and
+downstream repositories. The Linux packaging workflow selects only the Linux
+targets; the release workflow's native macOS job builds the DMG target.
 Application assets and native recipes stay in `packaging/`.
 
 ```sh
-gem install native-packages --version 0.5.1
+gem install native-packages --version 0.7.0
 native-packages validate
 native-packages doctor
 native-packages build --release v1.2.3
@@ -42,14 +44,14 @@ AUR automation needs `PUBLISH_AUR=true`, `AUR_SSH_KEY` and `AUR_KNOWN_HOSTS`;
 Homebrew automation needs `PUBLISH_HOMEBREW=true` and
 `HOMEBREW_TAP_GITHUB_TOKEN`. Enable only configured destinations.
 
-The native macOS configuration, Windows and Flatpak build steps remain responsible
+The native macOS target, Windows and Flatpak build steps remain responsible
 for their native artifacts. Additional nFPM formats require suitable platform
 inputs and dependencies; adding a format does not port the application.
-See the [shared CLI documentation](https://github.com/crmne/native-packages/tree/v0.5.1)
+See the [shared CLI documentation](https://github.com/crmne/native-packages/tree/v0.7.0)
 for commands and supported formats.
 
-To upgrade the tool, change `tool.version` in both `native-packages.yaml` and
-`native-packages.macos.yaml`, the matching immutable workflow reference, and any release-job gem installation
+To upgrade the tool, change `tool.version` in `native-packages.yaml`, the
+matching immutable workflow reference, and any release-job gem installation
 pin together. Applications need no packaging Gemfile, lockfile or Ruby wrapper.
 
 ## Upstream Release Assets
@@ -212,8 +214,10 @@ tonepush chain
 
 ## Automatic macOS notarization
 
-The macOS release job builds the app first, then uses
-`native-packages.macos.yaml` and `packaging/macos/dmg.rb` to package it.
+The macOS release job builds the app first, then builds the `macos-universal`
+target of `native-packages.yaml` with `--defer-recipes`, which runs
+`packaging/macos/dmg.rb` and leaves the Homebrew and AUR recipes to the Linux
+packaging job that runs once every asset is published.
 The shared gem signs its owned input copy, notarizes the DMG, staples and validates
 Apple's ticket, and only then records final checksums. Configure these repository
 secrets, which the job exposes as environment variables:
@@ -226,13 +230,13 @@ secrets, which the job exposes as environment variables:
 A complete set enables notarization automatically. An incomplete set fails;
 no values retain local builds without Developer ID signing. Application inputs
 and the user's normal keychains remain unchanged. See the shared
-[Apple setup and phase contract](https://github.com/crmne/native-packages/blob/v0.5.1/docs/apple-notarization.md).
+[Apple setup and phase contract](https://github.com/crmne/native-packages/blob/v0.7.0/docs/apple-notarization.md).
 
 After preparing `dist/macos-input` on a Mac, test packaging without publishing:
 
 ```sh
-native-packages --config native-packages.macos.yaml build \
-  --version 1.2.3 --target macos-universal --output dist/macos-packages-test
+native-packages build --version 1.2.3 --target macos-universal \
+  --defer-recipes --output dist/macos-packages-test
 ```
 
 Secret configuration applies to future builds. Existing published DMGs retain

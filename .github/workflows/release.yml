@@ -130,7 +130,7 @@ jobs:
         with:
           ruby-version: '4.0'
       - name: Install native packaging
-        run: gem install native-packages --version 0.5.1 --no-document
+        run: gem install native-packages --version 0.7.0 --no-document
 
       - name: App bundle
         run: |
@@ -142,8 +142,8 @@ jobs:
 
       - name: Package, sign and notarize macOS app
         run: |
-          native-packages --config native-packages.macos.yaml build \
-            --version "${GITHUB_REF_NAME#v}" --target macos-universal \
+          native-packages build \
+            --version "${GITHUB_REF_NAME#v}" --target macos-universal --defer-recipes \
             --output "$RUNNER_TEMP/macos-packages"
           cp "$RUNNER_TEMP/macos-packages/packages/macos-universal/dmg/"*.dmg dist/
 

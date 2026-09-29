@@ -3,9 +3,9 @@ name: Packaging
 on:
   push:
     branches: [main, master]
-    paths: [native-packages.yaml, native-packages.macos.yaml, packaging/**, .github/workflows/packaging.yml, .github/workflows/release.yml]
+    paths: [native-packages.yaml, packaging/**, .github/workflows/packaging.yml, .github/workflows/release.yml]
   pull_request:
-    paths: [native-packages.yaml, native-packages.macos.yaml, packaging/**, .github/workflows/packaging.yml, .github/workflows/release.yml]
+    paths: [native-packages.yaml, packaging/**, .github/workflows/packaging.yml, .github/workflows/release.yml]
   workflow_dispatch:
     inputs:
       version:
@@ -43,6 +43,7 @@ jobs:
       contents: write
     uses: crmne/native-packages/.github/workflows/package.yml@8025372579b1864b09b579255484f4e15f65bc78 # main after v0.7.0: tap deploy key
     with:
+      targets: linux-amd64,linux-arm64
       version: ${{ inputs.version || '' }}
       publish: ${{ inputs.publish == true && inputs.version != '' }}
     secrets: inherit

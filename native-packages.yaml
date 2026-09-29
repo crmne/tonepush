@@ -1,8 +1,8 @@
-# Shared CLI: gem install native-packages --version 0.5.1
+# Shared CLI: gem install native-packages --version 0.7.0
 ---
 schema: 1
 tool:
-  version: 0.5.1
+  version: 0.7.0
   nfpm: 2.47.0
 nfpm:
   name: tonepush
@@ -59,6 +59,18 @@ nfpm:
   rpm:
     buildhost: github-actions
 targets:
+  # Built by the release workflow's native macOS job from the app input it
+  # assembles; the Linux packaging workflow selects only the Linux targets.
+  macos-universal:
+    platform: macos
+    arch: universal
+    formats: [dmg]
+    input:
+      kind: directory
+      local: dist/macos-input
+    native:
+      command: [ruby, packaging/macos/dmg.rb, '@PAYLOAD@', '@PACKAGE@']
+      output: 'tonepush-@TAG@-macos-universal.dmg'
   linux-amd64:
     platform: linux
     arch: amd64
@@ -84,6 +96,7 @@ targets:
 release:
   repository: crmne/tonepush
   checksums: checksums.txt
+  prereleases: true
 assets:
   AMD64:
     file: tonepush-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
