@@ -126,6 +126,18 @@ fn presets_from(setlist: &Value) -> Result<Backup, Error> {
         .and_then(Value::as_array)
         .ok_or_else(|| Error::Backup("the setlist holds no presets".into()))?;
 
+    // Every slot of a backup comes from the same device, but an empty one may
+    // not say which, so take the family from the first slot that does.
+    let presets_per_bank = raw
+        .iter()
+        .find_map(|preset| preset.get("device")?.as_u64())
+        .and_then(|device_id| {
+            hx_proto::PROFILES
+                .iter()
+                .find(|profile| u64::from(profile.device_id) == device_id)
+        })
+        .map_or(3, |profile| profile.presets_per_bank);
+
     let presets = raw
         .iter()
         .enumerate()
@@ -134,15 +146,6 @@ fn presets_from(setlist: &Value) -> Result<Backup, Error> {
                 .as_object()
                 .ok_or_else(|| Error::Backup(format!("preset slot {index} is not an object")))?;
             let meta = preset.get("meta");
-            let presets_per_bank = preset
-                .get("device")
-                .and_then(Value::as_u64)
-                .and_then(|device_id| {
-                    hx_proto::PROFILES
-                        .iter()
-                        .find(|profile| u64::from(profile.device_id) == device_id)
-                })
-                .map_or(3, |profile| profile.presets_per_bank);
             let name = match meta {
                 None => String::new(),
                 Some(meta) => meta
@@ -460,12 +463,14 @@ mod tests {
     #[test]
     fn backup_labels_follow_the_stored_device_family() {
         let presets: Vec<Value> = (0..105)
-            .map(|index| {
-                json!({
+            .map(|index| match index {
+                // An empty slot carries no device id of its own.
+                3 => json!({ "tone": {} }),
+                _ => json!({
                     "device": hx_proto::HX_EFFECTS.device_id,
                     "meta": { "name": format!("Preset {index}") },
                     "tone": {}
-                })
+                }),
             })
             .collect();
         let setlist = json!({

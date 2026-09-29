@@ -784,6 +784,9 @@ traffic, check that it actually changed something.
 `{107: 0, 108: 7}` is the preset the front panel labels `03B`, so the label is
 `index / 3 + 1` followed by `A`/`B`/`C`. Selecting index 7 and reading the
 metadata back returns `CT-Sad`, which is what HX Edit shows at 03B.
+That is an HX Stomp's three presets to a bank. An HX Effects has 32 banks of
+four, `A` to `D`, so the same arithmetic runs on 4 there: index 104 is `27A`
+(reported on hardware, #9).
 
 **Reply statuses (key 103). [confirmed]** Three values cover everything
 observed:
