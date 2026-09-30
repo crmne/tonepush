@@ -2,20 +2,21 @@
 
 [`native-packages.yaml`](native-packages.yaml) is the packaging configuration:
 it pins the shared CLI and nFPM versions and declares the macOS DMG target,
-Linux amd64/arm64 inputs, DEB/RPM contents, dependencies, recipe templates and
+Linux amd64/arm64 inputs, DEB/RPM/AppImage contents, dependencies, recipe templates and
 downstream repositories. The Linux packaging workflow selects only the Linux
 targets; the release workflow's native macOS job builds the DMG target.
 Application assets and native recipes stay in `packaging/`.
 
 ```sh
-gem install native-packages --version 0.7.0
+gem install native-packages --version 0.8.1
 native-packages validate
 native-packages doctor
 native-packages build --release v1.2.3
 ```
 
 Replace `v1.2.3` with an existing stable application release. Local use also
-requires nFPM 2.47.0, `bsdtar` and `readelf`; AUR generation needs `makepkg`
+requires nFPM 2.47.0, `bsdtar`, `readelf` and, for the AppImage,
+`mksquashfs` (squashfs-tools); AUR generation needs `makepkg`
 or Docker. CI installs its tooling. To package local release archives, put
 every configured input and recipe asset under `dist/`, then run
 `native-packages build --version 1.2.3`. Outputs go to
@@ -47,7 +48,7 @@ Homebrew automation needs `PUBLISH_HOMEBREW=true` and
 The native macOS target, Windows and Flatpak build steps remain responsible
 for their native artifacts. Additional nFPM formats require suitable platform
 inputs and dependencies; adding a format does not port the application.
-See the [shared CLI documentation](https://github.com/crmne/native-packages/tree/v0.7.0)
+See the [shared CLI documentation](https://github.com/crmne/native-packages/tree/v0.8.1)
 for commands and supported formats.
 
 To upgrade the tool, change `tool.version` in `native-packages.yaml`, the
@@ -230,7 +231,7 @@ secrets, which the job exposes as environment variables:
 A complete set enables notarization automatically. An incomplete set fails;
 no values retain local builds without Developer ID signing. Application inputs
 and the user's normal keychains remain unchanged. See the shared
-[Apple setup and phase contract](https://github.com/crmne/native-packages/blob/v0.7.0/docs/apple-notarization.md).
+[Apple setup and phase contract](https://github.com/crmne/native-packages/blob/v0.8.1/docs/apple-notarization.md).
 
 After preparing `dist/macos-input` on a Mac, test packaging without publishing:
 

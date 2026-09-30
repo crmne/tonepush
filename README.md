@@ -112,7 +112,8 @@ from a Linux or Windows archive can update themselves: click **Update**, then
 **Restart to update**. The download is checked against TonePush's release
 signature first, and if the new version does not start the old one comes back.
 Copies installed with Homebrew, the AUR or a .deb/.rpm are left to that package
-manager, and the status bar says which.
+manager, and the status bar says which. An AppImage is replaced by downloading
+the new one.
 
 ### HX model names and pictures
 

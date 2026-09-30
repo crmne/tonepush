@@ -130,7 +130,7 @@ jobs:
         with:
           ruby-version: '4.0'
       - name: Install native packaging
-        run: gem install native-packages --version 0.7.0 --no-document
+        run: gem install native-packages --version 0.8.1 --no-document
 
       - name: App bundle
         run: |
@@ -373,7 +373,7 @@ jobs:
         env:
           TONEPUSH_UPDATE_SIGNING_KEY: ${{ secrets.TONEPUSH_UPDATE_SIGNING_KEY }}
         run: |
-          gem install native-packages --version 0.7.0 --no-document
+          gem install native-packages --version 0.8.1 --no-document
           native-packages sign-checksums dist/checksums.txt \
             --public-key key/assets/update-public-key.hex \
             --key-env TONEPUSH_UPDATE_SIGNING_KEY
