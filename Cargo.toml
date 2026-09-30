@@ -60,7 +60,9 @@ epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "0b431145c
 # crmne/winit apps-0.30, shared with the same apps: winit 0.30.13 plus Wayland
 # `Occluded` for the xdg-shell suspended state with commits on the app's behalf
 # while it isn't presenting (rust-windowing/winit#4709, #4710), which eframe
-# from the fork above uses. The fork's other changes (macOS Quit through close
-# requests behind a feature, Wayland file drag and drop) are unused here. Drop
-# it when a winit release includes the Wayland changes.
-winit = { git = "https://github.com/crmne/winit", rev = "fc4f39ff0993dd235952b749dd16b856c0194e1f" }
+# from the fork above uses. Its other change (macOS Quit through close requests
+# behind a feature) is unused here. Its Wayland file drops were reverted
+# (544a737): their extra data device kept the selection from egui's clipboard
+# on Hyprland, so paste failed in every text field (crmne/spotifast#614).
+# Drop the fork when a winit release includes the Wayland changes.
+winit = { git = "https://github.com/crmne/winit", rev = "544a73716c7a54c916d97d6c86c0b1bdaa81234e" }

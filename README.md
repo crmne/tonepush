@@ -39,8 +39,9 @@ operation against the hardware:
 - **Snapshots, setlists, tempo.** Switch, rename, and edit them.
 - **Device settings.** The global namespace HX Edit's preferences write to,
   readable and writable by id (`tonepush setting`, `set-setting`).
-- **Impulse responses.** Drop a WAV on the window; upload, list and clear
-  verified end to end, including the checksum.
+- **Impulse responses.** Drop a WAV on the window (on Wayland, pick it from
+  the IR list instead; dropping files there isn't available yet); upload, list
+  and clear verified end to end, including the checksum.
 - **`.hlx` files.** Applied as ordinary parameter edits with a `--dry-run`
   preview, so a bad file costs one parameter, not the preset.
 - **Live activity.** The editor follows what you do on the front panel.
