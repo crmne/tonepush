@@ -82,6 +82,15 @@ impl Pedal {
             .collect()
     }
 
+    /// The last transaction the host used on a channel.
+    pub fn last_txn(&self, channel: ChannelId) -> Option<i64> {
+        self.requests
+            .iter()
+            .rev()
+            .find(|(node, ..)| *node == channel.device)
+            .map(|(_, txn, ..)| *txn)
+    }
+
     /// Say something unasked, on the events channel.
     pub fn notify(&mut self, event: i64, args: Value) {
         self.reply(

@@ -748,8 +748,14 @@ impl Session {
     /// writes captured from it all follow the pattern. Not waiting is what our
     /// sustained document writes did, and the device tolerates roughly a dozen
     /// racing commits before its transfer state machine jams for good.
+    ///
+    /// A completion names only its transaction, and transactions are counted
+    /// per channel from the same 1000, so a completion owed to another
+    /// channel's request can carry this one's number. Notifications already
+    /// waiting when the request goes out cannot be about it, and are set
+    /// aside before it is sent rather than read as its completion.
     fn command_deferred(&mut self, id: ChannelId, opcode: i64, args: Value) -> Result<()> {
-        let (txn, status, _) = self.request_raw(id, opcode, args)?;
+        let (txn, status, _) = self.request_raw_after(id, opcode, args, Self::forget_events)?;
         if !is_deferred(status)? {
             return Ok(()); // completed synchronously
         }
@@ -861,6 +867,30 @@ impl Session {
         opcode: i64,
         args: Value,
     ) -> Result<(i64, i64, Value)> {
+        self.request_raw_after(id, opcode, args, |_| Ok(()))
+    }
+
+    /// Everything on the events channel so far, dropped unread. Only for just
+    /// before a deferred request is sent: see `command_deferred`.
+    fn forget_events(&mut self) -> Result<()> {
+        if let Some(events) = self.channels.get_mut(&ChannelId::EVENTS.device) {
+            events
+                .reader
+                .take_messages()
+                .map_err(|error| Error::Protocol(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// [`request_raw`](Self::request_raw), running `ready` once the device's
+    /// backlog has been read and just before the request goes out.
+    fn request_raw_after(
+        &mut self,
+        id: ChannelId,
+        opcode: i64,
+        args: Value,
+        ready: impl FnOnce(&mut Self) -> Result<()>,
+    ) -> Result<(i64, i64, Value)> {
         let txn = {
             let ch = self
                 .channels
@@ -877,6 +907,7 @@ impl Session {
         // nothing visibly wrong. That is the lock-up that needed the 9V adapter
         // pulled, and why it arrived sooner the more work had been done first.
         self.drain_pending(id)?;
+        ready(self)?;
 
         let msg = Message::Request { txn, opcode, args };
         self.send_stream(id, service(id), &msg.to_value())?;
@@ -1508,6 +1539,46 @@ mod tests {
             pedal.lock().unwrap().frames_in,
             received,
             "nothing more sent"
+        );
+    }
+
+    /// Transactions count from 1000 on every channel, and a completion names
+    /// only its transaction. One left over from another channel, sitting on
+    /// the events channel with this request's number, used to end the wait
+    /// before the request had been answered at all. Anything waiting before
+    /// the request goes out is set aside now, and the wait is for its own.
+    #[test]
+    fn a_stale_completion_with_the_same_number_does_not_end_the_wait() {
+        let pedal = fake::Pedal::new();
+        let mut session = fake::session(&pedal);
+        let preset = session.read_preset().unwrap();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.defers_writes = true;
+            let next = pedal.last_txn(ChannelId::DATA).unwrap() + 1;
+            pedal.notify(
+                20,
+                hx_proto::msgmap! {
+                    rpc::key::TXN => Value::Int(next),
+                    rpc::key::STATUS => Value::Int(0),
+                    rpc::key::RESULT => Value::Nil,
+                },
+            );
+        }
+
+        session.write_preset(&preset).expect("the write lands");
+
+        // Nothing announced this write, so the session had to ask whether
+        // the device was free before reading the document back.
+        let opcodes = pedal.lock().unwrap().opcodes();
+        let write = opcodes
+            .iter()
+            .rposition(|&o| o == rpc::op::WRITE_PRESET)
+            .unwrap();
+        assert_eq!(
+            opcodes.get(write + 1),
+            Some(&rpc::op::PRESET_INFO),
+            "{opcodes:?}"
         );
     }
 
