@@ -21,8 +21,9 @@ added once the faithful converter exists. We already **read** `.hxb`
 
 ## What a complete backup holds
 
-- **Presets** - 126 slots, byte-exact `.hxpreset`. `backup-all` already does this;
-  measured **~114 s** for a full read (each preset must be loaded; see fast-read below).
+- **Presets** - 126 slots, byte-exact `.hxpreset`. `backup-all` once did this
+  by loading each preset, **~114 s** for a full read that also discarded unsaved
+  edits; it now uses the fast read below and never changes the loaded preset.
 - **Global settings** - **154** answering device objects (`object(id)`), which line
   up with HX Edit's `GLOB` block (156 named fields: EQ 13, Tuner 11, DSP 5, System 127).
   Store id→value; labels can come later.
@@ -196,8 +197,8 @@ This is the fast per-preset read the design went looking for and could not find
 by probing - `READ_PRESET` plus an index returns the *loaded* preset, so the
 conclusion was that indexed reads did not exist. They do, under an opcode that
 was sitting in the very first capture being read as something else. It answers
-in about 50 ms with no preset load, against the ~114 s a `backup-all` takes
-today because it loads all 126 in turn.
+in about 50 ms with no preset load, against the ~114 s a `backup-all` took
+when it loaded all 126 in turn.
 
 `capture.sh library` is what settled it: exporting a single preset to a file
 sends exactly one op4, and exporting the setlist sends 126 - no object store

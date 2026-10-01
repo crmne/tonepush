@@ -222,9 +222,9 @@ enum Cmd {
     },
     /// Back up every preset in a setlist to a directory.
     ///
-    /// One file per preset, byte for byte as the device holds it. Slow by
-    /// nature: each preset has to be loaded before it can be read, so this
-    /// walks the whole setlist and takes a few minutes.
+    /// One file per occupied slot, byte for byte as the device stores it. Each
+    /// slot is read where it lies, so the loaded preset and any unsaved edits
+    /// to it are left alone.
     BackupAll {
         directory: std::path::PathBuf,
         #[arg(long, default_value_t = 0, value_parser = non_negative_i64)]
@@ -264,8 +264,9 @@ enum Cmd {
         /// Rename while saving. Defaults to the current name.
         #[arg(long)]
         name: Option<String>,
-        #[arg(long, default_value_t = 0, value_parser = non_negative_i64)]
-        setlist: i64,
+        /// Setlist to save into. Defaults to the loaded preset's.
+        #[arg(long, value_parser = non_negative_i64)]
+        setlist: Option<i64>,
     },
     /// Read a device setting by numeric id, or list the ones that answer.
     Setting {
@@ -979,14 +980,19 @@ fn show_preset(session: &mut hx_usb::Session, raw: bool) -> Result<()> {
 }
 
 fn list_presets(session: &mut hx_usb::Session, setlist: i64) -> Result<()> {
-    let (_, current, _) = session.preset_info()?;
+    let (loaded_setlist, loaded, _) = session.preset_info()?;
     for (index, name) in session.presets(setlist)?.iter().enumerate() {
         let index = index as i64;
         println!(
             "{} {:<24} {}",
             session.profile.slot_label(index),
             name,
-            if index == current { "<- loaded" } else { "" }
+            // The same slot in another setlist is a different preset.
+            if (loaded_setlist, loaded) == (setlist, index) {
+                "<- loaded"
+            } else {
+                ""
+            }
         );
     }
     Ok(())
@@ -1072,22 +1078,30 @@ fn watch(session: &mut hx_usb::Session) -> Result<()> {
 /// Commit the edit buffer to a preset slot.
 fn save_preset(
     session: &mut hx_usb::Session,
-    setlist: i64,
+    setlist: Option<i64>,
     index: Option<&str>,
     name: Option<&str>,
 ) -> Result<()> {
-    let (_, loaded, current) = session.preset_info()?;
-    let target = match index {
-        Some(text) => slot(&session.profile, text)?,
-        None => loaded,
-    };
+    let (loaded_setlist, loaded, current) = session.preset_info()?;
+    let index = index.map(|text| slot(&session.profile, text)).transpose()?;
+    let (setlist, target) = save_target((loaded_setlist, loaded), setlist, index);
     let name = name.unwrap_or(&current);
     session.save_preset(setlist, target, name)?;
     println!(
-        "saved to {} as {name:?}",
+        "saved to {} in setlist {setlist} as {name:?}",
         session.profile.slot_label(target)
     );
     Ok(())
+}
+
+/// Where a save lands: what was asked for, and the loaded preset's setlist
+/// and slot for whatever was not.
+///
+/// The setlist defaults along with the slot. Defaulting it to the first one
+/// instead made a plain `tonepush save` on any other setlist write the edits
+/// over a different preset.
+fn save_target(loaded: (i64, i64), setlist: Option<i64>, index: Option<i64>) -> (i64, i64) {
+    (setlist.unwrap_or(loaded.0), index.unwrap_or(loaded.1))
 }
 
 /// Show one device setting, or survey the whole namespace.
@@ -1121,16 +1135,17 @@ fn show_setting(session: &mut hx_usb::Session, id: Option<i64>) -> Result<()> {
 
 /// Back up a whole setlist, one file per preset.
 ///
-/// There is no bulk-read opcode: a preset can only be read once it is loaded,
-/// so this selects each in turn. It restores the preset that was loaded when
-/// it started, and stops at the first failure rather than leaving a backup
-/// with silent holes in it.
+/// Each slot is read where it lies, the way `back-up` reads a whole pedal.
+/// This used to load every preset in turn to read it, which threw away any
+/// unsaved edits, and then put back the starting slot in the wrong setlist or,
+/// after a failure, not at all. Nothing here selects a preset or writes to the
+/// device. It stops at the first failure rather than leaving a backup with
+/// silent holes in it; an empty slot is skipped and said to be.
 fn backup_all(
     session: &mut hx_usb::Session,
     directory: &std::path::Path,
     setlist: i64,
 ) -> Result<()> {
-    let (_, started_at, _) = session.preset_info()?;
     let names = session.presets(setlist)?;
     std::fs::create_dir_all(directory).with_context(|| format!("creating {directory:?}"))?;
 
@@ -1139,23 +1154,25 @@ fn backup_all(
         names.len(),
         directory.display()
     );
+    let mut written = 0;
     for (index, name) in names.iter().enumerate() {
         let index = index as i64;
-        session
-            .select_preset(setlist, index)
-            .with_context(|| format!("selecting preset {index}"))?;
-        let preset = session
-            .read_preset()
-            .with_context(|| format!("reading preset {index}"))?;
-
         let label = session.profile.slot_label(index);
+        let Some(preset) = session
+            .read_preset_at(setlist, index)
+            .with_context(|| format!("reading preset {index}"))?
+        else {
+            println!("  {label}  (empty)");
+            continue;
+        };
+
         let file = directory.join(format!("{label}-{}.hxpreset", sanitise(name)));
         write_file(&file, preset.encode()).with_context(|| format!("writing {file:?}"))?;
         println!("  {label}  {name}");
+        written += 1;
     }
 
-    session.select_preset(setlist, started_at)?;
-    println!("done; the preset you had loaded is back");
+    println!("done; wrote {written} presets, and the loaded preset was not touched");
     Ok(())
 }
 
@@ -2054,6 +2071,16 @@ fn parse_hexdumps(text: &str) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_save_defaults_to_the_loaded_setlist_as_well_as_the_loaded_slot() {
+        // Loaded: setlist 3, slot 12.
+        let loaded = (3, 12);
+        assert_eq!(save_target(loaded, None, None), (3, 12));
+        assert_eq!(save_target(loaded, None, Some(5)), (3, 5));
+        assert_eq!(save_target(loaded, Some(0), None), (0, 12));
+        assert_eq!(save_target(loaded, Some(1), Some(2)), (1, 2));
+    }
 
     #[test]
     fn extracts_bytes_from_a_dump_line() {

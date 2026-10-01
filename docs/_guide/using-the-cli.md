@@ -27,6 +27,8 @@ tonepush move 4 5         # reorder blocks
 tonepush save             # commit the edit buffer; without this, edits are lost
 ```
 
+`save` writes to the loaded preset's own slot and setlist; name an index or pass `--setlist` to save somewhere else.
+
 Preset indices are zero-based within a setlist: index 7 is `03B` on an HX Stomp, with three presets to a bank, and `02D` on an HX Effects, with four. Parameter values are typed in the units HX Edit displays (`5.0` on a knob shown 0..10, `100` on a percentage, `Limit` on a switch) and converted for you.
 
 ## Backups and files
