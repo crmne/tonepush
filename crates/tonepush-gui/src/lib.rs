@@ -1257,7 +1257,8 @@ impl App {
                 }) => {
                     // A switch the editor asked for has already moved the
                     // selection, so a different preset arriving here is one
-                    // the pedal loaded by itself.
+                    // the pedal loaded by itself, or the one still loaded
+                    // after a switch was refused.
                     let moved = index != self.preset_index;
                     if moved || layout != self.layout {
                         self.fit_chain_on_next_frame = true;
@@ -11488,6 +11489,30 @@ mod tests {
         events.send(loaded(5, Some(0), true)).unwrap();
         app.drain_events();
         assert!(app.param_draft.is_some());
+    }
+
+    /// The selection moves when a preset is asked for, before the pedal
+    /// answers. When the answer is another preset, because the switch was
+    /// refused, the selection, the spinner and the snapshot follow it.
+    #[test]
+    fn a_switch_the_pedal_refused_puts_the_selection_back() {
+        let (mut app, events, _cmds) = app();
+        events.send(loaded(2, Some(1), true)).unwrap();
+        app.drain_events();
+
+        app.load_preset(5);
+        assert_eq!(app.preset_index, 5);
+        assert!(app.loading);
+        // And a snapshot clicked meanwhile lights before it is answered too.
+        app.current_snapshot = 2;
+
+        events.send(loaded(2, Some(1), true)).unwrap();
+        app.drain_events();
+
+        assert_eq!(app.preset_index, 2);
+        assert!(!app.loading);
+        assert!(app.dirty, "the edits the pedal kept are still unsaved");
+        assert_eq!(app.current_snapshot, 1);
     }
 
     #[test]

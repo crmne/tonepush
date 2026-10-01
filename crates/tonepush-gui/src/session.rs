@@ -611,15 +611,7 @@ impl Worker {
             Cmd::Connect => self.connect(),
             Cmd::Disconnect => self.let_go(),
             Cmd::SelectPreset(index) => {
-                let setlist = self.setlist;
-                if self.run_on_device(|d| d.select_preset(setlist, index)) {
-                    // The history belongs to the preset it was recorded on.
-                    // Kept across a switch, undo would write the previous
-                    // preset's document over the new one.
-                    self.forget_history();
-                    self.dirty = false;
-                    self.reload();
-                }
+                self.select(index);
             }
             Cmd::SelectSetlist(index) => {
                 self.setlist = index;
@@ -628,8 +620,10 @@ impl Worker {
                 }
             }
             Cmd::LoadDocument { dest, bytes } => {
-                if self.go_to(dest) {
-                    self.paste(&bytes);
+                // A document that does not land leaves the editor waiting
+                // for it, and what is loaded now is the answer.
+                if self.go_to(dest) && !self.paste(&bytes) {
+                    self.reload();
                 }
             }
             Cmd::LoadSteps { dest, name, blocks } => self.load_steps(dest, &name, &blocks),
@@ -928,7 +922,9 @@ impl Worker {
                     self.send(Evt::Copied { name, blob });
                 }
             }
-            Cmd::PastePreset(blob) => self.paste(&blob),
+            Cmd::PastePreset(blob) => {
+                self.paste(&blob);
+            }
             Cmd::CaptureSetlist => self.capture_setlist(),
             Cmd::PushSetlist(slots) => self.push_setlist(slots),
             Cmd::ClearPreset(index) => {
@@ -961,9 +957,10 @@ impl Worker {
                 }
             }
             Cmd::SelectSnapshot(index) => {
-                if self.run_on_device(|d| d.select_snapshot(index)) {
-                    self.reload();
-                }
+                // Read back either way: the bar lit the snapshot it asked
+                // for, and a refusal leaves another one active.
+                self.run_on_device(|d| d.select_snapshot(index));
+                self.reload();
             }
             Cmd::Rename { index, name } => {
                 let setlist = self.setlist;
@@ -1352,6 +1349,27 @@ impl Worker {
             .map(|preset| preset.encode())
     }
 
+    /// Load a preset, leaving the old one's edit buffer and history behind.
+    ///
+    /// The editor moves its selection when it asks, so a switch that does
+    /// not happen is answered by presenting what is still loaded. Otherwise
+    /// the list sat on a preset the pedal never reached, its spinner never
+    /// stopped, and a rename from the title went to the wrong slot.
+    fn select(&mut self, index: i64) -> bool {
+        let setlist = self.setlist;
+        if !self.run_on_device(|d| d.select_preset(setlist, index)) {
+            self.reload();
+            return false;
+        }
+        // The history belongs to the preset it was recorded on. Kept across
+        // a switch, undo would write the previous preset's document over the
+        // new one.
+        self.forget_history();
+        self.dirty = false;
+        self.reload();
+        true
+    }
+
     /// Put the device on `dest` so a load lands there, not over the open
     /// preset. A no-op when it is already the one loaded.
     fn go_to(&mut self, dest: i64) -> bool {
@@ -1364,6 +1382,9 @@ impl Worker {
             return true;
         }
         if !self.run_on_device(|d| d.select_preset(setlist, dest)) {
+            // The editor shows a load under way; what is still loaded is
+            // the answer to it.
+            self.reload();
             return false;
         }
         // The history belongs to the preset it was recorded on.
@@ -1706,10 +1727,11 @@ impl Worker {
         }
     }
 
-    fn paste(&mut self, blob: &[u8]) {
+    /// Returns whether the document landed.
+    fn paste(&mut self, blob: &[u8]) -> bool {
         let Some(preset) = hx_proto::Preset::parse(blob) else {
             self.send(Evt::Failed("that is not a preset file".into()));
-            return;
+            return false;
         };
         // A paste replaces the whole document; it is exactly the kind of edit
         // someone reaches for undo after.
@@ -1717,10 +1739,13 @@ impl Worker {
         if self.run_on_device(|d| d.write_preset(&preset)) {
             self.dirty = true;
             self.present(&preset);
-        } else if recorded {
+            return true;
+        }
+        if recorded {
             self.history.pop();
             self.report_history();
         }
+        false
     }
 
     /// Read the preset back from the device and show it.
@@ -2965,6 +2990,65 @@ mod tests {
         assert!(events
             .try_iter()
             .any(|e| matches!(e, Evt::Loaded { index: 5, .. })));
+    }
+
+    /// The editor moves its selection when it asks for a preset. A switch
+    /// the pedal refuses is answered with what is still loaded, so the
+    /// selection goes back, and the edits stay: the buffer was not touched.
+    #[test]
+    fn a_refused_switch_says_which_preset_is_still_loaded() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::SetTempo(100.0));
+        pedal.lock().unwrap().refuse.insert(op::SELECT_PRESET, -3);
+        let _ = events.try_iter().count();
+
+        worker.handle(Cmd::SelectPreset(5));
+
+        assert!(worker.device.is_some());
+        assert_eq!(worker.history.len(), 1);
+        assert!(worker.dirty);
+        assert!(events.try_iter().any(|e| matches!(
+            e,
+            Evt::Loaded {
+                index: 2,
+                dirty: true,
+                ..
+            }
+        )));
+    }
+
+    /// The same for a file loaded into another slot, and for a snapshot.
+    #[test]
+    fn a_refused_load_or_snapshot_says_what_is_still_there() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.refuse.insert(op::SELECT_PRESET, -3);
+            pedal.refuse.insert(op::SELECT_SNAPSHOT, -46);
+        }
+
+        worker.handle(Cmd::LoadDocument {
+            dest: 5,
+            bytes: document(150.0),
+        });
+        assert!(events
+            .try_iter()
+            .any(|e| matches!(e, Evt::Loaded { index: 2, .. })));
+        assert!(
+            !pedal.lock().unwrap().opcodes().contains(&op::WRITE_PRESET),
+            "nothing is written over the preset still loaded"
+        );
+
+        worker.handle(Cmd::SelectSnapshot(2));
+        assert!(events.try_iter().any(|e| matches!(
+            e,
+            Evt::Loaded {
+                snapshot: Some(0),
+                ..
+            }
+        )));
     }
 
     /// The other side of that rule: a failure on the wire still ends the
