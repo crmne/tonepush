@@ -15,6 +15,24 @@ use std::time::{Duration, Instant};
 /// there - its name and its document - or nothing, to empty the slot.
 pub type SlotWrite = (i64, Option<(String, Vec<u8>)>);
 
+/// The tempos a preset can hold, in BPM. hx-usb refuses anything else, so
+/// the editor checks against the same numbers before it asks.
+pub(crate) const TEMPO: std::ops::RangeInclusive<f32> = 40.0..=240.0;
+
+/// Whether the pedal would take this tempo.
+pub(crate) fn tempo_fits(bpm: f32) -> bool {
+    bpm.is_finite() && TEMPO.contains(&bpm)
+}
+
+/// What to say about a tempo that does not fit.
+pub(crate) fn tempo_refusal() -> String {
+    format!(
+        "tempo must be between {} and {} BPM",
+        TEMPO.start(),
+        TEMPO.end()
+    )
+}
+
 /// What the UI asks for.
 pub enum Cmd {
     Connect,
@@ -985,6 +1003,12 @@ impl Worker {
                 });
             }
             Cmd::SetTempo(bpm) => {
+                // Checked before the undo step is taken: a tempo the pedal will
+                // not store is not an edit, and recording one left a step
+                // that undid nothing.
+                if !tempo_fits(bpm) {
+                    return self.send(Evt::Failed(tempo_refusal()));
+                }
                 self.snapshot();
                 if self.run_on_device(|d| d.set_tempo(bpm)) {
                     self.dirty = true;
@@ -2313,6 +2337,36 @@ mod tests {
             Some(&op::ASSIGN_MAX_OP),
             "and the session still works"
         );
+    }
+
+    /// A tempo the pedal will not store is refused before anything else
+    /// happens: no undo step for an edit that never was, nothing on the
+    /// wire, and the pedal kept. A tempo it does store is one undo step.
+    #[test]
+    fn a_tempo_out_of_range_records_nothing() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        let sent = pedal.lock().unwrap().requests.len();
+
+        worker.handle(Cmd::SetTempo(300.0));
+        worker.handle(Cmd::SetTempo(f32::NAN));
+
+        assert!(worker.history.is_empty(), "no undo step was recorded");
+        assert_eq!(pedal.lock().unwrap().requests.len(), sent);
+        assert!(worker.device.is_some());
+        let said: Vec<Evt> = events.try_iter().collect();
+        assert_eq!(
+            said.iter().filter(|e| matches!(e, Evt::Failed(_))).count(),
+            2
+        );
+        assert!(!said
+            .iter()
+            .any(|e| matches!(e, Evt::History { .. } | Evt::Disconnected)));
+
+        worker.handle(Cmd::SetTempo(96.0));
+        assert_eq!(worker.history.len(), 1);
+        let buffer = hx_proto::Preset::parse(&pedal.lock().unwrap().buffer).unwrap();
+        assert_eq!(buffer.tempo(), Some(96.0));
     }
 
     /// The other side of that rule: a failure on the wire still ends the

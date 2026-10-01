@@ -2254,9 +2254,22 @@ impl App {
         if let Some(bpm) =
             processor::tempo_control(ui, tempo, &mut self.tempo_draft, &mut self.taps)
         {
-            self.tempo = Some(bpm);
-            self.edit(Cmd::SetTempo(bpm));
+            self.set_tempo(bpm);
         }
+    }
+
+    /// Ask the pedal for a tempo, if it is one a preset can hold.
+    ///
+    /// The field takes whatever parses and a tap can come out anywhere from
+    /// 20 to 999, but the pedal stores 40 to 240 BPM, so anything else is
+    /// answered here. The reading changes when the reload after the write
+    /// brings the pedal's own value back: shown at once, a refused tempo
+    /// stayed on screen as though it had been set.
+    fn set_tempo(&mut self, bpm: f32) {
+        if !session::tempo_fits(bpm) {
+            return self.problem(session::tempo_refusal());
+        }
+        self.edit(Cmd::SetTempo(bpm));
     }
 
     /// Snapshots are three saved states of the same preset. The active one is
@@ -11418,6 +11431,26 @@ mod tests {
         app.move_travel(3, Target::Param(0), false, f32::NAN, &(0.0..=1.0));
         app.move_travel(3, Target::Bypass, false, 0.5, &(0.0..=1.0));
         assert!(cmds.try_recv().is_err());
+    }
+
+    /// A preset holds 40 to 240 BPM. Anything else, or no number at all, is
+    /// answered here instead of being sent; a tempo the pedal takes is sent,
+    /// and the reading waits for the pedal to say it has it.
+    #[test]
+    fn only_a_tempo_the_pedal_takes_is_sent() {
+        let (mut app, _events, cmds) = app();
+        let _ = cmds.try_iter().count();
+        app.tempo = Some(120.0);
+
+        for bpm in [20.0, 999.0, -1.0, f32::NAN, f32::INFINITY] {
+            app.set_tempo(bpm);
+        }
+        assert!(cmds.try_recv().is_err(), "nothing out of range is sent");
+        assert_eq!(app.status, "tempo must be between 40 and 240 BPM");
+
+        app.set_tempo(96.0);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::SetTempo(bpm)) if bpm == 96.0));
+        assert_eq!(app.tempo, Some(120.0), "the reading waits for the pedal");
     }
 
     #[test]
