@@ -2199,12 +2199,17 @@ impl Worker {
         // Firmware TonePush has not been verified against still opens, read
         // only: browsing, exports and backups work, which is also what a pedal
         // needs before and after a firmware update.
-        let read_only = match device.write_safety() {
+        let read_only = match device.write_safety().clone() {
             WriteSafety::Verified => {
                 device.enable_writes()?;
                 None
             }
-            WriteSafety::ReadOnly { reason } => Some(reason.clone()),
+            WriteSafety::ReadOnly { reason } => {
+                // Presets can still be picked and played with: only what
+                // would reach the pedal's memory stays off.
+                device.enable_live_edits()?;
+                Some(reason)
+            }
         };
         self.audition_original.clear();
         let snapshot = snapshot(&mut device)?;
@@ -2218,7 +2223,7 @@ impl Worker {
             self.rollback_path = None;
             self.send(Evt::ReadOnly(reason.clone()));
             self.send(Evt::Success(format!(
-                "Read only: {reason}. Browsing, export and Backup work; changes are off"
+                "Not verified for saving: {reason}. Presets, knobs, export and Backup work; nothing is written to the pedal's memory"
             )));
             return Ok(());
         }

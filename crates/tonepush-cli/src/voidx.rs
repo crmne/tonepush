@@ -342,7 +342,6 @@ pub(crate) fn run(command: Command) -> Result<()> {
             );
         }
         Command::Select { slot } => {
-            device.enable_writes()?;
             device.select_preset(slot - 1)?;
             println!("selected preset slot {slot}");
         }
@@ -366,7 +365,6 @@ pub(crate) fn run(command: Command) -> Result<()> {
                 )?;
                 Some(authorize(&mut device, rollback)?)
             } else {
-                device.enable_writes()?;
                 None
             };
             device.write_node(path.clone(), &description, value.clone())?;
@@ -756,7 +754,11 @@ fn open() -> Result<Device<SerialLink>> {
             found.len()
         );
     }
-    Device::connect(device.open()?).context("opening the StompStation PRO")
+    let mut device = Device::connect(device.open()?).context("opening the StompStation PRO")?;
+    // Selecting presets and setting live values never reach the pedal's
+    // memory, so they work on firmware not yet verified for saving.
+    device.enable_live_edits()?;
+    Ok(device)
 }
 
 /// A pedal in update mode names itself as a generic Raspberry Pi gadget, so

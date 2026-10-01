@@ -78,6 +78,7 @@ pub struct Device<L> {
     identity: Identity,
     write_safety: WriteSafety,
     writes_enabled: bool,
+    live_edits_enabled: bool,
 }
 
 impl<L: Link> Device<L> {
@@ -99,6 +100,7 @@ impl<L: Link> Device<L> {
             identity,
             write_safety,
             writes_enabled: false,
+            live_edits_enabled: false,
         })
     }
 
@@ -128,6 +130,25 @@ impl<L: Link> Device<L> {
 
     pub fn writes_enabled(&self) -> bool {
         self.writes_enabled
+    }
+
+    /// Allow edits to the live state under `root\app` (the loaded preset,
+    /// its parameters and blocks) on a PRO whose firmware is not verified for
+    /// persistent writes. Nothing reaches the pedal's memory this way: saving
+    /// a preset, slots, libraries and global settings still need
+    /// [`Device::enable_writes`]. Refused in update mode, which has no live
+    /// state.
+    pub fn enable_live_edits(&mut self) -> Result<()> {
+        if self.identity.name != "StompStation PRO"
+            || self.identity.version == voidx_proto::update::UPDATE_MODE_VERSION
+        {
+            return Err(Error::WriteRefused(format!(
+                "{} {} has no live state to edit",
+                self.identity.name, self.identity.version
+            )));
+        }
+        self.live_edits_enabled = true;
+        Ok(())
     }
 
     pub fn read(&mut self, path: NodePath) -> Result<Frame> {
@@ -345,7 +366,9 @@ impl<L: Link> Device<L> {
 
     /// Set a live node and require the acknowledgement to echo the value.
     fn write_value(&mut self, path: NodePath, value: Value) -> Result<()> {
-        self.require_writes()?;
+        if !(self.live_edits_enabled && is_live(&path)) {
+            self.require_writes()?;
+        }
         let frame = self.session.request(Command::Write {
             path: path.clone(),
             value: value.clone(),
@@ -704,6 +727,12 @@ fn decode_data_read_record(
     Ok((chunk, decode_hex(hex)?))
 }
 
+/// The loaded preset's live tree, which the pedal keeps only until another
+/// preset loads unless it is saved.
+fn is_live(path: &NodePath) -> bool {
+    path.as_str().starts_with("root\\app\\")
+}
+
 pub(crate) fn read_batch_chunks(chunk_size: usize) -> usize {
     (READ_BATCH_BYTES / chunk_size.max(1)).clamp(1, READ_BATCH_CHUNKS)
 }
@@ -890,6 +919,29 @@ mod tests {
             WriteSafety::ReadOnly { .. }
         ));
         assert!(future.enable_writes().is_err());
+    }
+
+    #[test]
+    fn unverified_firmware_can_change_only_the_live_preset() {
+        let mut frames = identity_frames("2.2.6");
+        frames.extend_from_slice(b"root\\app\\amp\\gain:{\"value\":5}\0");
+        let link = Scripted {
+            input: Cursor::new(frames),
+            output: vec![],
+        };
+        let mut device = Device::connect(link).unwrap();
+        assert!(device.enable_writes().is_err());
+        let gain = NodePath::new("root\\app\\amp\\gain").unwrap();
+        assert!(device.write_value(gain.clone(), Value::from(5)).is_err());
+
+        device.enable_live_edits().unwrap();
+        device.write_value(gain, Value::from(5)).unwrap();
+        let setting = NodePath::new("root\\settings\\brightness").unwrap();
+        assert!(matches!(
+            device.write_value(setting, Value::from(5)),
+            Err(Error::WriteRefused(_))
+        ));
+        assert!(device.save_preset("Mine").is_err());
     }
 
     #[test]
