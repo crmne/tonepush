@@ -461,8 +461,7 @@ impl Panel {
                     bytes,
                     target,
                 }) => {
-                    self.preset_hashes
-                        .insert(index, crate::library::hash_of(&bytes));
+                    self.preset_hashes.insert(index, slot_hash(&bytes));
                     match target {
                         ReadTarget::Library { replace } => {
                             self.library_documents.push((name, bytes, replace));
@@ -492,8 +491,7 @@ impl Panel {
                 Ok(Evt::SetlistRead(slots)) => {
                     for (index, (name, bytes)) in slots.iter().enumerate() {
                         if let Some(bytes) = bytes {
-                            self.preset_hashes
-                                .insert(index, crate::library::hash_of(bytes));
+                            self.preset_hashes.insert(index, slot_hash(bytes));
                         } else if name.is_empty() {
                             self.preset_hashes.remove(&index);
                         }
@@ -1935,8 +1933,8 @@ impl Worker {
                 self.require_guard()?;
                 let list = self.list(Library::Presets)?;
                 let device_name = unique_slot_name(&list, index, &name);
-                let hash = crate::library::hash_of(&bytes);
                 let blob = import_blob(Library::Presets, &bytes, list.size)?;
+                let hash = preset_blob_hash(&blob)?;
                 let events = self.events.clone();
                 self.device()?
                     .write_blob(&list, index, &device_name, &blob, |step| {
@@ -1971,8 +1969,8 @@ impl Worker {
                     match tone {
                         Some((name, bytes)) => {
                             let device_name = unique_slot_name(&list, index, &name);
-                            let hash = crate::library::hash_of(&bytes);
                             let blob = import_blob(Library::Presets, &bytes, list.size)?;
+                            let hash = preset_blob_hash(&blob)?;
                             let events = self.events.clone();
                             self.device()?.write_blob(
                                 &list,
@@ -2613,7 +2611,7 @@ impl Worker {
             let bytes = export_blob(library, &blob, list.size)?;
             self.send(Evt::PresetIndexed {
                 index,
-                hash: Some(crate::library::hash_of(&bytes)),
+                hash: Some(slot_hash(&bytes)),
             });
         }
         self.send(Evt::Success(format!(
@@ -2761,9 +2759,38 @@ fn preset_hashes_from_bundle(
     Ok(hashes)
 }
 
+/// The hash a slot holding this device blob is known by: that of the bytes
+/// an export of it gives, the form the library keeps. Every way a slot's
+/// hash is learned (a read, a backup, a write) goes through the same export,
+/// so a preset written from the library is "Same" before and after a
+/// reconnect alike.
 fn preset_blob_hash(blob: &[u8]) -> WorkResult<String> {
     let bytes = export_blob(Library::Presets, blob, blob.len())?;
-    Ok(crate::library::hash_of(&bytes))
+    Ok(slot_hash(&bytes))
+}
+
+/// The hash of a preset as exported, for comparing a slot with the library.
+fn slot_hash(exported: &[u8]) -> String {
+    slot_hash_in(exported, crate::library::holds)
+}
+
+/// Earlier versions of TonePush dropped the CRLF that ends a stored preset, so a
+/// preset kept from the pedal by them is in the library without it. When the
+/// library holds that copy and not this one, the slot is known by the copy's
+/// hash, so what was kept still reads as the same preset.
+fn slot_hash_in(exported: &[u8], holds: impl Fn(&str) -> bool) -> String {
+    let hash = crate::library::hash_of(exported);
+    let body = exported
+        .iter()
+        .rposition(|byte| !matches!(byte, b'\r' | b'\n'))
+        .map_or(0, |last| last + 1);
+    if body < exported.len() && !holds(&hash) {
+        let legacy = crate::library::hash_of(&exported[..body]);
+        if holds(&legacy) {
+            return legacy;
+        }
+    }
+    hash
 }
 
 fn latest_verified_backup(identity: &Identity) -> Option<(PathBuf, backup::VerifiedBundle)> {
@@ -3837,6 +3864,53 @@ root\\app\\ir\\on_off:{\"value\":\"OFF\"}\r\n";
             device_hash,
             crate::library::hash_of(portable),
             "sync compares the exact portable bytes kept by the local library"
+        );
+    }
+
+    /// A preset written from the library is hashed as the slot will be read
+    /// back from a backup after a reconnect, so "Same" does not flip, and
+    /// that is the library object's own hash, with or without the CRLF a
+    /// stored preset ends in.
+    #[test]
+    fn a_written_preset_hashes_as_the_backup_will_read_it() {
+        for library in [
+            b"root\\app\\amp\\gain:{\"value\":42.0}\r\n".as_slice(),
+            b"root\\app\\amp\\gain:{\"value\":42.0}".as_slice(),
+        ] {
+            let Ok(blob) = import_blob(Library::Presets, library, 16_384) else {
+                panic!("a valid preset should import")
+            };
+            let Ok(written) = preset_blob_hash(&blob) else {
+                panic!("a written preset should hash")
+            };
+            assert_eq!(written, crate::library::hash_of(library));
+            let Ok(exported) = export_blob(Library::Presets, &blob, blob.len()) else {
+                panic!("a written preset should export")
+            };
+            assert_eq!(exported, library, "export gives the library's bytes back");
+        }
+    }
+
+    /// A preset kept before export held on to the stored CRLF is in the
+    /// library without it; the slot is known by that copy's hash until the
+    /// library holds the exact export too.
+    #[test]
+    fn a_preset_kept_without_its_crlf_still_reads_as_kept() {
+        let exported = b"root\\app\\amp\\gain:{\"value\":42.0}\r\n";
+        let legacy = crate::library::hash_of(b"root\\app\\amp\\gain:{\"value\":42.0}");
+        let exact = crate::library::hash_of(exported);
+
+        assert_eq!(slot_hash_in(exported, |_| false), exact, "nothing kept");
+        assert_eq!(slot_hash_in(exported, |hash| hash == legacy), legacy);
+        assert_eq!(
+            slot_hash_in(exported, |hash| hash == legacy || hash == exact),
+            exact,
+            "the exact copy wins once the library holds it"
+        );
+        assert_eq!(
+            slot_hash_in(b"root\\x:{\"value\":1}", |_| true),
+            crate::library::hash_of(b"root\\x:{\"value\":1}"),
+            "nothing to strip, nothing to look up"
         );
     }
 
