@@ -204,11 +204,11 @@ pub enum Cmd {
     },
     /// Commit the edit buffer to the loaded preset.
     SavePreset,
-    /// Copy one block over another slot.
-    CopyBlock {
-        from: usize,
-        to: usize,
-    },
+    /// Copy the block in a slot, whole, for pasting into this preset or
+    /// another. The worker holds it, so a paste always gets the latest copy.
+    CopyBlock(usize),
+    /// Put the copied block into a slot.
+    PasteBlock(usize),
     /// Copy a snapshot's settings over another, keeping its name.
     CopySnapshot {
         from: usize,
@@ -509,6 +509,9 @@ struct Worker {
     /// Where the automatic backup lives. Held rather than looked up, so a
     /// worker driven by tests cannot write a pretend pedal into the real one.
     automatic: Option<std::path::PathBuf>,
+    /// A block copied out of a document, verbatim: model, values, the cab
+    /// riding along and all.
+    copied_block: Option<hx_proto::msgpack::Value>,
 }
 
 /// Which preset the editor is showing, as the device named it.
@@ -536,6 +539,7 @@ impl Worker {
             cmds,
             events,
             automatic,
+            copied_block: None,
             device: None,
             setlist: 0,
             history: Vec::new(),
@@ -686,9 +690,21 @@ impl Worker {
                     self.reload();
                 }
             }
-            Cmd::CopyBlock { from, to } => {
+            Cmd::CopyBlock(slot) => {
+                // The block itself, not where it was. A slot number pasted
+                // later copied whatever had come to be there: the same slot
+                // of whichever preset was loaded by then, or another block
+                // once the chain had been rearranged.
+                self.copied_block = self.read_settled().and_then(|p| p.copy_slot(slot));
+                if self.copied_block.is_none() && self.device.is_some() {
+                    self.send(Evt::Failed("there is no block there to copy".into()));
+                }
+            }
+            Cmd::PasteBlock(to) => {
+                let Some(block) = self.copied_block.clone() else {
+                    return self.send(Evt::Failed("no block has been copied".into()));
+                };
                 self.edit_document(|p| {
-                    let block = p.copy_slot(from).ok_or("no such block")?;
                     p.paste_slot(to, &block)
                         .then_some(())
                         .ok_or("that slot cannot hold a block")
@@ -1203,6 +1219,8 @@ impl Worker {
     fn let_go(&mut self) {
         self.device = None;
         self.forget_audition();
+        // A block from this pedal may not fit the next one.
+        self.copied_block = None;
         self.send(Evt::Disconnected);
     }
 
@@ -3181,6 +3199,57 @@ mod tests {
         let (name, blob) = copied.expect("the copy ran after the switch");
         assert_eq!(name, "Lead");
         assert_eq!(tempo(&blob), Some(90.0));
+    }
+
+    /// A copied block is the block, not the slot it sat in: pasted after
+    /// switching presets it is still the block that was copied, where a
+    /// remembered slot number pasted the new preset's own block from there.
+    #[test]
+    fn a_copied_block_pastes_as_it_was_into_another_preset() {
+        let pedal = Pedal::new();
+        let block = |document: &[u8], slot| {
+            hx_proto::Preset::parse(document)
+                .unwrap()
+                .copy_slot(slot)
+                .unwrap()
+        };
+        let copied = {
+            // Lead's slot 1 holds another block than Clean's.
+            let mut pedal = pedal.lock().unwrap();
+            let mut lead = hx_proto::Preset::parse(&pedal.stored[&5].1).unwrap();
+            let other = lead.copy_slot(2).unwrap();
+            assert!(lead.paste_slot(1, &other));
+            pedal.stored.get_mut(&5).unwrap().1 = lead.encode();
+            let copied = block(&pedal.buffer, 1);
+            assert!(copied != other, "the two slots must differ to tell");
+            copied
+        };
+        let (mut worker, _events) = worker(&pedal);
+
+        worker.handle(Cmd::CopyBlock(1));
+        worker.handle(Cmd::SelectPreset(5));
+        worker.handle(Cmd::PasteBlock(7));
+
+        let pedal = pedal.lock().unwrap();
+        assert_eq!(pedal.loaded.1, 5);
+        assert!(block(&pedal.buffer, 7) == copied);
+    }
+
+    /// A copy that finds nothing leaves nothing to paste, rather than an
+    /// older copy that would land as though it were this one.
+    #[test]
+    fn a_copy_that_finds_no_block_leaves_nothing_to_paste() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::CopyBlock(1));
+        worker.handle(Cmd::CopyBlock(999));
+        let _ = events.try_iter().count();
+        let asked = pedal.lock().unwrap().requests.len();
+
+        worker.handle(Cmd::PasteBlock(7));
+
+        assert!(events.try_iter().any(|e| matches!(e, Evt::Failed(_))));
+        assert_eq!(pedal.lock().unwrap().requests.len(), asked);
     }
 
     /// The other side of that rule: a failure on the wire still ends the

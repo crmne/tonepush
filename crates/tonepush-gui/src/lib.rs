@@ -241,10 +241,11 @@ pub struct App {
     layout: hx_proto::preset::Layout,
     /// Filter for the model browser. Empty means "show the chosen category".
     search: String,
-    /// A copied block: which slot it came from. The block itself stays on the
-    /// device - a copy is a document operation there, so the app only has to
-    /// remember what to copy from.
-    copied_block: Option<usize>,
+    /// Whether a block has been copied, so Paste has something to put down.
+    /// The block itself is held by the worker, whole, so it pastes as it was
+    /// copied into this preset or another; remembering only the slot pasted
+    /// whatever had come to be there.
+    copied_block: bool,
     /// A copied preset: its name, and the document verbatim. Held in the app
     /// rather than the system clipboard because it is binary, and because
     /// pasting it into a text field would only produce noise.
@@ -1014,7 +1015,7 @@ impl App {
             chain: Vec::new(),
             layout: hx_proto::preset::Layout::default(),
             search: String::new(),
-            copied_block: None,
+            copied_block: false,
             clipboard: None,
             pending_copy: CopyTarget::Clipboard,
             dirty: false,
@@ -1226,6 +1227,7 @@ impl App {
                     self.layout = hx_proto::preset::Layout::default();
                     self.assignments.clear();
                     self.switches.clear();
+                    self.copied_block = false;
                     self.presets.clear();
                     self.irs.clear();
                     self.setlists.clear();
@@ -8195,10 +8197,7 @@ impl App {
                         action = Some(RowAction::Copy);
                         ui.close();
                     }
-                    if ui
-                        .add_enabled(copied.is_some(), egui::Button::new("Paste"))
-                        .clicked()
-                    {
+                    if ui.add_enabled(copied, egui::Button::new("Paste")).clicked() {
                         action = Some(RowAction::Paste);
                         ui.close();
                     }
@@ -8209,15 +8208,8 @@ impl App {
                     }
                 });
                 match action {
-                    Some(RowAction::Copy) => {
-                        self.copied_block = Some(slot);
-                        self.note(format!("copied {}", self.slot_label(&block)));
-                    }
-                    Some(RowAction::Paste) => {
-                        if let Some(from) = copied {
-                            self.edit(Cmd::CopyBlock { from, to: slot });
-                        }
-                    }
+                    Some(RowAction::Copy) => self.copy_block(slot, &block),
+                    Some(RowAction::Paste) => self.paste_block(slot),
                     Some(RowAction::Remove) => self.edit(Cmd::ClearBlock(block.position)),
                     _ => {}
                 }
@@ -8630,20 +8622,14 @@ impl App {
                 .on_hover_text("Copy this block")
                 .clicked()
             {
-                self.copied_block = Some(block.position as usize);
-                self.note(format!("copied {}", self.slot_label(block)));
+                self.copy_block(block.position as usize, block);
             }
-            if theme::icon_button(ui, theme::Icon::Paste, self.copied_block.is_some())
+            if theme::icon_button(ui, theme::Icon::Paste, self.copied_block)
                 .on_hover_text("Paste - put the copied block here")
                 .on_disabled_hover_text("Paste - no block copied yet")
                 .clicked()
             {
-                if let Some(from) = self.copied_block {
-                    self.edit(Cmd::CopyBlock {
-                        from,
-                        to: block.position as usize,
-                    });
-                }
+                self.paste_block(block.position as usize);
             }
             if theme::icon_button(ui, theme::Icon::Remove, true)
                 .on_hover_text("Remove - take this block out of the chain")
@@ -8652,6 +8638,21 @@ impl App {
                 self.edit(Cmd::ClearBlock(block.position));
             }
         });
+    }
+
+    /// Copy the block in a slot. The worker reads it out of the document and
+    /// keeps it whole, for pasting into this preset or another.
+    fn copy_block(&mut self, slot: usize, block: &session::Block) {
+        self.copied_block = true;
+        self.send(Cmd::CopyBlock(slot));
+        self.note(format!("copied {}", self.slot_label(block)));
+    }
+
+    /// Put the copied block into a slot.
+    fn paste_block(&mut self, slot: usize) {
+        if self.copied_block {
+            self.edit(Cmd::PasteBlock(slot));
+        }
     }
 
     /// What reaches each block, by block, out of the preset document.
@@ -11765,6 +11766,31 @@ mod tests {
         assert_eq!(app.preset_index, 2, "nothing switched");
         assert!(cmds.try_recv().is_err());
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// Copying a block asks the worker for the block itself, and Paste is
+    /// offered from then on, into this preset or any other - until the pedal
+    /// goes, because a block from it may not fit the next one.
+    #[test]
+    fn a_copied_block_is_offered_for_pasting_until_the_pedal_goes() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), false)).unwrap();
+        app.drain_events();
+        let _ = cmds.try_iter().count();
+        let block = app.chain[0].clone();
+
+        app.copy_block(1, &block);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::CopyBlock(1))));
+
+        events.send(loaded(5, Some(0), false)).unwrap();
+        app.drain_events();
+        app.paste_block(7);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::PasteBlock(7))));
+
+        events.send(Evt::Disconnected).unwrap();
+        app.drain_events();
+        app.paste_block(7);
+        assert!(cmds.try_recv().is_err());
     }
 
     #[test]
