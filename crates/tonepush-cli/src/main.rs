@@ -387,14 +387,16 @@ enum Cmd {
     Controllers,
     /// What controls each of a block's parameters. Reads only.
     Assignments {
-        #[arg(value_parser = non_negative_i64)]
+        /// The block, by position as shown in `tonepush chain` (1-based).
+        #[arg(value_parser = one_based_i64)]
         block: i64,
         #[arg(value_parser = non_negative_i64)]
         count: i64,
     },
     /// Put a parameter under a controller, by source ordinal. Edit buffer only.
     AssignParam {
-        #[arg(value_parser = non_negative_i64)]
+        /// The block, by position as shown in `tonepush chain` (1-based).
+        #[arg(value_parser = one_based_i64)]
         block: i64,
         #[arg(value_parser = non_negative_i64)]
         param: i64,
@@ -408,7 +410,8 @@ enum Cmd {
     /// --cc` - and a parameter does not: opcode 64 is the only message that
     /// says which number reaches it.
     AssignCc {
-        #[arg(value_parser = non_negative_i64)]
+        /// The block, by position as shown in `tonepush chain` (1-based).
+        #[arg(value_parser = one_based_i64)]
         block: i64,
         #[arg(value_parser = non_negative_i64)]
         param: i64,
@@ -417,14 +420,16 @@ enum Cmd {
     },
     /// The raw reply behind one parameter's assignment. Reads only.
     AssignmentRaw {
-        #[arg(value_parser = non_negative_i64)]
+        /// The block, by position as shown in `tonepush chain` (1-based).
+        #[arg(value_parser = one_based_i64)]
         block: i64,
         #[arg(value_parser = non_negative_i64)]
         param: i64,
     },
     /// Move one end of a controller's travel. Edit buffer only.
     AssignRange {
-        #[arg(value_parser = non_negative_i64)]
+        /// The block, by position as shown in `tonepush chain` (1-based).
+        #[arg(value_parser = one_based_i64)]
         block: i64,
         #[arg(value_parser = non_negative_i64)]
         param: i64,
@@ -440,7 +445,8 @@ enum Cmd {
     },
     /// Put a block's bypass on a footswitch, or take it off. Edit buffer only.
     SwitchAssign {
-        #[arg(value_parser = non_negative_i64)]
+        /// The block, by position as shown in `tonepush chain` (1-based).
+        #[arg(value_parser = one_based_i64)]
         block: i64,
         #[arg(value_parser = one_based_u8)]
         switch: u8,
@@ -554,14 +560,16 @@ fn list_devices() -> Result<()> {
 ///
 /// The reconnect retry lives in `hx-usb`, so every consumer gets it.
 fn on_device(cmd: Cmd) -> Result<()> {
-    let cmd = &cmd;
     let devices = hx_usb::list().context("enumerating USB devices")?;
     let Some(device) = devices.first() else {
         bail!("no HX device found - check the USB cable");
     };
     let mut session = device.open().context("opening the device")?;
-    let s = &mut session;
+    run_on(&mut session, &cmd)
+}
 
+/// Run one command against an open session.
+fn run_on(s: &mut hx_usb::Session, cmd: &Cmd) -> Result<()> {
     match cmd.clone() {
         Cmd::Info => show_info(s),
         Cmd::Preset { raw } => show_preset(s, raw),
@@ -625,7 +633,7 @@ fn on_device(cmd: Cmd) -> Result<()> {
             irs,
         } => restore_all(s, &directory, presets, globals, irs),
         Cmd::Slot { position } => {
-            let preset = session.read_preset()?;
+            let preset = s.read_preset()?;
             match preset.raw_slot(position) {
                 Some(body) => println!(
                     "slot {position} kind {:?}\n{body:#?}",
@@ -636,7 +644,7 @@ fn on_device(cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Topology => {
-            let preset = session.read_preset()?;
+            let preset = s.read_preset()?;
             let catalog = hx_catalog::Catalog::load().ok();
             let name = |slot: &hx_proto::preset::Slot| -> String {
                 slot.model
@@ -760,7 +768,7 @@ fn on_device(cmd: Cmd) -> Result<()> {
         }
         Cmd::Assignments { block, count } => {
             for param in 0..count {
-                match s.read_assignment(block, param)? {
+                match s.read_assignment(block - 1, param)? {
                     Some(a) => println!("{param}: {}", a.source.label()),
                     None => println!("{param}: -"),
                 }
@@ -768,7 +776,7 @@ fn on_device(cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::AssignmentRaw { block, param } => {
-            println!("{:#?}", s.read_assignment_raw(block, param)?);
+            println!("{:#?}", s.read_assignment_raw(block - 1, param)?);
             Ok(())
         }
         Cmd::AssignRange {
@@ -777,7 +785,7 @@ fn on_device(cmd: Cmd) -> Result<()> {
             value,
             max,
         } => {
-            s.set_assign_range(block, param, value, max)?;
+            s.set_assign_range(block - 1, param, value, max)?;
             Ok(())
         }
         Cmd::AssignParam {
@@ -786,14 +794,14 @@ fn on_device(cmd: Cmd) -> Result<()> {
             source,
         } => {
             let source = hx_proto::rpc::Source::from_ordinal(source);
-            s.assign_parameter(block, param, source)?;
+            s.assign_parameter(block - 1, param, source)?;
             Ok(())
         }
         Cmd::AssignCc { block, param, cc } => {
             if !(0..=127).contains(&cc) {
                 bail!("a MIDI CC is 0 to 127; {cc} is not one");
             }
-            s.set_assign_cc(block, param, cc)?;
+            s.set_assign_cc(block - 1, param, cc)?;
             println!("block {block} parameter {param} follows MIDI CC {cc}");
             Ok(())
         }
@@ -827,9 +835,9 @@ fn on_device(cmd: Cmd) -> Result<()> {
         Cmd::SwitchAssign { block, switch, off } => {
             validate_switch(s, switch)?;
             if off {
-                s.unassign_bypass_footswitch(block, switch)?;
+                s.unassign_bypass_footswitch(block - 1, switch)?;
             } else {
-                s.assign_bypass_footswitch(block, switch)?;
+                s.assign_bypass_footswitch(block - 1, switch)?;
             }
             Ok(())
         }
@@ -2120,9 +2128,9 @@ mod tests {
             &["tonepush", "tempo", "NaN"],
             &["tonepush", "tempo", "39.9"],
             &["tonepush", "tempo", "240.1"],
-            &["tonepush", "assign-range", "0", "0", "1.1"],
-            &["tonepush", "assign-param", "0", "0", "10"],
-            &["tonepush", "assign-cc", "0", "0", "128"],
+            &["tonepush", "assign-range", "1", "0", "1.1"],
+            &["tonepush", "assign-param", "1", "0", "10"],
+            &["tonepush", "assign-cc", "1", "0", "128"],
             &["tonepush", "switch", "0"],
             &["tonepush", "switch-set", "1", "--colour=-1"],
         ];
@@ -2140,8 +2148,181 @@ mod tests {
         for args in [["tonepush", "tempo", "40"], ["tonepush", "tempo", "240"]] {
             assert!(Cli::try_parse_from(args).is_ok(), "did not parse: {args:?}");
         }
-        assert!(Cli::try_parse_from(["tonepush", "assign-range", "0", "0", "0"]).is_ok());
-        assert!(Cli::try_parse_from(["tonepush", "assign-range", "0", "0", "1"]).is_ok());
+        assert!(Cli::try_parse_from(["tonepush", "assign-range", "1", "0", "0"]).is_ok());
+        assert!(Cli::try_parse_from(["tonepush", "assign-range", "1", "0", "1"]).is_ok());
+    }
+
+    /// A pedal that answers every request with an empty success and keeps
+    /// what it was asked, for seeing which block a command addresses.
+    mod pedal {
+        use std::collections::{BTreeMap, VecDeque};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        use hx_proto::frame::{ChannelHeader, MSG_DATA};
+        use hx_proto::msgpack::{Encoder, Value};
+        use hx_proto::rpc::{key, op, Message, StreamReader};
+        use hx_proto::{ChannelId, Frame};
+
+        #[derive(Default)]
+        pub struct Pedal {
+            pub requests: Vec<(i64, Value)>,
+            outbox: VecDeque<Vec<u8>>,
+            inbox: BTreeMap<u16, StreamReader>,
+            seq: BTreeMap<u16, u16>,
+        }
+
+        pub struct Cable(pub Arc<Mutex<Pedal>>);
+
+        impl hx_usb::Wire for Cable {
+            fn send(&mut self, bytes: &[u8]) -> hx_usb::Result<()> {
+                let mut pedal = self.0.lock().unwrap();
+                let Ok(frame) = Frame::decode(bytes) else {
+                    return Ok(());
+                };
+                let Some((header, rest)) = ChannelHeader::decode(&frame.payload) else {
+                    return Ok(());
+                };
+                if !header.has_data() || rest.is_empty() {
+                    return Ok(());
+                }
+                let node = frame.dst;
+                let reader = pedal.inbox.entry(node).or_default();
+                reader.push(rest);
+                for message in reader.take_messages().unwrap_or_default() {
+                    let Ok(Message::Request { txn, opcode, args }) =
+                        Message::try_from_value(message.body)
+                    else {
+                        continue;
+                    };
+                    let result = match opcode {
+                        op::PRESET_INFO => hx_proto::msgmap! {
+                            key::SETLIST => Value::Int(0),
+                            key::PRESET_INDEX => Value::Int(0),
+                            key::NAME => Value::Str("Test".into()),
+                        },
+                        _ => Value::Nil,
+                    };
+                    pedal.requests.push((opcode, args));
+                    let body = Encoder::encode(
+                        &Message::Response {
+                            txn,
+                            status: 0,
+                            result,
+                        }
+                        .to_value(),
+                    );
+                    let seq = pedal.seq.entry(node).or_insert(0);
+                    let mut payload = Vec::new();
+                    ChannelHeader {
+                        seq: *seq,
+                        msg_type: MSG_DATA,
+                        ack: 0x1000,
+                    }
+                    .encode_into(&mut payload);
+                    *seq = seq.wrapping_add(1);
+                    payload.extend_from_slice(&[0, 0, 0, 0]);
+                    payload.extend_from_slice(&(body.len() as u32).to_le_bytes());
+                    payload.extend_from_slice(&body);
+                    let host = ChannelId::ALL
+                        .iter()
+                        .find(|channel| channel.device == node)
+                        .map_or(0, |channel| channel.host);
+                    let frame = Frame::new(host, node, payload).encode().unwrap();
+                    pedal.outbox.push_back(frame);
+                }
+                Ok(())
+            }
+
+            fn recv(&mut self, _timeout: Duration) -> hx_usb::Result<Vec<u8>> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .outbox
+                    .pop_front()
+                    .ok_or_else(|| hx_usb::Error::Usb("read timed out".into()))
+            }
+        }
+    }
+
+    /// What `chain` prints as block 3 is the device's block 2, for every
+    /// command that names one.
+    #[test]
+    fn block_numbers_reach_the_device_counted_from_zero() {
+        use hx_proto::msgpack::Value;
+        use std::sync::{Arc, Mutex};
+
+        let commands: &[&[&str]] = &[
+            &["tonepush", "enable", "3", "on"],
+            &["tonepush", "assign", "3"],
+            &["tonepush", "switch-assign", "3", "1"],
+            &["tonepush", "switch-assign", "3", "1", "--off"],
+            &["tonepush", "assign-param", "3", "0", "1"],
+            &["tonepush", "assign-cc", "3", "0", "4"],
+            &["tonepush", "assign-range", "3", "0", "0.5"],
+            &["tonepush", "assignment-raw", "3", "0"],
+            &["tonepush", "assignments", "3", "1"],
+        ];
+        for command in commands {
+            let pedal = Arc::new(Mutex::new(pedal::Pedal::default()));
+            let mut session = hx_usb::Session::replaying(
+                Box::new(pedal::Cable(pedal.clone())),
+                hx_proto::HX_STOMP,
+            )
+            .unwrap();
+            let cli = Cli::try_parse_from(*command).unwrap();
+            run_on(&mut session, &cli.cmd).unwrap();
+
+            let pedal = pedal.lock().unwrap();
+            let (_, args) = pedal.requests.last().unwrap();
+            assert_eq!(
+                args.get(hx_proto::rpc::key::BLOCK).and_then(Value::as_i64),
+                Some(2),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// Every command that names a block counts from 1, as `chain` prints
+    /// them. The assignment commands used to take the device's own zero-based
+    /// number, so `assign 3` and `switch-assign 3 1` meant different blocks.
+    #[test]
+    fn every_block_argument_counts_from_one() {
+        let commands: &[&[&str]] = &[
+            &["tonepush", "enable", "BLOCK", "on"],
+            &["tonepush", "assign", "BLOCK"],
+            &["tonepush", "switch-assign", "BLOCK", "1"],
+            &["tonepush", "assign-param", "BLOCK", "0", "1"],
+            &["tonepush", "assign-cc", "BLOCK", "0", "4"],
+            &["tonepush", "assign-range", "BLOCK", "0", "0.5"],
+            &["tonepush", "assignment-raw", "BLOCK", "0"],
+            &["tonepush", "assignments", "BLOCK", "3"],
+        ];
+        for command in commands {
+            let with = |block: &'static str| -> Vec<&'static str> {
+                command
+                    .iter()
+                    .map(|arg| if *arg == "BLOCK" { block } else { arg })
+                    .collect()
+            };
+            assert!(
+                Cli::try_parse_from(with("0")).is_err(),
+                "block 0 parsed: {command:?}"
+            );
+            let parsed = Cli::try_parse_from(with("3")).expect("block 3 parses");
+            let block = match parsed.cmd {
+                Cmd::Enable { block, .. }
+                | Cmd::Assign { block, .. }
+                | Cmd::SwitchAssign { block, .. }
+                | Cmd::AssignParam { block, .. }
+                | Cmd::AssignCc { block, .. }
+                | Cmd::AssignRange { block, .. }
+                | Cmd::AssignmentRaw { block, .. }
+                | Cmd::Assignments { block, .. } => block,
+                _ => unreachable!("{command:?}"),
+            };
+            assert_eq!(block, 3, "{command:?}");
+        }
     }
 
     #[test]

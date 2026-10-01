@@ -54,6 +54,19 @@ tonepush rename 7 "New Name"
 tonepush ir-load 1 cab.wav
 ```
 
+## Footswitches and controllers
+
+```sh
+tonepush assign 4 --cc 20        # block 4's bypass follows MIDI CC 20
+tonepush switch-assign 4 2       # footswitch 2 toggles block 4
+tonepush assign-param 4 0 1      # block 4's first parameter follows EXP 1
+tonepush assign-cc 4 0 21        # ...or MIDI CC 21, once it is under MIDI
+tonepush assign-range 4 0 0.8 --max
+tonepush assignments 4 6         # what controls block 4's first six parameters
+```
+
+Blocks are numbered from 1 everywhere, as `tonepush chain` prints them; `enable 4`, `assign 4` and `switch-assign 4 2` all mean the same block. Parameters are numbered from 0, in the device's own order. Earlier versions took a zero-based block for `switch-assign`, `assign-param`, `assign-cc`, `assign-range`, `assignment-raw` and `assignments`, so scripts written for them need their block numbers raised by one.
+
 ## Watching and poking
 
 ```sh
