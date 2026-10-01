@@ -916,8 +916,6 @@ fn boundary_chunks_match<L: Link>(
 
 /// Slots up to this size (presets, IRs) are compared byte for byte.
 const FULL_COMPARE_MAX_BYTES: usize = 64 * 1024;
-/// Chunks requested per round trip, matching full slot reads.
-const COMPARE_BATCH_CHUNKS: usize = 32;
 
 /// Whether the device's slot still holds exactly `blob`.
 ///
@@ -943,7 +941,7 @@ fn stored_content_matches<L: Link>(
         None
     }
     .unwrap_or_else(|| (1..=chunks).collect());
-    for batch in wanted.chunks(COMPARE_BATCH_CHUNKS) {
+    for batch in wanted.chunks(crate::device::read_batch_chunks(list.chunk_size)) {
         for (&chunk, bytes) in batch
             .iter()
             .zip(device.read_blob_chunks(&list.path, index, batch)?)

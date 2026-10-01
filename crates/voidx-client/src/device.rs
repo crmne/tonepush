@@ -12,6 +12,14 @@ use crate::{values_equivalent, Error, Link, Notification, Result};
 pub const VERIFIED_FIRMWARE: &str = "1.5.12";
 const NAME_CHUNK_BYTES: usize = 128;
 const READ_BATCH_CHUNKS: usize = 32;
+/// Chunk data asked for in one batch. Firmware 2.2.6 moved presets to
+/// 1024-byte chunks and sometimes takes seconds to answer a large batch, so
+/// a batch is also bounded by bytes, not only by count.
+const READ_BATCH_BYTES: usize = 16 * 1024;
+/// Firmware 2.2.6 sometimes pauses for more than half a minute before
+/// answering an ordinary 16 KiB read (34 s measured while reading NAM
+/// models), then carries on. 1.5.12 and 2.0.10 answered within a second.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
@@ -74,7 +82,7 @@ pub struct Device<L> {
 
 impl<L: Link> Device<L> {
     pub fn connect(link: L) -> Result<Self> {
-        Self::connect_with_timeout(link, Duration::from_secs(5))
+        Self::connect_with_timeout(link, REPLY_TIMEOUT)
     }
 
     pub fn connect_with_timeout(link: L, timeout: Duration) -> Result<Self> {
@@ -224,8 +232,9 @@ impl<L: Link> Device<L> {
         let chunks = list.chunks_per_slot();
         let mut blob = Vec::with_capacity(list.size);
         progress(0, chunks);
-        for first in (1..=chunks).step_by(READ_BATCH_CHUNKS) {
-            let last = (first + READ_BATCH_CHUNKS - 1).min(chunks);
+        let batch = read_batch_chunks(list.chunk_size);
+        for first in (1..=chunks).step_by(batch) {
+            let last = (first + batch - 1).min(chunks);
             let requested = (first..=last).collect::<Vec<_>>();
             for (chunk, bytes) in requested
                 .iter()
@@ -695,6 +704,10 @@ fn decode_data_read_record(
     Ok((chunk, decode_hex(hex)?))
 }
 
+pub(crate) fn read_batch_chunks(chunk_size: usize) -> usize {
+    (READ_BATCH_BYTES / chunk_size.max(1)).clamp(1, READ_BATCH_CHUNKS)
+}
+
 fn assess_identity(identity: &Identity) -> WriteSafety {
     let expected = format!("StompStation PRO / firmware {VERIFIED_FIRMWARE} / CM4 / sspro");
     if identity.name == "StompStation PRO"
@@ -877,6 +890,13 @@ mod tests {
             WriteSafety::ReadOnly { .. }
         ));
         assert!(future.enable_writes().is_err());
+    }
+
+    #[test]
+    fn a_batch_is_bounded_by_bytes_as_well_as_chunks() {
+        assert_eq!(read_batch_chunks(128), 32);
+        assert_eq!(read_batch_chunks(1024), 16);
+        assert_eq!(read_batch_chunks(1 << 20), 1);
     }
 
     #[test]
