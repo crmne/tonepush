@@ -9,7 +9,9 @@ use voidx_proto::{Command, Frame, NodeDescription, NodePath, NodeTree};
 use crate::session::Session;
 use crate::{values_equivalent, Error, Link, Notification, Result};
 
-pub const VERIFIED_FIRMWARE: &str = "1.5.12";
+/// Firmware on which every persistent write TonePush makes was checked on a
+/// pedal, by reading each result back.
+pub const VERIFIED_FIRMWARE: &[&str] = &["1.5.12"];
 const NAME_CHUNK_BYTES: usize = 128;
 const READ_BATCH_CHUNKS: usize = 32;
 /// Chunk data asked for in one batch. Firmware 2.2.6 moved presets to
@@ -738,9 +740,12 @@ pub(crate) fn read_batch_chunks(chunk_size: usize) -> usize {
 }
 
 fn assess_identity(identity: &Identity) -> WriteSafety {
-    let expected = format!("StompStation PRO / firmware {VERIFIED_FIRMWARE} / CM4 / sspro");
+    let expected = format!(
+        "StompStation PRO / firmware {} / CM4 / sspro",
+        VERIFIED_FIRMWARE.join(" or ")
+    );
     if identity.name == "StompStation PRO"
-        && identity.version == VERIFIED_FIRMWARE
+        && VERIFIED_FIRMWARE.contains(&identity.version.as_str())
         && identity.architecture == "CM4"
         && identity.license == "sspro"
     {
@@ -900,7 +905,7 @@ mod tests {
     #[test]
     fn writes_need_both_a_verified_identity_and_explicit_opt_in() {
         let link = Scripted {
-            input: Cursor::new(identity_frames(VERIFIED_FIRMWARE)),
+            input: Cursor::new(identity_frames(VERIFIED_FIRMWARE[0])),
             output: vec![],
         };
         let mut device = Device::connect(link).unwrap();
@@ -953,7 +958,7 @@ mod tests {
 
     #[test]
     fn chunk_response_must_echo_its_coordinates() {
-        let mut frames = identity_frames(VERIFIED_FIRMWARE);
+        let mut frames = identity_frames(VERIFIED_FIRMWARE[0]);
         frames.extend_from_slice(
             b"dread root\\presets:{\"index\":0,\"chunk\":2,\"value\":\"0001\"}\0",
         );
@@ -971,7 +976,7 @@ mod tests {
 
     #[test]
     fn batched_blob_reads_validate_and_restore_chunk_order() {
-        let mut frames = identity_frames(VERIFIED_FIRMWARE);
+        let mut frames = identity_frames(VERIFIED_FIRMWARE[0]);
         frames.extend_from_slice(
             b"dread root\\presets:{\"index\":0,\"chunk\":2,\"value\":\"0203\"}\0\
               dread root\\presets:{\"index\":0,\"chunk\":1,\"value\":\"0001\"}\0",
