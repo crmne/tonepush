@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use egui::RichText;
 use serde_json::Value;
 use voidx_client::backup::{self, ArmedRollback};
-use voidx_client::{BlobList, Device, Identity, SerialLink, UploadStep};
+use voidx_client::{BlobList, Device, Identity, SerialLink, UploadStep, WriteSafety};
 use voidx_proto::{NodeDescription, NodeKind, NodePath, Preset};
 
 use crate::{config, processor, theme, LibraryLookup};
@@ -2881,6 +2881,10 @@ impl Worker {
                     self.device = None;
                     self.rollback = None;
                     self.rollback_path = None;
+                    // The live values an audition replaced belong to this
+                    // session; writing them into the next one would overwrite
+                    // whatever that pedal has loaded.
+                    self.audition_original.clear();
                     self.send(Evt::Disconnected);
                 }
             }
@@ -3367,14 +3371,32 @@ impl Worker {
             .next()
             .ok_or_else(|| WorkError::Other("No StompStation PRO found".into()))?;
         let mut device = Device::connect(found.open()?)?;
-        device.enable_writes()?;
+        // Firmware TonePush has not been verified against still opens, read
+        // only: browsing, exports and backups work, which is also what a pedal
+        // needs before and after a firmware update.
+        let read_only = match device.write_safety() {
+            WriteSafety::Verified => {
+                device.enable_writes()?;
+                None
+            }
+            WriteSafety::ReadOnly { reason } => Some(reason.clone()),
+        };
+        self.audition_original.clear();
         let snapshot = snapshot(&mut device)?;
         let can_refresh_backup = latest_verified_backup(&snapshot.identity).is_some();
         let version = snapshot.identity.version.clone();
         self.device = Some(device);
         self.forget_history();
         self.send(Evt::Connected(snapshot));
-        // Matching a rollback checks flash boundaries and global settings. It
+        if let Some(reason) = read_only {
+            self.rollback = None;
+            self.rollback_path = None;
+            self.send(Evt::Success(format!(
+                "Read only: {reason}. Browsing, export and Backup work; changes are off"
+            )));
+            return Ok(());
+        }
+        // Matching a rollback checks every slot's contents and global settings. It
         // is important, but it should not make a healthy pedal look absent
         // while it runs: publish the live editor first, then unlock writes.
         let guarded = self.device.as_mut().and_then(latest_matching_rollback);
@@ -3399,9 +3421,12 @@ impl Worker {
                     .duration_since(UNIX_EPOCH)
                     .map_err(|error| WorkError::Other(error.to_string()))?
                     .as_secs();
-                let date = jiff::Timestamp::now().strftime("%Y%m%d").to_string();
-                let path = directory.join(format!("stompstation-pro-{version}-{date}.vxbundle"));
+                // To the second: a reconnect later the same day must not
+                // replace the backup taken before that day's edits.
+                let stamp = jiff::Timestamp::now().strftime("%Y%m%d-%H%M%S").to_string();
+                let path = directory.join(format!("{AUTOMATIC_BACKUP}{version}-{stamp}.vxbundle"));
                 self.capture_backup(&path, captured)?;
+                prune_automatic_backups(&directory, &path);
             } else {
                 self.send(Evt::Success(
                     "Live editing ready · choose Backup to unlock Save and device libraries".into(),
@@ -3891,6 +3916,43 @@ fn latest_verified_backup(identity: &Identity) -> Option<(PathBuf, backup::Verif
     None
 }
 
+/// Name prefix of the bundles TonePush captures on its own when no earlier
+/// bundle matches the pedal. Only these are ever pruned.
+const AUTOMATIC_BACKUP: &str = "stompstation-pro-";
+/// Automatic bundles kept, newest first. Each holds every NAM model, so tens
+/// of megabytes; ones the user captured by hand are never removed.
+const AUTOMATIC_BACKUPS_KEPT: usize = 10;
+
+fn prune_automatic_backups(directory: &Path, keep: &Path) {
+    let Some(candidates) = backup_candidates() else {
+        return;
+    };
+    for stale in stale_automatic_backups(candidates, directory, keep) {
+        let _ = std::fs::remove_dir_all(stale);
+    }
+}
+
+/// From bundles ordered newest first, the automatic ones beyond the newest
+/// [`AUTOMATIC_BACKUPS_KEPT`] (counting `keep`, the one just captured).
+fn stale_automatic_backups(
+    candidates: Vec<PathBuf>,
+    directory: &Path,
+    keep: &Path,
+) -> Vec<PathBuf> {
+    candidates
+        .into_iter()
+        .filter(|path| {
+            path.parent() == Some(directory)
+                && path != keep
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(AUTOMATIC_BACKUP))
+        })
+        .skip(AUTOMATIC_BACKUPS_KEPT - 1)
+        .collect()
+}
+
 fn backup_candidates() -> Option<Vec<PathBuf>> {
     let directory = hx_catalog::home::backups()?;
     let mut candidates = std::fs::read_dir(directory)
@@ -4290,5 +4352,40 @@ root\\app\\ir\\on_off:{\"value\":\"OFF\"}\r\n";
         };
         assert_eq!(before, Value::from(0.0));
         assert_eq!(value, Value::from(3.0));
+    }
+
+    #[test]
+    fn only_old_automatic_backups_are_pruned() {
+        let directory = Path::new("/backups");
+        let keep = directory.join("stompstation-pro-1.5.12-20261001-120000.vxbundle");
+        let mut candidates = vec![keep.clone()];
+        for hour in (0..12).rev() {
+            candidates.push(directory.join(format!(
+                "stompstation-pro-1.5.12-20260930-{hour:02}0000.vxbundle"
+            )));
+        }
+        candidates.insert(3, directory.join("before-gig.vxbundle"));
+        let stale = stale_automatic_backups(candidates, directory, &keep);
+        assert_eq!(
+            stale,
+            [
+                directory.join("stompstation-pro-1.5.12-20260930-020000.vxbundle"),
+                directory.join("stompstation-pro-1.5.12-20260930-010000.vxbundle"),
+                directory.join("stompstation-pro-1.5.12-20260930-000000.vxbundle"),
+            ]
+        );
+    }
+
+    #[test]
+    fn switching_presets_with_unsaved_edits_asks_first() {
+        let mut panel = Panel::new(egui::Context::default());
+        panel.select_preset(2);
+        assert!(panel.confirmation.is_none());
+
+        panel.dirty = true;
+        panel.select_preset(2);
+        let confirmation = panel.confirmation.as_ref().expect("asks before discarding");
+        assert_eq!(confirmation.action, "Discard and load");
+        assert!(matches!(confirmation.command, Cmd::SelectPreset(2)));
     }
 }
