@@ -710,24 +710,32 @@ impl Preset {
     }
 
     /// Rename a snapshot.
+    ///
+    /// Only a name this document can carry is accepted: one that is not
+    /// empty and has no control characters. A newline or a NUL would be
+    /// encoded as bytes rather than text, and the preset would then fail
+    /// [`Preset::parse`] when read back.
     pub fn set_snapshot_name(&mut self, index: usize, name: &str) -> bool {
-        if name.is_empty() {
+        if !snapshot_name_is_valid(name) {
             return false;
         }
-        let Some(Value::Array(entries)) =
-            self.tone.at_mut(&[key::SNAPSHOT_SECTION, key::SNAPSHOTS])
-        else {
+        let Some(entry) = self.snapshot_entry_mut(index) else {
             return false;
         };
-        match entries
-            .get_mut(index)
-            .and_then(|e| e.get_mut(key::SNAPSHOT_NAME))
-        {
-            Some(slot) => {
-                *slot = Value::Str(name.to_owned());
-                true
-            }
-            None => false,
+        let Some(slot) = entry.get_mut(key::SNAPSHOT_NAME) else {
+            return false;
+        };
+        // The named flag (key 14) is left as it is: whether the device sets
+        // it when a name is typed has not been seen on hardware, and the
+        // recorded session renames without touching it.
+        *slot = Value::Str(name.to_owned());
+        true
+    }
+
+    fn snapshot_entry_mut(&mut self, index: usize) -> Option<&mut Value> {
+        match self.tone.at_mut(&[key::SNAPSHOT_SECTION, key::SNAPSHOTS]) {
+            Some(Value::Array(entries)) => entries.get_mut(index),
+            _ => None,
         }
     }
 
@@ -1302,7 +1310,13 @@ impl Preset {
             return false;
         };
         *existing = snapshot.clone();
-        self.set_snapshot_name(index, &name);
+        // Put the name back without marking it as typed: paste keeps the
+        // label, it does not rename.
+        if let Some(slot) = existing.get_mut(key::SNAPSHOT_NAME) {
+            if snapshot_name_is_valid(&name) {
+                *slot = Value::Str(name);
+            }
+        }
         true
     }
 
@@ -1464,6 +1478,13 @@ fn snapshots_are_well_formed(tone: &Value, slot_count: usize) -> bool {
     entries
         .iter()
         .all(|entry| snapshot_is_well_formed(entry, slot_count))
+}
+
+/// Whether a snapshot name survives being written into a preset and read
+/// back: text with no control characters, which the encoder writes as a
+/// string rather than as raw bytes.
+fn snapshot_name_is_valid(name: &str) -> bool {
+    !name.is_empty() && !name.chars().any(char::is_control)
 }
 
 fn snapshot_is_well_formed(entry: &Value, slot_count: usize) -> bool {
@@ -2376,6 +2397,18 @@ mod tests {
         assert!(!preset.set_snapshot_name(9, "Nope"));
         assert!(!preset.set_snapshot_name(0, ""));
         assert_eq!(preset.snapshots(), vec!["Verse".to_string()]);
+    }
+
+    #[test]
+    fn a_renamed_snapshot_still_parses() {
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+        assert!(!preset.snapshots().is_empty());
+        for bad in ["Verse\n", "Ve\0rse", "\tVerse", "Chorus\u{7f}"] {
+            assert!(!preset.set_snapshot_name(0, bad), "{bad:?} was accepted");
+        }
+        assert!(preset.set_snapshot_name(0, "Chorus é"));
+        let reread = Preset::parse(&preset.encode()).expect("a renamed preset parses");
+        assert_eq!(reread.snapshots()[0], "Chorus é");
     }
 
     /// Build a preset from a bare list of slot kinds. Blocks are given a model
