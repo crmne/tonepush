@@ -14,6 +14,7 @@
 //!   manifest.json          what this is, when, and from which pedal
 //!   presets/000 CT-Blackend.hxpreset      byte for byte as the device holds it
 //!   presets/001 CT-Day CLN.hxpreset
+//!   presets-1/000 ...      the second setlist, on a pedal that has more
 //!   globals.json           every setting the device answers for, id to value
 //!   irs/01 Fredman.f32     48 kHz mono f32 samples, as stored
 //! ```
@@ -51,20 +52,60 @@ pub struct Manifest {
     pub captured: u64,
     /// Setlist names, in order.
     pub setlists: Vec<String>,
-    /// Every slot's name, in order, empty string for an empty slot. This is the
-    /// index: it says what the bundle should contain before you open it.
+    /// Every slot's name in the first setlist, in order, empty string for an
+    /// empty slot. This is the index: it says what the bundle should contain
+    /// before you open it.
     pub presets: Vec<String>,
+    /// The same for every setlist after the first, in setlist order, each in
+    /// its own `presets-N` directory. Empty on a pedal with one setlist.
+    ///
+    /// The first setlist stays in `presets` so that bundles from before every
+    /// setlist was captured, and anything reading only `presets/`, keep
+    /// working. Those older bundles name more setlists than they hold; see
+    /// [`Manifest::holds_every_setlist`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more_setlists: Vec<Vec<String>>,
     /// Impulse response slot numbers to names.
     pub irs: BTreeMap<String, String>,
     /// How many device settings were captured.
     pub globals: usize,
 }
 
+impl Manifest {
+    /// Every captured setlist's slot names, the first setlist first.
+    pub fn setlist_presets(&self) -> impl Iterator<Item = &[String]> {
+        std::iter::once(self.presets.as_slice()).chain(self.more_setlists.iter().map(Vec::as_slice))
+    }
+
+    /// Whether the bundle holds the presets of every setlist it names.
+    ///
+    /// False only for a bundle taken from a multi-setlist pedal before
+    /// TonePush captured every setlist: it holds the first one alone, and
+    /// restoring it leaves the others on the pedal as they are.
+    pub fn holds_every_setlist(&self) -> bool {
+        1 + self.more_setlists.len() >= self.setlists.len()
+    }
+}
+
+/// The directory a setlist's presets live in: `presets` for the first, as it
+/// always has been, then `presets-1`, `presets-2` and so on, numbered as
+/// `tonepush setlists` numbers them.
+fn setlist_dir(setlist: usize) -> String {
+    match setlist {
+        0 => "presets".to_owned(),
+        n => format!("presets-{n}"),
+    }
+}
+
 /// How far along a capture or a restore is, for a progress bar or a log line.
 pub enum Step<'a> {
+    /// `done` and `total` count every slot of every setlist; `setlist` and
+    /// `slot` say which one this is.
     Presets {
         done: usize,
         total: usize,
+        setlist: usize,
+        slot: usize,
         name: &'a str,
     },
     Globals,
@@ -310,32 +351,18 @@ fn capture_into(
 ) -> Result<Manifest> {
     let (device, firmware) = identify(session)?;
     let setlists = session.setlists()?;
-    let mut names = session.presets(0)?;
-
-    std::fs::create_dir_all(dir.join("presets")).map_err(io("creating the bundle"))?;
-
-    // Presets, byte for byte. An empty slot is recorded as an empty name and
-    // no file, which is what tells a restore to blank it rather than skip it.
-    let total = names.len();
-    let mut preset_files = BTreeSet::new();
-    for (index, listed_name) in names.iter_mut().enumerate() {
-        let name = listed_name.clone();
-        progress(Step::Presets {
-            done: index,
-            total,
-            name: &name,
-        });
-        if let Some(preset) = session.read_preset_at(0, index as i64)? {
-            let file = preset_file(index, &name);
-            let path = dir.join("presets").join(&file);
-            atomic_write(&path, preset.encode()).map_err(io("writing a preset"))?;
-            preset_files.insert(OsString::from(file));
-        } else {
-            // The document is the authority on whether the slot is occupied;
-            // list labels on some firmware use a default name for empty slots.
-            listed_name.clear();
-        }
-    }
+    // Every setlist, not just the first: a Helix Floor, LT or Rack has eight,
+    // and a backup that quietly kept one of them would be found out only when
+    // it was needed. A pedal that lists none still has the one it plays from.
+    let all_names = (0..setlists.len().max(1))
+        .map(|setlist| session.presets(setlist as i64))
+        .collect::<Result<Vec<_>>>()?;
+    let (names, more_setlists) = capture_presets(
+        dir,
+        all_names,
+        |setlist, index| session.read_preset_at(setlist as i64, index as i64),
+        progress,
+    )?;
 
     // Every setting the device answers for. Ids it does not know are simply not
     // in the file; a device that gains settings later just captures more.
@@ -398,16 +425,63 @@ fn capture_into(
         captured,
         setlists,
         presets: names,
+        more_setlists,
         irs,
         globals: globals.len(),
     };
-    remove_stale_preset_files(&dir.join("presets"), &preset_files)?;
     atomic_write(
         dir.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(json_err)?,
     )
     .map_err(io("writing the manifest"))?;
     Ok(manifest)
+}
+
+/// Write every setlist's presets into a bundle, each in its own directory,
+/// and return the slot names as the manifest records them: the first
+/// setlist's, then the rest.
+///
+/// Presets, byte for byte. An empty slot is recorded as an empty name and no
+/// file, which is what tells a restore to blank it rather than skip it.
+fn capture_presets(
+    dir: &Path,
+    mut all_names: Vec<Vec<String>>,
+    mut read: impl FnMut(usize, usize) -> Result<Option<Preset>>,
+    progress: &mut impl FnMut(Step),
+) -> Result<(Vec<String>, Vec<Vec<String>>)> {
+    let total = all_names.iter().map(Vec::len).sum();
+    let mut done = 0;
+    for (setlist, names) in all_names.iter_mut().enumerate() {
+        let presets_dir = dir.join(setlist_dir(setlist));
+        std::fs::create_dir_all(&presets_dir).map_err(io("creating the bundle"))?;
+        let mut preset_files = BTreeSet::new();
+        for (index, listed_name) in names.iter_mut().enumerate() {
+            let name = listed_name.clone();
+            progress(Step::Presets {
+                done,
+                total,
+                setlist,
+                slot: index,
+                name: &name,
+            });
+            done += 1;
+            if let Some(preset) = read(setlist, index)? {
+                let file = preset_file(index, &name);
+                atomic_write(presets_dir.join(&file), preset.encode())
+                    .map_err(io("writing a preset"))?;
+                preset_files.insert(OsString::from(file));
+            } else {
+                // The document is the authority on whether the slot is
+                // occupied; list labels on some firmware use a default name
+                // for empty slots.
+                listed_name.clear();
+            }
+        }
+        remove_stale_preset_files(&presets_dir, &preset_files)?;
+    }
+    let mut all_names = all_names.into_iter();
+    let first = all_names.next().unwrap_or_default();
+    Ok((first, all_names.collect()))
 }
 
 /// Read a bundle's manifest, to show what it holds before putting it back.
@@ -430,6 +504,10 @@ pub fn open(dir: &Path) -> Result<Manifest> {
 /// device stacks their commits until its transfer state machine jams - which is
 /// not theoretical, it once cost a whole setlist. The pacing lives in the
 /// commands themselves, so a restore is a plain loop.
+///
+/// Every setlist the bundle holds goes back to the setlist it came from. A
+/// bundle that [does not hold every setlist](Manifest::holds_every_setlist)
+/// it names puts back the first and leaves the others as the pedal has them.
 pub fn restore(
     dir: &Path,
     session: &mut Session,
@@ -438,13 +516,28 @@ pub fn restore(
 ) -> Result<()> {
     let manifest = open(dir)?;
     validate_device(&manifest, session.profile.name)?;
-    if parts.presets && manifest.presets.len() != usize::from(session.profile.presets) {
-        return Err(Error::Protocol(format!(
-            "the backup has {} preset slots, but {} has {}",
-            manifest.presets.len(),
-            session.profile.name,
-            session.profile.presets
-        )));
+    if parts.presets {
+        if let Some(slots) = manifest
+            .setlist_presets()
+            .map(<[String]>::len)
+            .find(|slots| *slots != usize::from(session.profile.presets))
+        {
+            return Err(Error::Protocol(format!(
+                "the backup has {slots} preset slots in a setlist, but {} has {}",
+                session.profile.name, session.profile.presets
+            )));
+        }
+        // Only worth asking when there is more than one setlist to put back.
+        if !manifest.more_setlists.is_empty() {
+            let wanted = 1 + manifest.more_setlists.len();
+            let available = session.setlists()?.len();
+            if available < wanted {
+                return Err(Error::Protocol(format!(
+                    "the backup has {wanted} setlists, but the connected {} has {available}",
+                    session.profile.name
+                )));
+            }
+        }
     }
 
     // Preflight the complete local side before the first flash write. A full
@@ -465,15 +558,18 @@ pub fn restore(
 
     if let Some(presets) = presets {
         let total = presets.len();
-        for (index, name, preset) in presets {
+        for (done, (setlist, index, name, preset)) in presets.into_iter().enumerate() {
             progress(Step::Presets {
-                done: index,
+                done,
                 total,
+                setlist,
+                slot: index,
                 name: &name,
             });
+            let (setlist, index) = (setlist as i64, index as i64);
             match preset {
-                Some(preset) => session.write_preset_at(0, index as i64, &name, &preset)?,
-                None => session.clear_preset_at(0, index as i64)?,
+                Some(preset) => session.write_preset_at(setlist, index, &name, &preset)?,
+                None => session.clear_preset_at(setlist, index)?,
             }
         }
     }
@@ -517,15 +613,23 @@ fn validate_device(manifest: &Manifest, device: &str) -> Result<()> {
     Ok(())
 }
 
-type RestorePreset = (usize, String, Option<Preset>);
+/// Setlist, slot, name, and the document, `None` for a slot to blank.
+type RestorePreset = (usize, usize, String, Option<Preset>);
 
 fn restore_presets(dir: &Path, manifest: &Manifest) -> Result<Vec<RestorePreset>> {
     manifest
-        .presets
-        .iter()
+        .setlist_presets()
         .enumerate()
-        .map(|(index, name)| {
-            let path = dir.join("presets").join(preset_file(index, name));
+        .flat_map(|(setlist, names)| {
+            names
+                .iter()
+                .enumerate()
+                .map(move |(index, name)| (setlist, index, name))
+        })
+        .map(|(setlist, index, name)| {
+            let path = dir
+                .join(setlist_dir(setlist))
+                .join(preset_file(index, name));
             let preset = match std::fs::read(&path) {
                 Ok(bytes) => Some(Preset::parse(&bytes).ok_or_else(|| {
                     Error::Protocol(format!("{} is not a preset document", path.display()))
@@ -540,7 +644,7 @@ fn restore_presets(dir: &Path, manifest: &Manifest) -> Result<Vec<RestorePreset>
                     )))
                 }
             };
-            Ok((index, name.clone(), preset))
+            Ok((setlist, index, name.clone(), preset))
         })
         .collect()
 }
@@ -650,28 +754,39 @@ fn restore_irs(dir: &Path, manifest: &Manifest) -> Result<RestoreIrs> {
 /// which is too long to do after every save; one preset is milliseconds, so a
 /// bundle can be kept current as you work without ever interrupting.
 pub fn capture_one(session: &mut Session, dir: &Path, index: i64) -> Result<()> {
+    capture_one_in(session, dir, 0, index)
+}
+
+/// [`capture_one`] for a slot in any setlist the bundle holds.
+pub fn capture_one_in(session: &mut Session, dir: &Path, setlist: i64, index: i64) -> Result<()> {
     let mut manifest = open(dir)?;
-    let names = session.presets(0)?;
+    let setlist_index = usize::try_from(setlist)
+        .map_err(|_| Error::Protocol("setlist cannot be negative".into()))?;
     let slot = usize::try_from(index)
         .map_err(|_| Error::Protocol("preset index cannot be negative".into()))?;
-    let mut name = names
-        .get(slot)
-        .cloned()
-        .ok_or_else(|| Error::Protocol(format!("there is no preset slot {index}")))?;
-    if slot >= manifest.presets.len() {
+    let held = manifest
+        .setlist_presets()
+        .nth(setlist_index)
+        .ok_or_else(|| Error::Protocol(format!("the backup does not hold setlist {setlist}")))?;
+    if slot >= held.len() {
         return Err(Error::Protocol(
             "the backup manifest has fewer preset slots than the device".into(),
         ));
     }
+    let names = session.presets(setlist)?;
+    let mut name = names
+        .get(slot)
+        .cloned()
+        .ok_or_else(|| Error::Protocol(format!("there is no preset slot {index}")))?;
+    let presets_dir = dir.join(setlist_dir(setlist_index));
 
     // Read first, so a failed device request leaves the existing backup whole.
     // Write the replacement before removing renamed duplicates for the same
     // reason: at every failure point at least one copy remains.
-    let preset = session.read_preset_at(0, index)?;
+    let preset = session.read_preset_at(setlist, index)?;
     let keep = if let Some(preset) = preset {
         let file = preset_file(slot, &name);
-        atomic_write(dir.join("presets").join(&file), preset.encode())
-            .map_err(io("writing a preset"))?;
+        atomic_write(presets_dir.join(&file), preset.encode()).map_err(io("writing a preset"))?;
         Some(OsString::from(file))
     } else {
         name.clear();
@@ -682,13 +797,16 @@ pub fn capture_one(session: &mut Session, dir: &Path, index: i64) -> Result<()> 
     // obsolete names only after the pointer is durable. At every interruption
     // point the manifest still names a file that exists; an extra old or new
     // file is ignored by readers and can be cleaned on the next update.
-    manifest.presets[slot] = name;
+    match setlist_index {
+        0 => manifest.presets[slot] = name,
+        n => manifest.more_setlists[n - 1][slot] = name,
+    }
     atomic_write(
         dir.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(json_err)?,
     )
     .map_err(io("writing the manifest"))?;
-    remove_other_slot_files(&dir.join("presets"), slot, keep.as_deref())
+    remove_other_slot_files(&presets_dir, slot, keep.as_deref())
 }
 
 fn preset_slot(path: &Path) -> Option<usize> {
@@ -729,7 +847,7 @@ fn remove_other_slot_files(dir: &Path, slot: usize, keep: Option<&OsStr>) -> Res
     Ok(())
 }
 
-/// Every preset a bundle holds, by slot number.
+/// Every preset a bundle holds in its first setlist, by slot number.
 ///
 /// Read by listing rather than by building the names from the manifest: the
 /// file name carries the preset's name, which changes under a rename, and the
@@ -754,8 +872,10 @@ pub type Exportable = (Manifest, Vec<(String, Option<Vec<u8>>)>, serde_json::Val
 
 /// A bundle's contents, ready to be written out in some other format.
 ///
-/// The manifest, every slot's name paired with the document bytes behind it,
-/// and the settings. What it deliberately does not do is interpret any of it:
+/// The manifest, every slot's name in the first setlist paired with the
+/// document bytes behind it, and the settings. An `.hxb` written from this
+/// carries one setlist, so a caller exporting a bundle with
+/// [`more_setlists`](Manifest::more_setlists) should say what it left out. What it deliberately does not do is interpret any of it:
 /// turning a document into HX Edit's symbolic JSON needs the model catalog, and
 /// this crate talks to devices. The caller that has a catalog does that half.
 pub fn for_export(dir: &Path) -> Result<Exportable> {
@@ -1040,6 +1160,7 @@ mod tests {
             captured: 0,
             setlists: vec!["PRESETS".into()],
             presets: Vec::new(),
+            more_setlists: Vec::new(),
             irs: BTreeMap::new(),
             globals: 0,
         }
@@ -1246,6 +1367,99 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A Helix Floor has eight setlists. A backup once kept the first and
+    /// recorded all eight names, so the other seven were silently missing.
+    #[test]
+    fn every_setlist_is_captured_and_restored_to_where_it_came_from() {
+        const PRESET: &[u8] = include_bytes!("../../hx-proto/tests/preset.bin");
+        let root = scratch("setlists");
+        let bundle = root.join("bundle.hxbundle");
+        std::fs::remove_dir_all(bundle.join("presets")).unwrap();
+        let listed = vec![
+            vec!["Clean".to_owned(), "New Preset".to_owned()],
+            vec!["Lead".to_owned(), "Wall".to_owned()],
+        ];
+        // Slot 1 of the first setlist is empty, whatever its listed name.
+        let occupied = |setlist: usize, index: usize| !(setlist == 0 && index == 1);
+
+        let mut steps = Vec::new();
+        let (first, more) = capture_presets(
+            &bundle,
+            listed,
+            |setlist, index| Ok(occupied(setlist, index).then(|| Preset::parse(PRESET).unwrap())),
+            &mut |step| {
+                if let Step::Presets {
+                    done,
+                    total,
+                    setlist,
+                    slot,
+                    ..
+                } = step
+                {
+                    steps.push((done, total, setlist, slot));
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(first, vec!["Clean".to_owned(), String::new()]);
+        assert_eq!(more, vec![vec!["Lead".to_owned(), "Wall".to_owned()]]);
+        assert_eq!(
+            steps,
+            vec![(0, 4, 0, 0), (1, 4, 0, 1), (2, 4, 1, 0), (3, 4, 1, 1)]
+        );
+        assert!(bundle.join("presets/000 Clean.hxpreset").is_file());
+        assert!(bundle.join("presets-1/000 Lead.hxpreset").is_file());
+        assert!(bundle.join("presets-1/001 Wall.hxpreset").is_file());
+
+        let mut saved = manifest();
+        saved.setlists = vec!["FACTORY 1".into(), "USER 1".into()];
+        saved.presets = first;
+        saved.more_setlists = more;
+        assert!(saved.holds_every_setlist());
+        let restored: Vec<_> = restore_presets(&bundle, &saved)
+            .unwrap()
+            .into_iter()
+            .map(|(setlist, index, name, preset)| (setlist, index, name, preset.is_some()))
+            .collect();
+        assert_eq!(
+            restored,
+            vec![
+                (0, 0, "Clean".to_owned(), true),
+                (0, 1, String::new(), false),
+                (1, 0, "Lead".to_owned(), true),
+                (1, 1, "Wall".to_owned(), true),
+            ]
+        );
+
+        // A snapshot keeps every setlist, not only the first directory.
+        std::fs::write(
+            bundle.join("manifest.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+        let made = snapshot(&bundle, "2026-10-01 120000", 3).unwrap().unwrap();
+        assert!(made.join("presets-1/001 Wall.hxpreset").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bundles_from_before_every_setlist_was_captured_still_open() {
+        // Written by an earlier TonePush from a multi-setlist pedal: eight
+        // names, one setlist's presets, and no `more_setlists` field at all.
+        let old = br#"{"version":1,"device":"Helix Floor","firmware":"3.80",
+            "captured":0,"setlists":["A","B","C","D","E","F","G","H"],
+            "presets":["One"],"irs":{},"globals":0}"#;
+        let saved: Manifest = serde_json::from_slice(old).unwrap();
+        assert!(saved.more_setlists.is_empty());
+        assert!(!saved.holds_every_setlist());
+        assert_eq!(saved.setlist_presets().count(), 1);
+
+        // A single-setlist pedal's manifest is written exactly as before.
+        let json = serde_json::to_string(&manifest()).unwrap();
+        assert!(!json.contains("more_setlists"));
+        assert!(manifest().holds_every_setlist());
+    }
+
     #[test]
     fn preset_files_sort_by_slot_and_keep_the_name() {
         assert_eq!(preset_file(0, "CT-Blackend"), "000 CT-Blackend.hxpreset");
@@ -1290,9 +1504,9 @@ mod tests {
 
         std::fs::write(bundle.join("presets/000 Named.hxpreset"), PRESET).unwrap();
         let presets = restore_presets(&bundle, &saved).unwrap();
-        assert!(presets[0].2.is_some());
+        assert!(presets[0].3.is_some());
         assert!(
-            presets[1].2.is_none(),
+            presets[1].3.is_none(),
             "an empty slot deliberately has no file"
         );
 

@@ -1166,11 +1166,23 @@ fn back_up(session: &mut hx_usb::Session, directory: &std::path::Path) -> Result
     let started = std::time::Instant::now();
     let profile = session.profile;
     let manifest = hx_usb::backup::capture(session, directory, now(), |step| match step {
-        Step::Presets { done, total, name } => {
-            if !name.is_empty() {
-                println!("  {}  {name}", profile.slot_label(done as i64));
+        Step::Presets {
+            total,
+            setlist,
+            slot,
+            name,
+            ..
+        } => {
+            if name.is_empty() {
+                return;
             }
-            let _ = total;
+            // Name the setlist only on a pedal that has more than one.
+            let label = profile.slot_label(slot as i64);
+            if total > usize::from(profile.presets) {
+                println!("  setlist {setlist}  {label}  {name}");
+            } else {
+                println!("  {label}  {name}");
+            }
         }
         Step::Globals => println!("  settings"),
         Step::Irs { done, total } => println!("  impulse response {}/{total}", done + 1),
@@ -1178,9 +1190,15 @@ fn back_up(session: &mut hx_usb::Session, directory: &std::path::Path) -> Result
     })
     .context("backing up the pedal")?;
 
-    let kept = manifest.presets.iter().filter(|n| !n.is_empty()).count();
+    let kept = manifest
+        .setlist_presets()
+        .flatten()
+        .filter(|n| !n.is_empty())
+        .count();
+    let setlists = manifest.setlist_presets().count();
     println!(
-        "\nbacked up {kept} presets, {} settings and {} impulse responses to {} in {:.1?}",
+        "\nbacked up {kept} presets in {setlists} setlist{}, {} settings and {} impulse responses to {} in {:.1?}",
+        if setlists == 1 { "" } else { "s" },
         manifest.globals,
         manifest.irs.len(),
         directory.display(),
@@ -1217,14 +1235,20 @@ fn restore_all(
         manifest.device,
         manifest.captured,
     );
+    if (presets || !(globals || irs)) && !manifest.holds_every_setlist() {
+        println!(
+            "note: this backup holds only the first of the {} setlists it names, \
+             so the others stay as the pedal has them",
+            manifest.setlists.len()
+        );
+    }
 
     let started = std::time::Instant::now();
     hx_usb::backup::restore(directory, session, parts, |step| match step {
-        Step::Presets { done, total, name } => {
+        Step::Presets { done, total, .. } => {
             if done % 10 == 0 || done + 1 == total {
                 println!("  presets {}/{total}", done + 1);
             }
-            let _ = name;
         }
         Step::Globals => println!("  settings"),
         Step::Irs { done, total } => println!("  impulse response {}/{total}", done + 1),
@@ -1666,6 +1690,12 @@ fn export_hxb(bundle: &std::path::Path, output: &std::path::Path) -> Result<()> 
         output.display(),
         bytes.len()
     );
+    if manifest.setlists.len() > 1 {
+        println!(
+            "note: an .hxb written here holds one setlist, so only {:?} was exported",
+            manifest.setlists[0]
+        );
+    }
     println!(
         "note: HX Edit reads this; name it \"HX Stomp Backup <YYYY-Mon-DD>.hxb\" or its\n      backup dialog will not list it"
     );

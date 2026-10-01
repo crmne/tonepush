@@ -26,7 +26,14 @@ added once the faithful converter exists. We already **read** `.hxb`
 - **Global settings** - **154** answering device objects (`object(id)`), which line
   up with HX Edit's `GLOB` block (156 named fields: EQ 13, Tuner 11, DSP 5, System 127).
   Store id→value; labels can come later.
-- **Setlists** - one on the HX Stomp, named `PRESETS`.
+- **Setlists** - one on the HX Stomp, named `PRESETS`. A Helix Floor, LT or
+  Rack has eight, and a bundle holds every one: the first in `presets/`, the
+  rest in `presets-1/`, `presets-2/` and so on, numbered as `tonepush
+  setlists` numbers them, with their slot names in the manifest's
+  `more_setlists`. A restore puts each back in the setlist it came from.
+  Bundles made before this held only the first setlist; restoring one says so
+  and leaves the other setlists as they are. An `.hxb` export carries the
+  first setlist only, and says so.
 - **IRs** - read-back decoded: `op12` for the descriptor, `op11` for the samples
   (see below). Carmine's pedal normally carries **none** (cab models, not IRs),
   so today's backups are complete without them either way.
