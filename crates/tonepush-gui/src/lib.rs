@@ -8757,8 +8757,11 @@ impl App {
         }
         // Turning a knob writes as it turns, the way the pedal's own do.
         if let Some((row, col, value)) = did.turned {
-            if let Some(row) = listed.get(row) {
-                self.move_travel(position, row.target, col == HIGH_END, value);
+            if let Some((row, travel)) = listed
+                .get(row)
+                .and_then(|row| Some((row, row.travel.as_ref()?)))
+            {
+                self.move_travel(position, row.target, col == HIGH_END, value, &travel.range);
             }
         }
         // A CC is an address, not a sweep. Every step is kept so the field
@@ -8802,10 +8805,11 @@ impl App {
                                 Some(catalog) => catalog.parse(&travel.param, draft.trim()),
                                 None => draft.trim().parse().ok(),
                             }?;
-                            Some(value.clamp(*travel.range.start(), *travel.range.end()))
+                            let value = value.clamp(*travel.range.start(), *travel.range.end());
+                            Some((value, travel.range.clone()))
                         });
-                    if let Some(value) = typed {
-                        self.move_travel(position, target, high, value);
+                    if let Some((value, range)) = typed {
+                        self.move_travel(position, target, high, value, &range);
                     }
                 }
             }
@@ -8867,15 +8871,25 @@ impl App {
     }
 
     /// Move one end of an assignment's travel.
+    ///
+    /// `value` is in the parameter's own units, `range` its span: the document
+    /// holds the ends that way and the table shows them that way, but opcodes
+    /// 65 and 66 take an end as a fraction of the range. Sending the units
+    /// meant every end past 1.0 - a pitch block's 12 semitones, a delay's
+    /// milliseconds - was refused, and the refusal used to end the session.
     fn move_travel(
         &mut self,
         block: i64,
         target: hx_proto::preset::Target,
         high_end: bool,
         value: f32,
+        range: &std::ops::RangeInclusive<f32>,
     ) {
         // 65 and 66 take a parameter index, so a bypass has no end to move.
         let hx_proto::preset::Target::Param(param) = target else {
+            return;
+        };
+        let Some(fraction) = travel_fraction(range, value) else {
             return;
         };
         // Keep our own copy in step as it turns. Dragging streams one write per
@@ -8898,7 +8912,7 @@ impl App {
         self.edit(Cmd::SetAssignRange {
             block,
             param,
-            value,
+            value: fraction,
             high_end,
         });
     }
@@ -10689,6 +10703,17 @@ struct Travel {
     param: hx_catalog::Param,
 }
 
+/// Where a value sits in a parameter's range, as the fraction from 0.0 to
+/// 1.0 that the travel opcodes take. `None` for a value or a range that is not
+/// a number, and for a range with no width to divide.
+fn travel_fraction(range: &std::ops::RangeInclusive<f32>, value: f32) -> Option<f32> {
+    let (low, high) = (*range.start(), *range.end());
+    if !value.is_finite() || !low.is_finite() || !high.is_finite() || high <= low {
+        return None;
+    }
+    Some(((value - low) / (high - low)).clamp(0.0, 1.0))
+}
+
 /// The bypass popup's own id, distinct from any parameter's.
 /// What the setlist rail shows about a setlist, and how wide each part is.
 ///
@@ -11362,6 +11387,47 @@ mod tests {
             "the title should show that the reload is under way"
         );
         assert!(matches!(cmds.try_recv(), Ok(Cmd::SelectPreset(7))));
+    }
+
+    /// The table holds a travel's ends in the parameter's own units, and the
+    /// opcodes that move them take a fraction of its range. Sending the units
+    /// made every end past 1.0 a refusal that ended the session.
+    #[test]
+    fn a_travel_end_goes_to_the_pedal_as_a_fraction_of_its_range() {
+        use hx_proto::preset::Target;
+        let (mut app, _events, cmds) = app();
+        let _ = cmds.try_iter().count();
+
+        app.move_travel(3, Target::Param(2), true, 7.5, &(0.0..=10.0));
+        assert!(matches!(
+            cmds.try_recv(),
+            Ok(Cmd::SetAssignRange { block: 3, param: 2, value, high_end: true })
+                if (value - 0.75).abs() < 1e-6
+        ));
+
+        // A pitch block holds its ends in semitones, either side of zero.
+        app.move_travel(3, Target::Param(0), false, -12.0, &(-24.0..=24.0));
+        assert!(matches!(
+            cmds.try_recv(),
+            Ok(Cmd::SetAssignRange { value, high_end: false, .. })
+                if (value - 0.25).abs() < 1e-6
+        ));
+
+        // Nothing goes for a value that is not a number, or for a bypass,
+        // which is a switch with no travel at all.
+        app.move_travel(3, Target::Param(0), false, f32::NAN, &(0.0..=1.0));
+        app.move_travel(3, Target::Bypass, false, 0.5, &(0.0..=1.0));
+        assert!(cmds.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_travel_fraction_stays_between_the_ends() {
+        assert_eq!(travel_fraction(&(20.0..=20_000.0), 20.0), Some(0.0));
+        assert_eq!(travel_fraction(&(20.0..=20_000.0), 20_000.0), Some(1.0));
+        assert_eq!(travel_fraction(&(0.0..=10.0), 12.0), Some(1.0));
+        assert_eq!(travel_fraction(&(0.0..=10.0), -1.0), Some(0.0));
+        assert_eq!(travel_fraction(&(5.0..=5.0), 5.0), None);
+        assert_eq!(travel_fraction(&(0.0..=1.0), f32::INFINITY), None);
     }
 
     #[test]

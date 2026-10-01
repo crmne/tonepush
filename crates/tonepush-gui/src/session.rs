@@ -432,25 +432,11 @@ pub fn spawn_repainting() -> (Sender<Cmd>, Receiver<Evt>, RepaintSignal) {
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (evt_tx, evt_rx) = mpsc::channel();
     let repaint = RepaintSignal::default();
-    let worker_repaint = repaint.clone();
-    std::thread::spawn(move || {
-        Worker {
-            cmds: cmd_rx,
-            events: Events {
-                tx: evt_tx,
-                repaint: worker_repaint,
-            },
-            device: None,
-            setlist: 0,
-            history: Vec::new(),
-            future: Vec::new(),
-            snapshot_taken: false,
-            dirty: false,
-            shown: (-1, String::new()),
-            audition: None,
-        }
-        .run()
-    });
+    let events = Events {
+        tx: evt_tx,
+        repaint: repaint.clone(),
+    };
+    std::thread::spawn(move || Worker::new(cmd_rx, events).run());
     (cmd_tx, evt_rx, repaint)
 }
 
@@ -496,6 +482,21 @@ struct Audition {
 }
 
 impl Worker {
+    fn new(cmds: Receiver<Cmd>, events: Events) -> Worker {
+        Worker {
+            cmds,
+            events,
+            device: None,
+            setlist: 0,
+            history: Vec::new(),
+            future: Vec::new(),
+            snapshot_taken: false,
+            dirty: false,
+            shown: (-1, String::new()),
+            audition: None,
+        }
+    }
+
     fn slot_label(&self, index: i64) -> String {
         self.device.as_ref().map_or_else(
             || hx_proto::rpc::slot_label(index),
@@ -1810,14 +1811,16 @@ impl Worker {
         &mut self,
         f: impl FnOnce(&mut hx_usb::Session) -> hx_usb::Result<T>,
     ) -> Option<T> {
-        let result = {
+        let (result, untouched) = {
             let device = self.device.as_mut()?;
-            f(device)
+            let before = device.channel_stats();
+            let result = f(device);
+            (result, device.channel_stats() == before)
         };
         match result {
             Ok(value) => Some(value),
             Err(e) => {
-                let lost = e.loses_session();
+                let lost = loses_session(&e, untouched);
                 self.events.send(Evt::Failed(e.to_string()));
                 if lost {
                     // Never let the next queued click write onto an unknown
@@ -1838,17 +1841,21 @@ impl Worker {
         &mut self,
         f: impl FnOnce(&mut hx_usb::Session) -> hx_usb::Result<T>,
     ) -> Option<T> {
-        let result = {
+        let (result, untouched) = {
             let device = self.device.as_mut()?;
-            f(device)
+            let before = device.channel_stats();
+            let result = f(device);
+            (result, device.channel_stats() == before)
         };
         match result {
             Ok(value) => Some(value),
             Err(hx_usb::Error::Device(_)) => None,
             Err(error) => {
                 self.events.send(Evt::Failed(error.to_string()));
-                self.device = None;
-                self.events.send(Evt::Disconnected);
+                if loses_session(&error, untouched) {
+                    self.device = None;
+                    self.events.send(Evt::Disconnected);
+                }
                 None
             }
         }
@@ -1856,6 +1863,24 @@ impl Worker {
 
     fn send(&self, evt: Evt) {
         self.events.send(evt);
+    }
+}
+
+/// Whether a failed device call leaves the session unusable.
+///
+/// hx-usb reports a request it will not send - an argument out of range, a
+/// document that does not encode, a file that is not a WAV - as a protocol
+/// error, the same kind as a reply that makes no sense, and a protocol error
+/// ends the session. A request that never left changed nothing, though: no
+/// sequence number was spent and nothing arrived, so the conversation is
+/// exactly where it was. Dropping the pedal for one out-of-range value turned
+/// a dragged controller end into a disconnect. Only a protocol error with no
+/// traffic behind it is forgiven; transport failures and timeouts still end
+/// the session however little they sent.
+fn loses_session(error: &hx_usb::Error, untouched: bool) -> bool {
+    match error {
+        hx_usb::Error::Protocol(_) if untouched => false,
+        error => error.loses_session(),
     }
 }
 
@@ -1976,6 +2001,12 @@ fn shape_setting_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hx_proto::frame::{ChannelHeader, MSG_DATA};
+    use hx_proto::msgpack::{Encoder, Value};
+    use hx_proto::rpc::{key, op, Message, StreamReader};
+    use hx_proto::{ChannelId, Frame};
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::Mutex;
 
     /// The snapshot names are the only dates this program writes, and they are
     /// what a person reads when choosing which copy of their pedal to go back
@@ -2021,5 +2052,280 @@ mod tests {
         assert!(shape_setting_value(&Value::UInt(0), -1.0).is_none());
         assert!(shape_setting_value(&Value::Str("old".into()), 1.0).is_none());
         assert!(shape_setting_value(&Value::F32(0.0), f32::NAN).is_none());
+    }
+
+    /// A pedal on the far side of the byte transport.
+    ///
+    /// Enough of the channel protocol to carry requests in and answers out,
+    /// in front of one edit buffer and a few stored presets, so the worker
+    /// can be driven end to end with no hardware. It
+    /// answers every request at once and keeps every one it was sent, which
+    /// is how a test says what did, and did not, reach the pedal.
+    struct Pedal {
+        /// The loaded preset: setlist, slot and name.
+        loaded: (i64, i64, String),
+        /// The edit buffer, as a document.
+        buffer: Vec<u8>,
+        /// What each slot holds: its name and its document.
+        stored: BTreeMap<i64, (String, Vec<u8>)>,
+        /// Opcodes refused, with the error code each refusal carries.
+        refuse: BTreeMap<i64, i64>,
+        /// Whether the cable is out: every transfer fails.
+        unplugged: bool,
+        /// Every request that arrived, as (opcode, arguments).
+        requests: Vec<(i64, Value)>,
+        /// Transfers waiting for the host to read them.
+        outbox: VecDeque<Vec<u8>>,
+        /// Stream bytes from the host that are not yet a whole message.
+        inbox: BTreeMap<u16, StreamReader>,
+        /// The next sequence number on each channel.
+        seq: BTreeMap<u16, u16>,
+    }
+
+    /// The test preset with its tempo changed, so two slots hold documents
+    /// that can be told apart.
+    fn document(tempo: f32) -> Vec<u8> {
+        let mut preset =
+            hx_proto::Preset::parse(include_bytes!("../../hx-proto/tests/preset.bin")).unwrap();
+        assert!(preset.set_tempo(tempo));
+        preset.encode()
+    }
+
+    impl Pedal {
+        /// Slot 2, "Clean", is loaded; slot 5, "Lead", is stored beside it.
+        fn new() -> Arc<Mutex<Pedal>> {
+            let clean = document(120.0);
+            let stored = BTreeMap::from([
+                (2, ("Clean".to_owned(), clean.clone())),
+                (5, ("Lead".to_owned(), document(90.0))),
+            ]);
+            Arc::new(Mutex::new(Pedal {
+                loaded: (0, 2, "Clean".to_owned()),
+                buffer: clean,
+                stored,
+                refuse: BTreeMap::new(),
+                unplugged: false,
+                requests: Vec::new(),
+                outbox: VecDeque::new(),
+                inbox: BTreeMap::new(),
+                seq: BTreeMap::new(),
+            }))
+        }
+
+        fn opcodes(&self) -> Vec<i64> {
+            self.requests.iter().map(|(opcode, _)| *opcode).collect()
+        }
+
+        fn receive(&mut self, bytes: &[u8]) {
+            let Ok(frame) = Frame::decode(bytes) else {
+                return;
+            };
+            let Some((header, rest)) = ChannelHeader::decode(&frame.payload) else {
+                return;
+            };
+            if !header.has_data() || rest.is_empty() {
+                return;
+            }
+            let node = frame.dst;
+            let reader = self.inbox.entry(node).or_default();
+            reader.push(rest);
+            let messages = reader.take_messages().unwrap_or_default();
+            for message in messages {
+                if let Ok(Message::Request { txn, opcode, args }) =
+                    Message::try_from_value(message.body)
+                {
+                    self.requests.push((opcode, args.clone()));
+                    let (status, result) = self.answer(opcode, &args);
+                    self.reply(
+                        node,
+                        &Message::Response {
+                            txn,
+                            status,
+                            result,
+                        },
+                    );
+                }
+            }
+        }
+
+        fn answer(&mut self, opcode: i64, args: &Value) -> (i64, Value) {
+            if let Some(code) = self.refuse.get(&opcode) {
+                return (
+                    255,
+                    hx_proto::msgmap! { key::ERROR_CODE => Value::Int(*code) },
+                );
+            }
+            let number = |k| args.get(k).and_then(Value::as_i64).unwrap_or_default();
+            match opcode {
+                op::PRESET_INFO => {
+                    let (setlist, index, name) = self.loaded.clone();
+                    let info = hx_proto::msgmap! {
+                        key::SETLIST => Value::Int(setlist),
+                        key::PRESET_INDEX => Value::Int(index),
+                        key::NAME => Value::Str(name),
+                    };
+                    (0, info)
+                }
+                op::READ_PRESET => (0, Value::Bin(self.buffer.clone(), 2)),
+                op::SELECT_PRESET => {
+                    let index = number(key::PRESET_INDEX);
+                    let Some((name, document)) = self.stored.get(&index).cloned() else {
+                        return (255, hx_proto::msgmap! { key::ERROR_CODE => Value::Int(-3) });
+                    };
+                    self.loaded = (number(key::SETLIST), index, name);
+                    self.buffer = document;
+                    (0, Value::Nil)
+                }
+                op::WRITE_PRESET => {
+                    if let Some(document) = args.get(key::DOCUMENT).and_then(Value::as_raw) {
+                        self.buffer = document.to_vec();
+                    }
+                    (0, Value::Nil)
+                }
+                op::SAVE_PRESET => {
+                    let name = args
+                        .get(key::NAME)
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let saved = (name, self.buffer.clone());
+                    self.stored.insert(number(key::PRESET_INDEX), saved);
+                    (0, Value::Nil)
+                }
+                _ => (0, Value::Nil),
+            }
+        }
+
+        /// Queue one message for the host, on the channel `node` names.
+        fn reply(&mut self, node: u16, message: &Message) {
+            let body = Encoder::encode(&message.to_value());
+            let seq = self.seq.entry(node).or_insert(0);
+            let mut payload = Vec::new();
+            ChannelHeader {
+                seq: *seq,
+                msg_type: MSG_DATA,
+                ack: 0x1000,
+            }
+            .encode_into(&mut payload);
+            *seq = seq.wrapping_add(1);
+            // From the device, on a service nothing reads, and its length.
+            payload.extend_from_slice(&0u16.to_le_bytes());
+            payload.extend_from_slice(&0u16.to_le_bytes());
+            payload.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            payload.extend_from_slice(&body);
+            let host = ChannelId::ALL
+                .iter()
+                .find(|channel| channel.device == node)
+                .map_or(0, |channel| channel.host);
+            self.outbox
+                .push_back(Frame::new(host, node, payload).encode().unwrap());
+        }
+    }
+
+    /// The USB cable, as far as the session can tell.
+    struct Cable(Arc<Mutex<Pedal>>);
+
+    impl hx_usb::Wire for Cable {
+        fn send(&mut self, bytes: &[u8]) -> hx_usb::Result<()> {
+            let mut pedal = self.0.lock().unwrap();
+            if pedal.unplugged {
+                return Err(hx_usb::Error::Usb("the cable is out".into()));
+            }
+            pedal.receive(bytes);
+            Ok(())
+        }
+
+        fn recv(&mut self, _timeout: Duration) -> hx_usb::Result<Vec<u8>> {
+            let mut pedal = self.0.lock().unwrap();
+            if pedal.unplugged {
+                return Err(hx_usb::Error::Usb("the cable is out".into()));
+            }
+            pedal
+                .outbox
+                .pop_front()
+                .ok_or_else(|| hx_usb::Error::Usb("read timed out".into()))
+        }
+    }
+
+    /// A worker talking to `pedal`, showing what it has loaded, with nothing
+    /// left to say about getting there.
+    fn worker(pedal: &Arc<Mutex<Pedal>>) -> (Worker, Receiver<Evt>) {
+        let (_commands, cmds) = mpsc::channel();
+        let (tx, events) = mpsc::channel();
+        let mut worker = Worker::new(
+            cmds,
+            Events {
+                tx,
+                repaint: RepaintSignal::default(),
+            },
+        );
+        let cable = Box::new(Cable(pedal.clone()));
+        worker.device = Some(
+            hx_usb::Session::replaying(cable, hx_proto::HX_STOMP)
+                .expect("the pretend pedal answers"),
+        );
+        worker.reload();
+        let _ = events.try_iter().count();
+        (worker, events)
+    }
+
+    #[test]
+    fn only_a_protocol_error_that_sent_nothing_is_forgiven() {
+        let refused = hx_usb::Error::Protocol("an assignment endpoint must be 0 to 1".into());
+        assert!(!loses_session(&refused, true));
+        assert!(loses_session(&refused, false));
+        assert!(loses_session(&hx_usb::Error::Usb("gone".into()), true));
+        assert!(loses_session(&hx_usb::Error::Timeout(1000), true));
+        assert!(!loses_session(&hx_usb::Error::Device(-3), false));
+    }
+
+    /// A controller end out of range is refused before it is sent, as a
+    /// protocol error, and protocol errors used to end the session: one bad
+    /// value let go of the pedal. Nothing reached the wire, so nothing about
+    /// the conversation changed and it carries on.
+    #[test]
+    fn a_request_refused_before_it_is_sent_keeps_the_pedal() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        let sent = pedal.lock().unwrap().requests.len();
+
+        worker.handle(Cmd::SetAssignRange {
+            block: 1,
+            param: 0,
+            value: 7.5,
+            high_end: true,
+        });
+
+        let said: Vec<Evt> = events.try_iter().collect();
+        assert!(said.iter().any(|e| matches!(e, Evt::Failed(_))));
+        assert!(!said.iter().any(|e| matches!(e, Evt::Disconnected)));
+        assert!(worker.device.is_some(), "the pedal is kept");
+        assert_eq!(pedal.lock().unwrap().requests.len(), sent);
+
+        worker.handle(Cmd::SetAssignRange {
+            block: 1,
+            param: 0,
+            value: 0.75,
+            high_end: true,
+        });
+        assert_eq!(
+            pedal.lock().unwrap().opcodes().last(),
+            Some(&op::ASSIGN_MAX_OP),
+            "and the session still works"
+        );
+    }
+
+    /// The other side of that rule: a failure on the wire still ends the
+    /// session, however early it came.
+    #[test]
+    fn a_transport_failure_still_lets_the_pedal_go() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        pedal.lock().unwrap().unplugged = true;
+
+        worker.handle(Cmd::SelectBlock(1));
+
+        assert!(worker.device.is_none());
+        assert!(events.try_iter().any(|e| matches!(e, Evt::Disconnected)));
     }
 }
