@@ -692,6 +692,25 @@ impl CloudClient {
         let Some(path) = &location.artifact else {
             return Err(format!("{} has no downloadable preset", tone.summary.name));
         };
+        let Some(expected) = tone
+            .file_sha256
+            .as_deref()
+            .map(|hash| hash.trim().to_ascii_lowercase())
+            .filter(|hash| !hash.is_empty())
+        else {
+            return Err(format!(
+                "TonePush did not say which preset {} is, so it cannot be checked",
+                tone.summary.name
+            ));
+        };
+        // Plain HTTP is for a local server named through TONEPUSH_SITE. From
+        // the real site it would let anyone on the network swap the preset.
+        if path.starts_with("http://") && !self.base.starts_with("http://") {
+            return Err(format!(
+                "{} is offered over an insecure connection, so it was not downloaded",
+                tone.summary.name
+            ));
+        }
         let url = if path.starts_with("http://") || path.starts_with("https://") {
             path.clone()
         } else {
@@ -712,6 +731,14 @@ impl CloudClient {
             .body_mut()
             .read_to_vec()
             .map_err(|error| format!("the Tone artifact was unreadable: {error}"))?;
+        // A captive portal or a proxy answers 200 with a page of its own. Only
+        // the bytes TonePush published are a tone.
+        if crate::library::hash_of(&bytes) != expected {
+            return Err(format!(
+                "the download of {} was not the preset TonePush published",
+                tone.summary.name
+            ));
+        }
         Ok(ToneDelivery::Artifact(bytes))
     }
 
@@ -1901,6 +1928,9 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/cloud/tone-details.json"))
                 .unwrap();
         json["download"] = serde_json::json!({"artifact": "tones/456/artifact"});
+        json["file_sha256"] = crate::library::hash_of(b"native preset")
+            .to_ascii_uppercase()
+            .into();
         let tone: ToneDetails = serde_json::from_value(json).unwrap();
         let client = CloudClient::new(&server.base);
         assert_eq!(
@@ -1909,6 +1939,47 @@ mod tests {
         );
         let request = server.finish().pop().unwrap();
         assert!(String::from_utf8_lossy(&request).starts_with("GET /tones/456/artifact "));
+    }
+
+    /// A captive portal answers 200 with its own sign-in page. That page is
+    /// not the preset and must never reach the library.
+    #[test]
+    fn a_download_that_is_not_the_published_preset_is_refused() {
+        let server = StubServer::start_raw(vec![(200, b"<html>Sign in</html>".to_vec())]);
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/cloud/tone-details.json"))
+                .unwrap();
+        json["download"] = serde_json::json!({"artifact": "tones/456/artifact"});
+        json["file_sha256"] = crate::library::hash_of(b"native preset").into();
+        let tone: ToneDetails = serde_json::from_value(json).unwrap();
+        let error = CloudClient::new(&server.base).download(&tone).unwrap_err();
+        assert!(error.contains("not the preset"), "{error}");
+        server.finish();
+    }
+
+    #[test]
+    fn a_download_without_a_published_hash_is_refused() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/cloud/tone-details.json"))
+                .unwrap();
+        json["download"] = serde_json::json!({"artifact": "tones/456/artifact"});
+        json["file_sha256"] = serde_json::Value::Null;
+        let tone: ToneDetails = serde_json::from_value(json).unwrap();
+        let error = CloudClient::new("http://127.0.0.1:1")
+            .download(&tone)
+            .unwrap_err();
+        assert!(error.contains("cannot be checked"), "{error}");
+    }
+
+    #[test]
+    fn the_real_site_never_downloads_over_plain_http() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/cloud/tone-details.json"))
+                .unwrap();
+        json["download"] = serde_json::json!({"artifact": "http://127.0.0.1:1/tones/456"});
+        let tone: ToneDetails = serde_json::from_value(json).unwrap();
+        let error = CloudClient::new(SITE).download(&tone).unwrap_err();
+        assert!(error.contains("insecure"), "{error}");
     }
 
     #[test]
