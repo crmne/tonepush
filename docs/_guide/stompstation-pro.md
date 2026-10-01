@@ -191,6 +191,28 @@ checks the file first: it must be a 64-bit ARM program and either an official
 release TonePush lists by its SHA-256, or a release whose file name
 (`s_pro_2_2_6.upd`) and contents agree on its version.
 
+On the Pedal page, **Firmware** takes you through it in five steps, always in
+view: Back up, Update Mode, Write, Restart, Check.
+
+1. Choose the `.zip` or the `.upd`. TonePush checks it, then backs the pedal
+   up and checks the backup; Continue waits for both.
+2. Start the pedal in Update Mode: unplug its power, leave the USB cable in,
+   wait ten seconds and plug it back in, and once the Sonulab logo shows, hold
+   UPD for a few seconds until the screen says Update Mode. TonePush moves on
+   by itself when it finds the pedal there, reading only who it is.
+3. It asks before writing, naming the version, the backup and what it
+   restores onto, then sends the firmware, each batch confirmed by the pedal.
+4. It says when the pedal has the whole file, counts down the five minutes the
+   pedal needs to finish writing, then asks you to unplug its power, wait ten
+   seconds and plug it back in, without holding UPD.
+5. When the pedal starts again, TonePush checks the version it reports and
+   backs it up again: the old backup describes the old firmware.
+
+If an update stops, TonePush says where, keeps the firmware file and the
+backup, and tries again from Update Mode. If it starts while the pedal is
+already in Update Mode, it connects to it without reading anything else and
+offers the update, standing on a checked backup of the pedal from the last day.
+
 ```sh
 tonepush pro firmware-inspect s_pro_2_2_6.zip
 tonepush pro backup before-2.2.6.vxbundle

@@ -299,3 +299,56 @@ and `before/pro-device-window`.
   the first free impulse-response slot (two, for a stereo WAV), and a `.nam`
   into the NAM library open on the Pedal page.
 - The Firmware tab comes with stage 6.
+
+## Stage 6: StompStation PRO firmware
+
+Pedal, Firmware (12 to 17): the five steps always in view (Back up, Update
+Mode, Write, Restart, Check), the way `tonepush pro firmware-update` installs
+Sonulab's firmware and with its checks. Choosing the `.zip` or `.upd` checks
+it with `voidx_client::firmware::Image`; the pedal is backed up into a fresh
+checked backup and Continue waits for it (12). The pedal is let go and started
+in Update Mode by hand, with the drawing of its back and UPD lit (13);
+TonePush finds it by itself, reads only its identity, and asks before it
+writes, naming the version, the backup and what that restores onto (14). The
+write shows what the pedal has confirmed, batch by batch, and how long is left
+(15). Once the pedal has the whole file, TonePush counts down the five minutes
+it is left on, sees it switched off, counts the ten seconds, and waits for it
+(16); when it starts again it checks the version it reports and backs it up
+again. A write that stops says where and how to finish (17), with the file and
+the backup it still holds and the details for support.
+
+Scenes: `pro-firmware-backup`, `pro-firmware-update-mode`,
+`pro-firmware-confirm`, `pro-firmware-writing`, `pro-firmware-restart` and
+`pro-firmware-failed` (all new); the PRO's Pedal page gains the Firmware tab
+in `pro-pedal`, `pro-nam`, `pro-irs` and `pro-settings`. There was no firmware
+update in 0.7.0, so there is no `before/`.
+
+- In Update Mode the pedal names itself a Raspberry Pi serial port. When no
+  StompStation PRO is listed, TonePush takes the one port that may be the
+  pedal in Update Mode, reads its identity, and uses it only if it says
+  StompStation PRO in Update Mode, as the command line does; a device that
+  says anything else is sent nothing more. A pedal in Update Mode is asked
+  nothing but the update: the worker refuses every other command, and does
+  not read its libraries or settings.
+- The design's steps say to switch the pedal off and to hold UPD while it
+  starts. On hardware, UPD must be held only once the Sonulab logo shows (held
+  while the power comes on, it starts the Raspberry Pi's USB boot mode, with a
+  blank screen). The screens follow the order tested on the pedal: unplug its
+  power, keep the USB cable in, wait ten seconds, plug it back in, and hold UPD
+  once the logo shows. They say the boot-mode trap too.
+- The command line leaves the pedal on for five minutes after the transfer,
+  while it writes the image, before it is restarted; the design goes straight
+  to "switch it off". The Restart step counts those five minutes first, and
+  says so if the pedal is switched off early. TonePush never restarts the
+  pedal.
+- The design's "about 3 minutes" and "Checking what was written" are not
+  claimed: the transfer takes about a minute on the hardware, and the pedal
+  confirms bytes received, not a check of what it wrote. Its footer says the
+  transfer runs to the end rather than that it cannot be stopped safely: a
+  transfer that stops early leaves the pedal on the firmware it had.
+- A pedal already in Update Mode when TonePush starts is offered the update
+  on the newest checked backup of a StompStation PRO from the last day, since
+  Update Mode cannot be backed up; without one, the page says to start the
+  pedal normally first.
+- "Sonulab support" opens Sonulab's StompStation PRO page, the one address
+  the guide already names.

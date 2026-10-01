@@ -76,10 +76,22 @@ enum Scene {
     ProUnprotected,
     /// The StompStation PRO's own settings.
     ProSettings,
+    /// A firmware update, backing the pedal up.
+    ProFirmwareBackup,
+    /// A firmware update, waiting for the pedal in Update Mode.
+    ProFirmwareUpdateMode,
+    /// A firmware update, asking before it writes.
+    ProFirmwareConfirm,
+    /// A firmware update, writing.
+    ProFirmwareWriting,
+    /// A firmware update, waiting for the restart.
+    ProFirmwareRestart,
+    /// A firmware update that stopped.
+    ProFirmwareFailed,
 }
 
 impl Scene {
-    const ALL: [Scene; 19] = [
+    const ALL: [Scene; 25] = [
         Scene::HxEdit,
         Scene::ProEdit,
         Scene::NoDevice,
@@ -99,6 +111,12 @@ impl Scene {
         Scene::ProIrs,
         Scene::ProUnprotected,
         Scene::ProSettings,
+        Scene::ProFirmwareBackup,
+        Scene::ProFirmwareUpdateMode,
+        Scene::ProFirmwareConfirm,
+        Scene::ProFirmwareWriting,
+        Scene::ProFirmwareRestart,
+        Scene::ProFirmwareFailed,
     ];
 
     fn name(self) -> &'static str {
@@ -122,6 +140,12 @@ impl Scene {
             Scene::ProIrs => "pro-irs",
             Scene::ProUnprotected => "pro-unprotected",
             Scene::ProSettings => "pro-settings",
+            Scene::ProFirmwareBackup => "pro-firmware-backup",
+            Scene::ProFirmwareUpdateMode => "pro-firmware-update-mode",
+            Scene::ProFirmwareConfirm => "pro-firmware-confirm",
+            Scene::ProFirmwareWriting => "pro-firmware-writing",
+            Scene::ProFirmwareRestart => "pro-firmware-restart",
+            Scene::ProFirmwareFailed => "pro-firmware-failed",
         }
     }
 
@@ -188,6 +212,27 @@ impl Scene {
                 pro(app);
                 app.page = shell::Page::Pedal;
                 app.pro.demo_settings();
+            }
+            Scene::ProFirmwareBackup
+            | Scene::ProFirmwareUpdateMode
+            | Scene::ProFirmwareConfirm
+            | Scene::ProFirmwareWriting
+            | Scene::ProFirmwareRestart
+            | Scene::ProFirmwareFailed => {
+                pro(app);
+                app.page = shell::Page::Pedal;
+                let step = [
+                    Scene::ProFirmwareBackup,
+                    Scene::ProFirmwareUpdateMode,
+                    Scene::ProFirmwareConfirm,
+                    Scene::ProFirmwareWriting,
+                    Scene::ProFirmwareRestart,
+                    Scene::ProFirmwareFailed,
+                ]
+                .iter()
+                .position(|scene| *scene == self)
+                .unwrap_or_default();
+                app.pro.demo_firmware(step);
             }
             Scene::HxBrowser => {
                 hx_stomp(app);

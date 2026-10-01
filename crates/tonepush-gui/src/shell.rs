@@ -1849,7 +1849,7 @@ impl App {
 
     /// What the foot says: protection with a pedal, TonePush without one.
     fn foot(&self) -> Foot {
-        if self.pro_active() && self.pro.is_online() {
+        if self.pro_active() && (self.pro.is_online() || self.pro.updating()) {
             return self.pro.foot();
         }
         if !matches!(self.connection, Connection::Online) {

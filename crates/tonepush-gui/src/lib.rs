@@ -1675,6 +1675,9 @@ impl eframe::App for App {
         if self.pro.take_capture_asked() {
             self.capture_pedal(None);
         }
+        if self.pro.take_page_request() {
+            self.go_to(shell::Page::Pedal);
+        }
         for key in self.pro.take_audition_events() {
             self.auditioning = key;
         }

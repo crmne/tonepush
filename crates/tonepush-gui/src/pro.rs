@@ -14,6 +14,7 @@ use voidx_proto::{NodeDescription, NodeKind, NodePath, Preset};
 use crate::{config, theme, LibraryLookup};
 
 mod board;
+mod firmware;
 mod frame;
 mod libraries;
 mod pane;
@@ -166,6 +167,20 @@ enum Cmd {
     /// saving once it matches.
     BackupHere,
     Restore(PathBuf),
+    /// Check a firmware file and keep it for an update.
+    FirmwareLoad(PathBuf),
+    /// Back the pedal up for an update.
+    FirmwareBackup,
+    /// The pedal is in Update Mode already: find a recent backup of it.
+    FirmwareFindBackup,
+    /// Let the pedal go and wait for it in Update Mode.
+    FirmwareAwait,
+    /// Write the firmware file, which must be this version.
+    FirmwareWrite {
+        expect: String,
+    },
+    /// Stop an update that is not writing, and look for the pedal.
+    FirmwareCancel,
 }
 
 enum ReadTarget {
@@ -217,6 +232,10 @@ enum Evt {
     /// The pedal answered, on firmware TonePush has not been verified
     /// against: it is browsed, exported and backed up, and nothing else.
     ReadOnly(String),
+    /// A pedal found in Update Mode: only its identity was read.
+    UpdateMode(Identity),
+    /// How a firmware update is going.
+    Firmware(firmware::FirmwareEvt),
     Disconnected,
 }
 
@@ -226,6 +245,7 @@ enum Tab {
     Backups,
     Library(Library),
     Settings,
+    Firmware,
 }
 
 struct Confirmation {
@@ -290,6 +310,13 @@ pub(crate) struct Panel {
     /// Sent after the confirmation's own command once it is confirmed: the
     /// second slot of a stereo pair being removed.
     after_confirmation: Option<Cmd>,
+    /// A firmware update under way.
+    firmware: Option<firmware::Flow>,
+    /// The pedal is connected in Update Mode: its identity is all TonePush
+    /// read, and the update is all it can do.
+    update_mode: bool,
+    /// The Pedal page's Firmware tab was asked for from another page.
+    page_request: bool,
 }
 
 impl Panel {
@@ -339,6 +366,9 @@ impl Panel {
             typing: None,
             facts: LibraryFacts::default(),
             after_confirmation: None,
+            firmware: None,
+            update_mode: false,
+            page_request: false,
         };
         // A test builds an App, and an App builds this panel: it must never
         // reach for a StompStation PRO that happens to be plugged into the
@@ -365,9 +395,49 @@ impl Panel {
                     self.online = true;
                     self.failed = false;
                     self.read_only = None;
+                    self.update_mode = false;
                     self.status.clear();
                     self.preset_hashes.clear();
+                    let version = snapshot.identity.version.clone();
                     self.install_snapshot(snapshot, true);
+                    // Back after an update: check what it runs.
+                    if let Some(flow) = self.firmware.as_mut() {
+                        let next = flow.connected(&version);
+                        self.firmware_next(next);
+                    }
+                }
+                Ok(Evt::UpdateMode(identity)) => {
+                    self.active = true;
+                    self.online = false;
+                    self.failed = false;
+                    self.update_mode = true;
+                    self.rollback = None;
+                    self.rollback_time = None;
+                    self.status = format!("{} in Update Mode", identity.name);
+                    self.tab = Tab::Firmware;
+                }
+                Ok(Evt::Firmware(event)) => {
+                    match &event {
+                        firmware::FirmwareEvt::Waiting => {
+                            // The session ends while the pedal restarts; what
+                            // it held stays on screen.
+                            self.online = false;
+                            self.rollback = None;
+                            self.rollback_time = None;
+                            self.preset_hashes.clear();
+                            self.facts = LibraryFacts::default();
+                            self.status = "Editing is paused while the firmware updates".into();
+                        }
+                        firmware::FirmwareEvt::UpdateMode => self.update_mode = true,
+                        firmware::FirmwareEvt::Written | firmware::FirmwareEvt::Failed { .. } => {
+                            self.update_mode = false;
+                        }
+                        _ => {}
+                    }
+                    if let Some(flow) = self.firmware.as_mut() {
+                        let next = flow.on(&event, Instant::now(), SystemTime::now());
+                        self.firmware_next(next);
+                    }
                 }
                 Ok(Evt::Snapshot { snapshot, baseline }) => {
                     self.install_snapshot(snapshot, baseline);
@@ -482,6 +552,7 @@ impl Panel {
                     self.working = None;
                     self.typing = None;
                     self.facts = LibraryFacts::default();
+                    self.update_mode = false;
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -533,6 +604,11 @@ impl Panel {
         self.dirty = drafts_differ(&self.saved_drafts, &self.drafts);
     }
 
+    /// Whether a firmware update has the pedal, or it is in Update Mode.
+    pub(crate) fn updating(&self) -> bool {
+        self.update_mode || self.firmware.is_some()
+    }
+
     pub(crate) fn is_online(&self) -> bool {
         self.online
     }
@@ -562,6 +638,11 @@ impl Panel {
     /// Whether the sidebar asked to keep the whole pedal, once.
     pub(crate) fn take_capture_asked(&mut self) -> bool {
         std::mem::take(&mut self.capture_asked)
+    }
+
+    /// Whether the firmware update asked for the Pedal page, once.
+    pub(crate) fn take_page_request(&mut self) -> bool {
+        std::mem::take(&mut self.page_request)
     }
 
     pub(crate) fn reconnect(&self) {
@@ -805,6 +886,9 @@ impl Panel {
     /// The Edit page for a PRO: the strip that says saving waits, when it
     /// does, the board, and the pane.
     pub(crate) fn body(&mut self, root: &mut egui::Ui, tier: theme::Tier, note: &LibraryNote) {
+        if self.update_mode || (self.firmware.is_some() && !self.online) {
+            self.paused_strip(root);
+        }
         let Some(snapshot) = self.snapshot.clone() else {
             let status = self.status.clone();
             egui::CentralPanel::default()
@@ -1504,6 +1588,18 @@ struct Worker {
     history: Vec<Vec<NodeEdit>>,
     future: Vec<Vec<NodeEdit>>,
     last_edit_at: Option<Instant>,
+    /// The firmware an update writes, once checked.
+    firmware_image: Option<voidx_client::firmware::Image>,
+    /// The backup the update stands on.
+    firmware_backup: Option<PathBuf>,
+    /// The device is a pedal in Update Mode: nothing but the update goes to
+    /// it.
+    update_mode: bool,
+    /// What the worker looks for between commands while an update waits.
+    awaiting: Option<firmware::Awaiting>,
+    last_seen: Option<firmware::Seen>,
+    /// A device in the pedal's place that said it is something else.
+    refused_port: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1527,6 +1623,12 @@ impl Worker {
             history: Vec::new(),
             future: Vec::new(),
             last_edit_at: None,
+            firmware_image: None,
+            firmware_backup: None,
+            update_mode: false,
+            awaiting: None,
+            last_seen: None,
+            refused_port: None,
         }
     }
 
@@ -1535,6 +1637,18 @@ impl Worker {
         loop {
             let command = match pending.take() {
                 Some(command) => command,
+                // While an update waits for the pedal, look for it between
+                // commands.
+                None if self.awaiting.is_some() => {
+                    match self.commands.recv_timeout(firmware::POLL) {
+                        Ok(command) => command,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            self.poll();
+                            continue;
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
                 None => match self.commands.recv() {
                     Ok(command) => command,
                     Err(_) => break,
@@ -1623,10 +1737,17 @@ impl Worker {
             self.last_edit_at = None;
         }
         match command {
+            // An update waiting for the pedal, or holding it in Update
+            // Mode, owns it: looking for it again would take it away.
+            Cmd::Connect if self.awaiting.is_some() || self.update_mode => Ok(()),
             Cmd::Connect => self.connect(),
             Cmd::Disconnect => {
-                self.restore_audition()?;
+                if !self.update_mode {
+                    self.restore_audition()?;
+                }
                 self.device = None;
+                self.update_mode = false;
+                self.awaiting = None;
                 self.rollback = None;
                 self.rollback_path = None;
                 self.forget_history();
@@ -1979,6 +2100,14 @@ impl Worker {
                 self.send(Evt::Success("Backed up · saving is on".into()));
                 Ok(())
             }
+            Cmd::FirmwareLoad(path) => self.firmware_step(|worker| worker.firmware_load(&path)),
+            Cmd::FirmwareBackup => self.firmware_step(Self::firmware_backup),
+            Cmd::FirmwareFindBackup => self.firmware_step(Self::firmware_find_backup),
+            Cmd::FirmwareAwait => self.firmware_step(Self::firmware_await),
+            Cmd::FirmwareWrite { expect } => {
+                self.firmware_step(|worker| worker.firmware_write(&expect))
+            }
+            Cmd::FirmwareCancel => self.firmware_cancel(),
             Cmd::Restore(path) => {
                 self.require_guard()?;
                 let source = backup::open_verified(&path)?;
@@ -2051,10 +2180,12 @@ impl Worker {
     }
 
     fn connect(&mut self) -> WorkResult<()> {
-        let found = voidx_client::list()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| WorkError::Other("No StompStation PRO found".into()))?;
+        let Some(found) = voidx_client::list()?.into_iter().next() else {
+            // In Update Mode the pedal names itself a Raspberry Pi; it is
+            // used only when it says it is a StompStation PRO in Update Mode.
+            return self.connect_update_mode();
+        };
+        self.update_mode = false;
         let mut device = Device::connect(found.open()?)?;
         // Firmware TonePush has not been verified against still opens, read
         // only: browsing, exports and backups work, which is also what a pedal
@@ -2111,7 +2242,7 @@ impl Worker {
 
     /// Back the pedal up where TonePush keeps its own backups, under a name
     /// that says it took it, keeping the newest few of those.
-    fn back_up_automatically(&mut self) -> WorkResult<()> {
+    fn back_up_automatically(&mut self) -> WorkResult<PathBuf> {
         let directory = hx_catalog::home::backups().ok_or_else(|| {
             WorkError::Other("There is no folder for backups on this computer".into())
         })?;
@@ -2129,7 +2260,7 @@ impl Worker {
         let path = directory.join(format!("{AUTOMATIC_BACKUP}{version}-{stamp}.vxbundle"));
         self.capture_backup(&path, captured)?;
         prune_automatic_backups(&directory, &path);
-        Ok(())
+        Ok(path)
     }
 
     fn capture_backup(&mut self, path: &Path, captured: u64) -> WorkResult<()> {
@@ -2342,6 +2473,14 @@ impl Worker {
     }
 
     fn device(&mut self) -> WorkResult<&mut Device<SerialLink>> {
+        // A pedal in Update Mode answers who it is and takes the update;
+        // nothing else is asked of it.
+        if self.update_mode {
+            return Err(WorkError::Other(
+                "The pedal is in Update Mode: switch it off and on without holding UPD to use it"
+                    .into(),
+            ));
+        }
         self.device
             .as_mut()
             .ok_or_else(|| WorkError::Other("StompStation PRO is not connected".into()))
@@ -3382,6 +3521,94 @@ pub(crate) mod demo {
             self.tab = Tab::Settings;
         }
 
+        /// A firmware update to 2.2.6 at one of its steps: backing up,
+        /// waiting for Update Mode, asking before writing, writing, waiting
+        /// for the restart, and stopped.
+        pub(crate) fn demo_firmware(&mut self, step: usize) {
+            use super::firmware::{BackupFacts, Failure, Flow, ImageFacts, Seen, Stage};
+            let now = Instant::now();
+            let half_past_two = jiff::Zoned::now()
+                .with()
+                .hour(14)
+                .minute(31)
+                .second(0)
+                .build()
+                .map_or(0, |time| time.timestamp().as_second() as u64);
+            let mut flow = Flow::new(Some("1.5.12".to_owned()), false);
+            flow.image = Some(ImageFacts {
+                file: "s_pro_2_2_6.upd".to_owned(),
+                version: "2.2.6".to_owned(),
+                sha256: "63d9b8047ae47a0c9a22b6be7c7de6540cc8d2b2c4dabb756a842b14043083c9"
+                    .to_owned(),
+                official: true,
+                size: 5_128_192,
+            });
+            flow.sent = (0, 5_128_192);
+            let backup = BackupFacts {
+                path: PathBuf::from("stompstation-pro-1.5.12-20261001-143100.vxbundle"),
+                captured: half_past_two,
+                version: "1.5.12".to_owned(),
+                presets: 24,
+                amps: 14,
+                drives: 9,
+                irs: 11,
+            };
+            self.tab = Tab::Firmware;
+            self.rollback_time = Some(UNIX_EPOCH + Duration::from_secs(half_past_two));
+            match step {
+                0 => {
+                    flow.stage = Stage::BackingUp;
+                    self.working = Some(("Reusing verified root\\nam_amp slot 9".to_owned(), 0.58));
+                }
+                1 => {
+                    flow.backup = Some(backup);
+                    flow.stage = Stage::AwaitingUpdateMode;
+                    flow.seen = Seen::Nothing;
+                    self.online = false;
+                }
+                2 => {
+                    flow.backup = Some(backup);
+                    flow.stage = Stage::Ready;
+                    flow.asking = true;
+                    self.online = false;
+                    self.update_mode = true;
+                }
+                3 => {
+                    flow.backup = Some(backup);
+                    flow.stage = Stage::Writing;
+                    flow.sent = (3_178_496, 5_128_192);
+                    flow.write_started = now.checked_sub(Duration::from_secs(38));
+                    self.online = false;
+                    self.update_mode = true;
+                }
+                4 => {
+                    flow.backup = Some(backup);
+                    flow.stage = Stage::SwitchedOff;
+                    flow.sent = (5_128_192, 5_128_192);
+                    flow.written_at = now.checked_sub(Duration::from_secs(6 * 60 + 3));
+                    flow.off_at = now
+                        .checked_sub(Duration::from_secs(3))
+                        .map(|off| (off, SystemTime::now() - Duration::from_secs(3)));
+                    self.online = false;
+                }
+                _ => {
+                    flow.backup = Some(backup);
+                    flow.stage = Stage::Failed;
+                    flow.sent = (2_461_696, 5_128_192);
+                    flow.failure = Some(Failure {
+                        during: Stage::Writing,
+                        why: "timed out waiting for \"upd\"; reconnect before sending another \
+                              command"
+                            .to_owned(),
+                        confirmed: 2_461_696,
+                        total: 5_128_192,
+                    });
+                    self.online = false;
+                }
+            }
+            self.firmware = Some(flow);
+        }
+
         /// The pedal before any backup of it matches: edits play, saving
         /// waits.
         pub(crate) fn demo_unprotected(&mut self) {
@@ -3633,6 +3860,29 @@ root\\app\\ir\\on_off:{\"value\":\"OFF\"}\r\n";
                 directory.join("stompstation-pro-1.5.12-20260930-000000.vxbundle"),
             ]
         );
+    }
+
+    /// A pedal in Update Mode is asked nothing but the update, and an update
+    /// waiting for the pedal is not interrupted by looking for it again.
+    #[test]
+    fn a_pedal_in_update_mode_is_asked_nothing_but_the_update() {
+        let (_commands, receiver) = mpsc::channel();
+        let (events, _received) = mpsc::channel();
+        let mut worker = Worker::new(receiver, events, egui::Context::default());
+        worker.update_mode = true;
+        assert!(worker
+            .device()
+            .is_err_and(|error| error.to_string().contains("Update Mode")));
+        assert!(worker.handle(Cmd::Connect).is_ok());
+        worker.update_mode = false;
+        worker.awaiting = Some(firmware::Awaiting::UpdateMode);
+        assert!(worker.handle(Cmd::Connect).is_ok());
+        worker.awaiting = None;
+        // Nothing is written without a checked file, a backup, and the pedal
+        // in Update Mode.
+        assert!(worker
+            .firmware_write("2.2.6")
+            .is_err_and(|error| error.to_string().contains("firmware file")));
     }
 
     #[test]

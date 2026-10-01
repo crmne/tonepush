@@ -32,12 +32,13 @@ pub(crate) fn slot_label(index: usize) -> String {
 }
 
 /// The tabs of the PRO's page.
-const TABS: [Tab; 5] = [
+const TABS: [Tab; 6] = [
     Tab::Backups,
     Tab::Library(Library::Amps),
     Tab::Library(Library::Drives),
     Tab::Library(Library::Irs),
     Tab::Settings,
+    Tab::Firmware,
 ];
 
 impl Panel {
@@ -427,7 +428,18 @@ impl Panel {
             "" => "StompStation PRO".to_owned(),
             name => name.to_owned(),
         };
-        let status = if self.online {
+        let updating = self.firmware.as_ref().map(|flow| flow.stage);
+        let status = if self.update_mode {
+            "Update Mode".to_owned()
+        } else if let Some(stage) = updating.filter(|_| !self.online) {
+            use super::firmware::Stage;
+            match stage {
+                Stage::AwaitingUpdateMode | Stage::SwitchedOff => "Switched off".to_owned(),
+                Stage::Settling => "Writing its firmware".to_owned(),
+                Stage::Failed => "Not answering".to_owned(),
+                _ => "Updating its firmware".to_owned(),
+            }
+        } else if self.online {
             match self.firmware() {
                 "" => "Connected".to_owned(),
                 version => format!("Connected · {version}"),
@@ -438,12 +450,33 @@ impl Panel {
         DeviceCard {
             name,
             status,
-            online: self.online,
+            online: self.online || self.update_mode,
         }
     }
 
     /// The sidebar's foot: whether the pedal is protected.
     pub(crate) fn foot(&self) -> Foot {
+        // While an update has the pedal, the backup it stands on.
+        if let Some(backup) = self
+            .firmware
+            .as_ref()
+            .and_then(|flow| flow.backup.as_ref())
+            .filter(|_| !self.online)
+        {
+            return Foot {
+                icon: Some(Icon::ShieldCheck),
+                text: shell::when_words(
+                    "Backed up",
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(backup.captured),
+                ),
+                mood: Mood::Ok,
+                hint: format!(
+                    "The update stands on {}, a checked backup of the pedal on firmware {}",
+                    backup.path.display(),
+                    backup.version
+                ),
+            };
+        }
         if let Some(reason) = &self.read_only {
             return Foot {
                 icon: Some(Icon::Lock),
@@ -705,7 +738,14 @@ impl Panel {
 
     /// The mini deck for a PRO preset.
     pub(crate) fn mini_deck(&mut self, ui: &mut Ui, sidebar_hidden: bool) -> MiniAsked {
-        let Some(snapshot) = self.snapshot.clone() else {
+        let paused = self.update_mode || (self.firmware.is_some() && !self.online);
+        let snapshot = self.snapshot.clone().filter(|_| !paused);
+        let Some(snapshot) = snapshot else {
+            let words = if paused {
+                "Editing is paused while the firmware updates.".to_owned()
+            } else {
+                self.status.clone()
+            };
             let mut show_sidebar = false;
             let full = ui.max_rect();
             ui.scope_builder(
@@ -718,12 +758,7 @@ impl Panel {
                     if sidebar_hidden {
                         show_sidebar = shell::sidebar_toggle(ui);
                     }
-                    theme::label(
-                        ui,
-                        &self.status,
-                        theme::regular(theme::BODY),
-                        theme::muted(),
-                    );
+                    theme::label(ui, &words, theme::regular(theme::BODY), theme::muted());
                 },
             );
             return MiniAsked {
@@ -761,6 +796,9 @@ impl Panel {
     /// libraries and its settings, one tab each.
     pub(crate) fn pedal_page(&mut self, root: &mut Ui, tier: Tier) {
         let snapshot = self.snapshot.clone();
+        if (self.update_mode || self.firmware.is_some()) && snapshot.is_none() {
+            return self.update_mode_page(root);
+        }
         egui::Panel::top("pro-pedal-head")
             .exact_size(if snapshot.is_some() {
                 shell::PAGE_HEAD_WITH_TABS
@@ -793,13 +831,22 @@ impl Panel {
                 let mut let_go = false;
                 let mut reconnect = false;
                 let online = self.online;
+                let file = self.firmware.as_ref().and_then(|flow| flow.image.clone());
                 shell::page_head(
                     ui,
                     Some(Icon::Pedal),
                     &snapshot.identity.name,
                     &subtitle,
                     |ui| {
-                        if online {
+                        if let Some(image) = &file {
+                            theme::Chip::new(&format!(
+                                "{} · firmware {}",
+                                image.file, image.version
+                            ))
+                            .icon(Icon::PackageCheck)
+                            .height(24.0)
+                            .show(ui);
+                        } else if online {
                             let_go = theme::Button::new("Let the pedal go")
                                 .ghost()
                                 .small()
@@ -835,6 +882,7 @@ impl Panel {
                                 .map(|state| state.info.occupied().count().to_string()),
                         ),
                         Tab::Settings => ("Settings", None),
+                        Tab::Firmware => ("Firmware", None),
                     })
                     .collect();
                 let selected = TABS
@@ -925,8 +973,107 @@ impl Panel {
                                 self.settings_page(ui, snapshot);
                             });
                     }
+                    Tab::Firmware => {
+                        egui::ScrollArea::vertical()
+                            .id_salt("pro-firmware")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.firmware_page(ui));
+                    }
                 }
             });
+    }
+
+    /// The Pedal page while the pedal is in Update Mode and TonePush has not
+    /// read anything else of it: its name, and the update.
+    fn update_mode_page(&mut self, root: &mut Ui) {
+        egui::Panel::top("pro-pedal-head")
+            .exact_size(shell::PAGE_HEAD)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(theme::bg()))
+            .show(root, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                let name = match self.device_name() {
+                    "" => "StompStation PRO".to_owned(),
+                    name => name.to_owned(),
+                };
+                let file = self.firmware.as_ref().and_then(|flow| flow.image.clone());
+                shell::page_head(ui, Some(Icon::Pedal), &name, "In Update Mode", |ui| {
+                    if let Some(image) = &file {
+                        theme::Chip::new(&format!("{} · firmware {}", image.file, image.version))
+                            .icon(Icon::PackageCheck)
+                            .height(24.0)
+                            .show(ui);
+                    }
+                });
+            });
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::bg())
+                    .inner_margin(egui::Margin {
+                        left: 20,
+                        right: 16,
+                        top: 16,
+                        bottom: 12,
+                    }),
+            )
+            .show(root, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("pro-firmware")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.firmware_page(ui));
+            });
+    }
+
+    /// The strip over the Edit page while an update has the pedal.
+    pub(crate) fn paused_strip(&mut self, root: &mut Ui) {
+        let mut show = false;
+        egui::Panel::top("pro-paused")
+            .exact_size(48.0)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(theme::mix(theme::bg(), theme::info(), 0.08)))
+            .show(root, |ui| {
+                let rect = ui.max_rect();
+                ui.painter().hline(
+                    rect.x_range(),
+                    rect.bottom() - 0.5,
+                    egui::Stroke::new(1.0, theme::alpha(theme::info(), 0.3)),
+                );
+                let inner = Rect::from_min_max(
+                    Pos2::new(rect.left() + 20.0, rect.top()),
+                    Pos2::new(rect.right() - 16.0, rect.bottom()),
+                );
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(inner)
+                        .id_salt("pro-paused-actions")
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                );
+                show = theme::Button::new("Show the update")
+                    .ghost()
+                    .small()
+                    .show(&mut child)
+                    .clicked();
+                theme::paint_icon(
+                    ui,
+                    Icon::PackageCheck,
+                    Pos2::new(inner.left() + 8.0, inner.center().y),
+                    16.0,
+                    theme::info(),
+                );
+                let words = if self.update_mode {
+                    "The pedal is in Update Mode: editing waits until it starts normally."
+                } else {
+                    "Editing is paused while the firmware updates."
+                };
+                let galley = shell::galley(ui, words, theme::regular(12.5), theme::text());
+                shell::paint_line(ui, galley, inner.left() + 28.0, inner.center().y);
+            });
+        if show {
+            self.tab = Tab::Firmware;
+            self.page_request = true;
+        }
     }
 
     /// Backups: whether the pedal is protected, and a whole-pedal backup or
