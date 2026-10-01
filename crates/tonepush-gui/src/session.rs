@@ -585,10 +585,7 @@ impl Worker {
         }
         match cmd {
             Cmd::Connect => self.connect(),
-            Cmd::Disconnect => {
-                self.device = None;
-                self.send(Evt::Disconnected);
-            }
+            Cmd::Disconnect => self.let_go(),
             Cmd::SelectPreset(index) => {
                 let setlist = self.setlist;
                 if self.run_on_device(|d| d.select_preset(setlist, index)) {
@@ -1128,41 +1125,76 @@ impl Worker {
         // failure into as many as four fresh sessions, including retries for
         // errors such as a claimed USB interface that cannot improve by
         // immediately opening it again.
-        let opened = found.open();
-        match opened {
-            Ok(session) => {
-                let profile = session.profile;
-                self.device = Some(session);
-                // A fresh session starts with a clean slate: whatever history
-                // was recorded belongs to whatever was connected before.
-                self.forget_history();
-                self.dirty = false;
-                self.send(Evt::Connected {
-                    device: profile.name.to_owned(),
-                    presets: profile.presets,
-                });
-                // Load the chain first: it is the view the user is looking at.
-                // The name list is a nicety and rides on the control channel,
-                // which is the flakier of the two.
-                self.reload();
-                if let Some(hx_proto::msgpack::Value::Bool(on)) =
-                    self.try_optional_on_device(|device| device.object(203))
-                {
-                    self.send(Evt::Settings { global_eq: on });
-                }
-                if self.device.is_none() {
-                    return;
-                }
-                // The name list rides on the flakier control channel, so give
-                // it the same second chance the session itself gets.
-                let names = self
-                    .try_on_device(|d| d.presets(0))
-                    .or_else(|| self.try_on_device(|d| d.presets(0)));
-                if let Some(names) = names {
-                    self.send(Evt::Presets(names));
-                }
-            }
+        match found.open() {
+            Ok(session) => self.opened(session),
             Err(e) => self.send(Evt::Failed(e.to_string())),
+        }
+    }
+
+    /// Start working with a session that has just been opened.
+    fn opened(&mut self, session: hx_usb::Session) {
+        let profile = session.profile;
+        self.device = Some(session);
+        // A fresh session starts with a clean slate: whatever history or
+        // audition was kept belongs to whatever was connected before.
+        self.forget_history();
+        self.forget_audition();
+        self.dirty = false;
+        self.send(Evt::Connected {
+            device: profile.name.to_owned(),
+            presets: profile.presets,
+        });
+        // Load the chain first: it is the view the user is looking at.
+        // The name list is a nicety and rides on the control channel,
+        // which is the flakier of the two.
+        self.reload();
+        if let Some(hx_proto::msgpack::Value::Bool(on)) =
+            self.try_optional_on_device(|device| device.object(203))
+        {
+            self.send(Evt::Settings { global_eq: on });
+        }
+        if self.device.is_none() {
+            return;
+        }
+        // The name list rides on the flakier control channel, so give
+        // it the same second chance the session itself gets.
+        let names = self
+            .try_on_device(|d| d.presets(0))
+            .or_else(|| self.try_on_device(|d| d.presets(0)));
+        if let Some(names) = names {
+            self.send(Evt::Presets(names));
+        }
+    }
+
+    /// Let go of the pedal, and of what only meant something while it was
+    /// held.
+    ///
+    /// An audition is the one that matters. What it restores is an edit
+    /// buffer read from this session, and kept past it, it was written back
+    /// over whatever the next session had loaded the first time anything
+    /// was clicked after reconnecting.
+    fn let_go(&mut self) {
+        self.device = None;
+        self.forget_audition();
+        self.send(Evt::Disconnected);
+    }
+
+    /// Drop an audition without restoring anything, for when there is no
+    /// edit buffer left that it could be restored into.
+    fn forget_audition(&mut self) {
+        if self.audition.take().is_some() {
+            self.send(Evt::Auditioning(None));
+        }
+    }
+
+    /// Put an audition back after a step of ending it failed, so that a
+    /// later attempt can finish the job - unless the failure took the
+    /// session with it.
+    fn hold_audition(&mut self, audition: Audition) {
+        if self.device.is_some() {
+            self.audition = Some(audition);
+        } else {
+            self.send(Evt::Auditioning(None));
         }
     }
 
@@ -1415,13 +1447,13 @@ impl Worker {
             return;
         };
         let Some(original) = hx_proto::Preset::parse(&audition.original) else {
-            self.audition = Some(audition);
+            self.hold_audition(audition);
             return self.send(Evt::Failed(
                 "the preset saved before audition is unreadable".into(),
             ));
         };
         if !self.run_on_device(|device| device.write_preset(&original)) {
-            self.audition = Some(audition);
+            self.hold_audition(audition);
             return;
         }
         self.dirty = audition.dirty;
@@ -1444,7 +1476,7 @@ impl Worker {
             return;
         };
         let Some(current) = self.read_settled() else {
-            self.audition = Some(audition);
+            self.hold_audition(audition);
             return;
         };
         self.history = audition.history;
@@ -1758,8 +1790,7 @@ impl Worker {
                 Err(error) if !error.loses_session() => last = Some(error),
                 Err(error) => {
                     self.send(Evt::Failed(error.to_string()));
-                    self.device = None;
-                    self.send(Evt::Disconnected);
+                    self.let_go();
                     return None;
                 }
             }
@@ -1767,8 +1798,7 @@ impl Worker {
         if let Some(e) = last {
             self.send(Evt::Failed(e.to_string()));
         }
-        self.device = None;
-        self.send(Evt::Disconnected);
+        self.let_go();
         None
     }
 
@@ -1817,8 +1847,7 @@ impl Worker {
             Ok(()) => {}
             Err(e) => {
                 self.send(Evt::Failed(e.to_string()));
-                self.device = None;
-                self.send(Evt::Disconnected);
+                self.let_go();
             }
         }
     }
@@ -1851,8 +1880,7 @@ impl Worker {
                     // transaction/sequence state. Releasing the interface is
                     // the only safe response; the UI can offer a fresh Connect
                     // after the pedal itself is healthy again.
-                    self.device = None;
-                    self.events.send(Evt::Disconnected);
+                    self.let_go();
                 }
                 None
             }
@@ -1877,8 +1905,7 @@ impl Worker {
             Err(error) => {
                 self.events.send(Evt::Failed(error.to_string()));
                 if loses_session(&error, untouched) {
-                    self.device = None;
-                    self.events.send(Evt::Disconnected);
+                    self.let_go();
                 }
                 None
             }
@@ -2191,6 +2218,27 @@ mod tests {
                     (0, info)
                 }
                 op::READ_PRESET => (0, Value::Bin(self.buffer.clone(), 2)),
+                op::LIST_PRESETS => {
+                    let last = self.stored.keys().max().copied().unwrap_or_default();
+                    let names = (0..=last)
+                        .map(|index| {
+                            let name = self.stored.get(&index).map(|(name, _)| name.clone());
+                            hx_proto::msgmap! {
+                                index => hx_proto::msgmap! {
+                                    key::NAME => Value::Str(name.unwrap_or_default()),
+                                },
+                            }
+                        })
+                        .collect();
+                    (0, Value::Array(names))
+                }
+                op::FETCH_OBJECT => {
+                    let object = hx_proto::msgmap! {
+                        key::OBJECT_ID => Value::Int(number(key::OBJECT_ID)),
+                        key::VALUE => Value::Bool(false),
+                    };
+                    (0, object)
+                }
                 op::SELECT_PRESET => {
                     let index = number(key::PRESET_INDEX);
                     let Some((name, document)) = self.stored.get(&index).cloned() else {
@@ -2271,8 +2319,14 @@ mod tests {
         }
     }
 
-    /// A worker talking to `pedal`, showing what it has loaded, with nothing
-    /// left to say about getting there.
+    /// A session with `pedal` on the other end of the cable.
+    fn session(pedal: &Arc<Mutex<Pedal>>) -> hx_usb::Session {
+        hx_usb::Session::replaying(Box::new(Cable(pedal.clone())), hx_proto::HX_STOMP)
+            .expect("the pretend pedal answers")
+    }
+
+    /// A worker connected to `pedal`, showing what it has loaded, with
+    /// nothing left to say about getting there.
     fn worker(pedal: &Arc<Mutex<Pedal>>) -> (Worker, Receiver<Evt>) {
         let (_commands, cmds) = mpsc::channel();
         let (tx, events) = mpsc::channel();
@@ -2283,12 +2337,7 @@ mod tests {
                 repaint: RepaintSignal::default(),
             },
         );
-        let cable = Box::new(Cable(pedal.clone()));
-        worker.device = Some(
-            hx_usb::Session::replaying(cable, hx_proto::HX_STOMP)
-                .expect("the pretend pedal answers"),
-        );
-        worker.reload();
+        worker.opened(session(pedal));
         let _ = events.try_iter().count();
         (worker, events)
     }
@@ -2367,6 +2416,62 @@ mod tests {
         assert_eq!(worker.history.len(), 1);
         let buffer = hx_proto::Preset::parse(&pedal.lock().unwrap().buffer).unwrap();
         assert_eq!(buffer.tempo(), Some(96.0));
+    }
+
+    /// An audition keeps the edit buffer it displaced, to put it back. When
+    /// the session drops, that buffer belongs to a session the worker no
+    /// longer has, and restoring it on the next one wrote it over whatever
+    /// was loaded there, the first time anything was clicked.
+    #[test]
+    fn an_audition_ends_with_the_session_that_held_it() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::AuditionDocument {
+            key: 7,
+            name: "From the cloud".into(),
+            bytes: document(150.0),
+        });
+        assert!(worker.audition.is_some());
+
+        pedal.lock().unwrap().unplugged = true;
+        worker.poll();
+
+        assert!(worker.device.is_none());
+        assert!(worker.audition.is_none(), "nothing is left to restore");
+        assert!(events
+            .try_iter()
+            .any(|e| matches!(e, Evt::Auditioning(None))));
+
+        let next = Pedal::new();
+        worker.opened(session(&next));
+        worker.handle(Cmd::SelectBlock(1));
+        assert!(
+            !next.lock().unwrap().opcodes().contains(&op::WRITE_PRESET),
+            "the old edit buffer is not written to the new session"
+        );
+    }
+
+    /// The same when the session is lost by the restore itself: a restore
+    /// that failed is kept to try again, but not past the session.
+    #[test]
+    fn a_restore_that_loses_the_session_does_not_keep_the_audition() {
+        let pedal = Pedal::new();
+        let (mut worker, _events) = worker(&pedal);
+        worker.handle(Cmd::AuditionDocument {
+            key: 7,
+            name: "From the cloud".into(),
+            bytes: document(150.0),
+        });
+
+        pedal.lock().unwrap().unplugged = true;
+        worker.handle(Cmd::EndAudition);
+        assert!(worker.device.is_none());
+        assert!(worker.audition.is_none());
+
+        let next = Pedal::new();
+        worker.opened(session(&next));
+        worker.handle(Cmd::SelectBlock(1));
+        assert!(!next.lock().unwrap().opcodes().contains(&op::WRITE_PRESET));
     }
 
     /// The other side of that rule: a failure on the wire still ends the
