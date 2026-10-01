@@ -1194,19 +1194,29 @@ fn versioned_setlist_path(dir: &Path, setlist: &Setlist) -> PathBuf {
 }
 
 /// Every setlist in the library, with the file each came from, by name.
+///
+/// A file that cannot be read or is not a setlist (a half-copied download, or
+/// the `._gig.json` macOS leaves beside a file on a foreign disk) is left out
+/// and named on stderr. Leaving out the good ones beside it would look like
+/// an empty library, and the next save would start a new series at v1.
 pub fn setlists() -> Vec<(PathBuf, Setlist)> {
-    let mut found = setlist_files().unwrap_or_default();
+    let mut found = read_setlists(false).unwrap_or_default();
     found.sort_by_key(|(_, s)| (s.name.to_lowercase(), s.revision()));
     found
 }
 
 /// Read every setlist or answer that the directory cannot safely be used.
 ///
-/// The public list view may show an empty result on an error. Destructive
-/// callers use this distinction: an unreadable setlist can still point at the
-/// last copy of a tone, so it must never be silently omitted from migration or
-/// garbage collection.
+/// Destructive callers use this rather than [`setlists`]: an unreadable
+/// setlist can still point at the last copy of a tone, so it must never be
+/// silently omitted from migration or garbage collection.
 fn setlist_files() -> Option<Vec<(PathBuf, Setlist)>> {
+    read_setlists(true)
+}
+
+/// Every `.json` file in the setlists directory, read. Strictly, any file that
+/// cannot be read makes the whole answer `None`; otherwise it is skipped.
+fn read_setlists(strict: bool) -> Option<Vec<(PathBuf, Setlist)>> {
     let Some(dir) = setlists_dir() else {
         return Some(Vec::new());
     };
@@ -1217,15 +1227,28 @@ fn setlist_files() -> Option<Vec<(PathBuf, Setlist)>> {
     };
     let mut found = Vec::new();
     for entry in read {
-        let path = entry.ok()?.path();
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(_) if strict => return None,
+            Err(_) => continue,
+        };
         if !path
             .extension()
             .is_some_and(|extension| extension == "json")
         {
             continue;
         }
-        let bytes = std::fs::read(&path).ok()?;
-        let mut setlist: Setlist = serde_json::from_slice(&bytes).ok()?;
+        let setlist = std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| serde_json::from_slice::<Setlist>(&bytes).map_err(|e| e.to_string()));
+        let mut setlist = match setlist {
+            Ok(setlist) => setlist,
+            Err(_) if strict => return None,
+            Err(why) => {
+                eprintln!("skipped setlist {}: {why}", path.display());
+                continue;
+            }
+        };
         if setlist.added_at.is_empty() || setlist.modified_at.is_empty() {
             let timestamp = std::fs::metadata(&path)
                 .ok()
@@ -1904,6 +1927,33 @@ mod tests {
             std::fs::read(&broken).unwrap(),
             b"{ this setlist was truncated"
         );
+    }
+
+    /// macOS leaves `._gig.json` beside `gig.json` on a foreign disk. The list
+    /// still shows every real setlist, so the next save continues its series;
+    /// garbage collection still refuses to sweep past the file it cannot read.
+    #[test]
+    fn an_unreadable_setlist_hides_only_itself_from_the_list() {
+        let scratch = Scratch::new("setlist-list-broken");
+        let first = Setlist {
+            name: "Gig".into(),
+            slots: vec![Slot::new("aaa", "Clean")],
+            ..Default::default()
+        };
+        let (_, first) = save_setlist_version(&first).unwrap();
+        std::fs::write(
+            scratch.dir.join("setlists/._gig.json"),
+            b"\0\x05\x16\x07AppleDouble",
+        )
+        .unwrap();
+
+        let listed = setlists();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].1.name, "Gig");
+        let (_, second) = save_setlist_version(&first).unwrap();
+        assert_eq!(second.revision(), 2, "the series continues");
+        assert_eq!(second.series, first.series);
+        assert!(setlist_files().is_none(), "destructive callers stay strict");
     }
 
     #[cfg(unix)]
