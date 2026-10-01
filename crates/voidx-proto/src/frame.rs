@@ -19,11 +19,15 @@ impl Record {
         if subject.is_empty() || subject.chars().any(|c| matches!(c, '\0' | '\r' | '\n')) {
             return Err(DecodeError::MalformedRecord(line.to_owned()));
         }
-        let value = match serde_json::from_str(raw_json) {
+        // Bare paths are repaired before parsing, not after it fails:
+        // `"root\nam_amp"` is valid JSON, a newline and "am_amp".
+        let paths = repair_bare_root_paths(raw_json);
+        let text = paths.as_ref().map_or(raw_json, |(text, _)| text.as_str());
+        let value = match serde_json::from_str(text) {
             Ok(value) => value,
             Err(original) => {
-                let context = json_error_context(raw_json, original.line(), original.column());
-                repair_firmware_json(raw_json)
+                let context = json_error_context(text, original.line(), original.column());
+                repair_missing_values(text)
                     .and_then(|repaired| serde_json::from_str(&repaired).ok())
                     .ok_or_else(|| DecodeError::Json {
                         subject: subject.to_owned(),
@@ -48,10 +52,19 @@ impl Record {
             .split_once(':')
             .ok_or_else(|| DecodeError::MalformedRecord(input.to_owned()))?;
         let json_start = subject.len() + 1;
-        let mut values = serde_json::Deserializer::from_str(raw_json).into_iter::<Value>();
+        let paths = repair_bare_root_paths(raw_json);
+        let (text, inserted) = match &paths {
+            Some((text, inserted)) => (text.as_str(), inserted.as_slice()),
+            None => (raw_json, [].as_slice()),
+        };
+        let mut values = serde_json::Deserializer::from_str(text).into_iter::<Value>();
         match values.next() {
             Some(Ok(value)) => {
-                let json_len = values.byte_offset();
+                // The record's length in the repaired text, less the bytes the
+                // repair added to it, is its length in the original.
+                let repaired_len = values.byte_offset();
+                let added = inserted.iter().filter(|at| **at < repaired_len).count();
+                let json_len = repaired_len - added;
                 let raw_json = &raw_json[..json_len];
                 if subject.is_empty()
                     || subject
@@ -129,36 +142,40 @@ fn json_error_context(raw: &str, line: usize, column: usize) -> String {
         .to_string()
 }
 
-fn repair_firmware_json(raw: &str) -> Option<String> {
+/// Firmware 1.5.12 sends an empty control value as `"value":,`.
+fn repair_missing_values(raw: &str) -> Option<String> {
     let missing_value = raw
         .replace("\"value\":,", "\"value\":null,")
         .replace("\"value\":}", "\"value\":null}");
-    let repaired_paths = repair_bare_root_paths(&missing_value);
-    if let Some(repaired) = repaired_paths {
-        Some(repaired)
-    } else if missing_value != raw {
-        Some(missing_value)
-    } else {
-        None
-    }
+    (missing_value != raw).then_some(missing_value)
 }
 
 /// Firmware 1.5.12 emits assignment targets as `"root\app\amp"` rather than
 /// valid JSON's `"root\\app\\amp"`. Repair only whole string values beginning
-/// with the node-tree root, and only after strict JSON parsing has failed.
-fn repair_bare_root_paths(raw: &str) -> Option<String> {
+/// with the node-tree root whose first separator is a lone backslash: a
+/// properly escaped `"root\\app"` is left alone. This runs before strict
+/// parsing, because some bare paths are valid JSON with another meaning
+/// (`"root\nam_amp"` reads as a newline).
+///
+/// Returns the repaired text and where in it each added backslash is.
+fn repair_bare_root_paths(raw: &str) -> Option<(String, Vec<usize>)> {
     let bytes = raw.as_bytes();
     let mut repaired = Vec::with_capacity(raw.len() + 8);
+    let mut inserted = Vec::new();
     let mut cursor = 0;
-    let mut changed = false;
     while cursor < bytes.len() {
-        if bytes[cursor..].starts_with(b"\"root\\") {
+        let bare = bytes[cursor..].starts_with(b"\"root\\")
+            && (cursor == 0 || bytes[cursor - 1] != b'\\')
+            && bytes
+                .get(cursor + 6)
+                .is_some_and(|next| !matches!(next, b'\\' | b'"'));
+        if bare {
             repaired.extend_from_slice(b"\"root");
             cursor += 5;
             while cursor < bytes.len() && bytes[cursor] != b'"' {
                 if bytes[cursor] == b'\\' {
+                    inserted.push(repaired.len());
                     repaired.extend_from_slice(b"\\\\");
-                    changed = true;
                 } else {
                     repaired.push(bytes[cursor]);
                 }
@@ -169,7 +186,12 @@ fn repair_bare_root_paths(raw: &str) -> Option<String> {
             cursor += 1;
         }
     }
-    changed.then(|| String::from_utf8(repaired).expect("repair preserves valid UTF-8"))
+    (!inserted.is_empty()).then(|| {
+        (
+            String::from_utf8(repaired).expect("repair preserves valid UTF-8"),
+            inserted,
+        )
+    })
 }
 
 impl PartialEq for Record {
@@ -348,6 +370,60 @@ mod tests {
         assert_eq!(frame.records()[0].value()["value"], "root\\app\\reverb");
         assert_eq!(frame.encode(), raw);
         assert!(Frame::parse(br#"root\x:{"value":"bad\escape"}"#).is_err());
+    }
+
+    /// `\n`, `\t`, `\r`, `\b` and `\f` after `root` are valid JSON escapes,
+    /// so a bare path to `nam_amp` or `tuner` parses strictly as the wrong
+    /// string. Bare paths are repaired before parsing for that reason.
+    #[test]
+    fn bare_paths_that_are_valid_json_are_still_repaired() {
+        for path in [
+            "root\\nam_amp",
+            "root\\tuner\\ref",
+            "root\\reverb",
+            "root\\fx\\bus",
+        ] {
+            let raw = format!(r#"root\assign1:{{"value":"{path}","type":"item"}}"#);
+            let frame = Frame::parse(raw.as_bytes()).unwrap();
+            assert_eq!(frame.records()[0].value()["value"], path);
+            assert_eq!(frame.encode(), raw.as_bytes(), "the spelling is kept");
+        }
+    }
+
+    #[test]
+    fn escaped_paths_are_left_as_they_are() {
+        let raw = br#"root\assign1:{"value":"root\\nam_amp","src":"root\app\amp"}"#;
+        let frame = Frame::parse(raw).unwrap();
+        assert_eq!(frame.records()[0].value()["value"], "root\\nam_amp");
+        assert_eq!(frame.records()[0].value()["src"], "root\\app\\amp");
+        assert_eq!(frame.encode(), raw);
+        let record = Record::new(
+            "root\\assign1",
+            serde_json::json!({"value": "root\\nam_amp"}),
+        )
+        .unwrap();
+        let encoded = record.encode();
+        assert_eq!(Record::parse(&encoded).unwrap(), record);
+    }
+
+    /// A batch reply without delimiters is split where each record's JSON
+    /// ends, which a repair must not move.
+    #[test]
+    fn bare_paths_in_a_batch_reply_without_delimiters() {
+        let raw =
+            br#"root\assign1:{"value":"root\nam_amp"}root\assign2:{"value":"root\tuner","x":1}"#;
+        let frame = Frame::parse(raw).unwrap();
+        assert_eq!(frame.records().len(), 2);
+        assert_eq!(frame.records()[0].value()["value"], "root\\nam_amp");
+        assert_eq!(frame.records()[1].subject(), "root\\assign2");
+        assert_eq!(frame.records()[1].value()["value"], "root\\tuner");
+        assert_eq!(frame.records()[1].value()["x"], 1);
+        let records: String = frame.records().iter().map(Record::encode).collect();
+        assert_eq!(
+            records.as_bytes(),
+            raw,
+            "each record keeps its own spelling"
+        );
     }
 
     #[test]
