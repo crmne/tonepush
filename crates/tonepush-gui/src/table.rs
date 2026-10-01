@@ -98,24 +98,67 @@ pub enum Cell {
 impl Cell {
     /// What this cell sorts on. A dot sorts by its state, so clicking that
     /// header gathers everything that needs doing.
-    fn key(&self) -> String {
+    fn key(&self) -> SortKey {
         match self {
-            Cell::Text(t) | Cell::Dim(t) | Cell::Tag { text: t, .. } => t.to_lowercase(),
-            Cell::Value { key, .. } => key.clone(),
-            // Padded so 9 sorts before 10, which a plain string does not.
-            Cell::Knob { value, .. } => format!("{value:020.6}"),
-            Cell::Number { value, .. } => format!("{value:020}"),
+            Cell::Text(t) | Cell::Dim(t) | Cell::Tag { text: t, .. } => {
+                SortKey::Text(t.to_lowercase())
+            }
+            Cell::Value { key, .. } => SortKey::Text(key.clone()),
+            // As numbers, so 9 sorts before 10 and -5 before -3, which no
+            // padded string manages for both.
+            Cell::Knob { value, .. } => SortKey::Real(*value),
+            Cell::Number { value, .. } => SortKey::Whole(*value),
             // Sorted so everything with something to do gathers at the top.
-            Cell::Places(places) => places
-                .iter()
-                .map(|(_, state, _, _)| match state {
-                    theme::Sync::Working => '0',
-                    theme::Sync::Differs => '1',
-                    theme::Sync::Absent => '2',
-                    theme::Sync::Same => '3',
-                    theme::Sync::Unknown => '4',
-                })
-                .collect(),
+            Cell::Places(places) => SortKey::Text(
+                places
+                    .iter()
+                    .map(|(_, state, _, _)| match state {
+                        theme::Sync::Working => '0',
+                        theme::Sync::Differs => '1',
+                        theme::Sync::Absent => '2',
+                        theme::Sync::Same => '3',
+                        theme::Sync::Unknown => '4',
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// What a cell sorts on. A column holds one kind of cell, so the order between
+/// kinds only has to be consistent, not meaningful.
+#[derive(Debug, Clone, PartialEq)]
+enum SortKey {
+    Whole(i64),
+    Real(f32),
+    Text(String),
+}
+
+impl Eq for SortKey {}
+
+impl PartialOrd for SortKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SortKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (SortKey::Whole(a), SortKey::Whole(b)) => a.cmp(b),
+            (SortKey::Real(a), SortKey::Real(b)) => a.total_cmp(b),
+            (SortKey::Text(a), SortKey::Text(b)) => a.cmp(b),
+            _ => self.rank().cmp(&other.rank()),
+        }
+    }
+}
+
+impl SortKey {
+    fn rank(&self) -> u8 {
+        match self {
+            SortKey::Whole(_) => 0,
+            SortKey::Real(_) => 1,
+            SortKey::Text(_) => 2,
         }
     }
 }
@@ -824,9 +867,45 @@ mod tests {
         };
 
         assert_eq!(grid.sort_rows(), vec![1, 2, 0]);
-        assert_eq!(grid.rows[0][0].key(), "alpha");
+        assert_eq!(grid.rows[0][0].key(), SortKey::Text("alpha".to_owned()));
         assert_eq!(grid.selected, Some(1));
         assert_eq!(grid.editing, Some((2, 0)));
         assert_eq!(grid.chosen, vec![false, false, true]);
+    }
+
+    fn knob(value: f32) -> Vec<Cell> {
+        vec![Cell::Knob {
+            value,
+            range: -120.0..=20.0,
+            text: String::new(),
+            hover: String::new(),
+        }]
+    }
+
+    #[test]
+    fn knob_columns_sort_negative_values_numerically() {
+        let mut grid = Grid {
+            rows: [-3.0, 10.0, -50.5, 0.0, 9.0, -5.0].map(knob).into(),
+            sort: (0, true),
+            ..Default::default()
+        };
+        assert_eq!(grid.sort_rows(), vec![2, 5, 0, 3, 4, 1]);
+    }
+
+    #[test]
+    fn number_columns_sort_negative_values_numerically() {
+        let number = |value| {
+            vec![Cell::Number {
+                value,
+                range: -100..=100,
+                hover: "",
+            }]
+        };
+        let mut grid = Grid {
+            rows: [-3, 10, -50, 9].map(number).into(),
+            sort: (0, true),
+            ..Default::default()
+        };
+        assert_eq!(grid.sort_rows(), vec![2, 0, 3, 1]);
     }
 }
