@@ -14,7 +14,7 @@ pub mod transport;
 
 pub use device::{BlobList, Device, Identity, UploadStep, WriteSafety};
 pub use session::Notification;
-pub use transport::{list, Found, Link, SerialLink};
+pub use transport::{list, list_update_mode, Found, Link, SerialLink};
 
 /// Compare JSON values as the VoidX wire does. Firmware stores NodeFloat as
 /// IEEE-754 and prints it back through its own JSON formatter, so the final

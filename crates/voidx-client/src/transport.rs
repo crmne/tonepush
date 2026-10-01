@@ -30,6 +30,19 @@ impl Found {
 /// We never send discovery probes to arbitrary serial devices. If a platform
 /// cannot expose USB metadata, callers can still explicitly open a chosen path.
 pub fn list() -> crate::Result<Vec<Found>> {
+    list_matching(is_stompstation_pro)
+}
+
+/// List ports that may be a StompStation PRO in update mode. Its built-in
+/// updater keeps the pedal's USB IDs (1d6b:0104) but names itself "Raspberry
+/// Pi" / "Pi USB Serial + Audio", which any Raspberry Pi gadget could do, so
+/// a caller must read the identity and require it to say StompStation PRO
+/// before sending anything else.
+pub fn list_update_mode() -> crate::Result<Vec<Found>> {
+    list_matching(may_be_update_mode)
+}
+
+fn list_matching(accept: fn(&Found) -> bool) -> crate::Result<Vec<Found>> {
     let mut found = Vec::new();
     for port in serialport::available_ports()? {
         let mut candidate = match port.port_type {
@@ -51,7 +64,7 @@ pub fn list() -> crate::Result<Vec<Found>> {
             },
         };
         enrich_from_linux_sysfs(&mut candidate);
-        if is_stompstation_pro(&candidate) {
+        if accept(&candidate) {
             found.push(candidate);
         }
     }
@@ -72,6 +85,19 @@ pub fn list() -> crate::Result<Vec<Found>> {
     }
 
     Ok(found)
+}
+
+fn may_be_update_mode(found: &Found) -> bool {
+    found.vendor_id == Some(0x1d6b)
+        && found.product_id == Some(0x0104)
+        && found
+            .manufacturer
+            .as_deref()
+            .is_some_and(|value| value.trim() == "Raspberry Pi")
+        && found
+            .product
+            .as_deref()
+            .is_some_and(|value| value.trim() == "Pi USB Serial + Audio")
 }
 
 fn is_stompstation_pro(found: &Found) -> bool {

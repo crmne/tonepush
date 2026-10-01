@@ -748,7 +748,7 @@ fn library_name(library: Library) -> &'static str {
 fn open() -> Result<Device<SerialLink>> {
     let found = voidx_client::list().context("enumerating serial ports")?;
     let Some(device) = found.first() else {
-        bail!("no StompStation PRO found - check its USB cable");
+        return open_update_mode();
     };
     if found.len() > 1 {
         bail!(
@@ -757,6 +757,27 @@ fn open() -> Result<Device<SerialLink>> {
         );
     }
     Device::connect(device.open()?).context("opening the StompStation PRO")
+}
+
+/// A pedal in update mode names itself as a generic Raspberry Pi gadget, so
+/// it only counts once its identity says StompStation PRO in update mode.
+fn open_update_mode() -> Result<Device<SerialLink>> {
+    let found = voidx_client::list_update_mode().context("enumerating serial ports")?;
+    let [candidate] = found.as_slice() else {
+        bail!("no StompStation PRO found - check its USB cable");
+    };
+    let device = Device::connect(candidate.open()?)
+        .with_context(|| format!("asking {} what it is", candidate.port_name))?;
+    let identity = device.identity();
+    if identity.name != "StompStation PRO" || !firmware::is_update_mode(identity) {
+        bail!(
+            "{} is {} {}, not a StompStation PRO in update mode",
+            candidate.port_name,
+            identity.name,
+            identity.version
+        );
+    }
+    Ok(device)
 }
 
 fn one_based_slot(text: &str) -> std::result::Result<usize, String> {

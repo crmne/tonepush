@@ -171,15 +171,23 @@ release TonePush lists by its SHA-256, or a release whose file name
 ```sh
 tonepush pro firmware-inspect s_pro_2_2_6.zip
 tonepush pro backup before-2.2.6.vxbundle
-# Turn the pedal off, wait ten seconds, and hold UPD while it starts.
+# Unplug the pedal, wait ten seconds, plug it in, and once the Sonulab
+# logo shows, hold UPD for a few seconds until it shows Update Mode.
 tonepush pro info        # firmware: Update Mode
 tonepush pro firmware-update s_pro_2_2_6.zip \
   --backup before-2.2.6.vxbundle --expect-version 2.2.6 --yes
 ```
 
+Hold UPD only after the logo appears: held while power arrives, it starts
+the pedal's Raspberry Pi in its low-level USB boot mode instead, which shows
+nothing on screen and appears on the computer as "BCM2711 Boot". Unplug it
+and try again. In update mode the pedal names itself on USB as a Raspberry
+Pi serial port; TonePush reads its identity before treating it as the PRO.
+
 In update mode the pedal cannot show its libraries, so the update asks for a
 complete, verified backup taken in the last 24 hours. Every batch must be
-confirmed by the pedal with the exact number of bytes sent; the pedal writes
+confirmed by the pedal with the exact number of bytes sent (about a minute
+over USB); the pedal writes
 the new program only when the last byte arrives, so an update that stops
 early changes nothing. TonePush never restarts the pedal. When it reports
 that the pedal has the whole file, leave it on for five minutes, turn it off,
