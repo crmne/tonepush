@@ -11,6 +11,8 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -31,9 +33,26 @@ fn agent_name() -> String {
     format!("TonePush {VERSION} ({})", std::env::consts::OS)
 }
 
+/// How long a TonePush server has to accept a connection.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long one whole request may take, body included. A stalled connection
+/// otherwise holds its worker forever, and a download waits behind it.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The one HTTP agent every request to TonePush goes through, pairing
+/// included. Cloning it shares its connection pool.
 fn api_agent() -> ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT
+        .get_or_init(|| agent_with(CONNECT_TIMEOUT, REQUEST_TIMEOUT))
+        .clone()
+}
+
+fn agent_with(connect: Duration, request: Duration) -> ureq::Agent {
     ureq::config::Config::builder()
         .http_status_as_error(false)
+        .timeout_connect(Some(connect))
+        .timeout_global(Some(request))
         .build()
         .new_agent()
 }
@@ -1080,12 +1099,13 @@ pub enum Linked {
 }
 
 pub fn start_pairing() -> Result<Pairing, String> {
-    let mut response = ureq::post(pairings())
+    let response = api_agent()
+        .post(pairings())
         .header("User-Agent", agent_name())
         .header("Accept", "application/json")
         .send_empty()
         .map_err(|error| format!("TonePush did not answer the pairing request: {error}"))?;
-    let body: serde_json::Value = decode_body(&mut response)?;
+    let body: serde_json::Value = decode(response)?;
     let (Some(code), Some(url)) = (
         body.get("code").and_then(|code| code.as_str()),
         body.get("url").and_then(|url| url.as_str()),
@@ -1099,12 +1119,13 @@ pub fn start_pairing() -> Result<Pairing, String> {
 }
 
 pub fn poll_pairing(code: &str) -> Result<Option<Linked>, String> {
-    let mut response = ureq::get(format!("{}/{code}", pairings()))
+    let response = api_agent()
+        .get(format!("{}/{code}", pairings()))
         .header("User-Agent", agent_name())
         .header("Accept", "application/json")
         .call()
         .map_err(|error| format!("TonePush stopped answering the pairing request: {error}"))?;
-    let body: serde_json::Value = decode_body(&mut response)?;
+    let body: serde_json::Value = decode(response)?;
     match body.get("state").and_then(|state| state.as_str()) {
         Some("linked") => {
             let token = body
@@ -1143,17 +1164,6 @@ fn decode<T: DeserializeOwned>(
     if !(200..300).contains(&status) {
         return Err(api_error(status, &body));
     }
-    serde_json::from_str(&body)
-        .map_err(|error| format!("TonePush answered with invalid JSON: {error}"))
-}
-
-fn decode_body<T: DeserializeOwned>(
-    response: &mut ureq::http::Response<ureq::Body>,
-) -> Result<T, String> {
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|error| format!("TonePush answered nothing readable: {error}"))?;
     serde_json::from_str(&body)
         .map_err(|error| format!("TonePush answered with invalid JSON: {error}"))
 }
@@ -1899,5 +1909,41 @@ mod tests {
         );
         let request = server.finish().pop().unwrap();
         assert!(String::from_utf8_lossy(&request).starts_with("GET /tones/456/artifact "));
+    }
+
+    #[test]
+    fn every_request_is_bounded_in_time() {
+        let timeouts = api_agent().config().timeouts();
+        assert_eq!(timeouts.connect, Some(CONNECT_TIMEOUT));
+        assert_eq!(timeouts.global, Some(REQUEST_TIMEOUT));
+    }
+
+    /// A server that sends its headers and then stops must not hold the
+    /// request, and every download queued behind it, forever.
+    #[test]
+    fn a_stalled_response_gives_up() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (done_tx, done_rx) = channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: 100\r\n\r\n{{"
+            )
+            .unwrap();
+            let _ = done_rx.recv();
+        });
+        let client = CloudClient {
+            base,
+            http: agent_with(Duration::from_secs(1), Duration::from_millis(300)),
+        };
+        let started = std::time::Instant::now();
+        assert!(client.song(1).is_err());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        done_tx.send(()).unwrap();
+        thread.join().unwrap();
     }
 }
