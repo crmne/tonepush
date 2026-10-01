@@ -84,8 +84,13 @@ pub fn hash_of(bytes: &[u8]) -> String {
 }
 
 /// Enough of a hash to tell tones apart by eye, for a tooltip or a log line.
+///
+/// Twelve characters, not bytes: a hash read from a hand-edited index or
+/// setlist is not guaranteed to be hex, and slicing through a character would
+/// panic.
 pub fn short(hash: &str) -> &str {
-    &hash[..hash.len().min(12)]
+    let end = hash.char_indices().nth(12).map_or(hash.len(), |(at, _)| at);
+    &hash[..end]
 }
 
 /// A tone's name, made safe to use as a file name.
@@ -2338,5 +2343,12 @@ mod tests {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
         assert_eq!(short(&hash_of(b"")), "e3b0c44298fc");
+    }
+
+    #[test]
+    fn a_short_hash_never_cuts_through_a_character() {
+        assert_eq!(short("ééééééééééééé"), "éééééééééééé");
+        assert_eq!(short("abc"), "abc");
+        assert_eq!(short("0123456789ab🎸"), "0123456789ab");
     }
 }
