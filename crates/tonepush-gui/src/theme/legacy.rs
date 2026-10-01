@@ -304,7 +304,7 @@ pub fn status_dot(ui: &mut Ui, colour: Color32) -> Response {
 /// beside a tone in the library (about the pedal), so a person learns it once.
 /// The same three words will do for the web later, which is the reason to
 /// settle it now rather than invent it twice.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Sync {
     /// Not over there at all.
     Absent,
@@ -315,6 +315,7 @@ pub enum Sync {
     /// On its way there now.
     Working,
     /// Not knowable yet, because the pedal has not been read.
+    #[default]
     Unknown,
 }
 

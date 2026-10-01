@@ -7,7 +7,7 @@
 //!
 //! When a newer release exists, fastframe-update decides whether this copy may
 //! replace itself. A copy that a package manager owns (Homebrew, the AUR, a
-//! .deb or .rpm) never does: the status bar says which tool updates it. A copy
+//! .deb or .rpm) never does: the settings say which tool updates it. A copy
 //! that may downloads only when asked, checks the release's signature against
 //! the key compiled in here, and restarts only when asked again.
 
@@ -144,7 +144,7 @@ enum Message {
     HandedOff(Result<(), String>),
 }
 
-/// The update state the status bar shows and drives.
+/// The update state the settings show and drive.
 pub struct Updates {
     /// When the next check is due; `None` checks on the next frame.
     next_check: Option<Instant>,
@@ -332,98 +332,145 @@ impl Updates {
         });
     }
 
-    /// The version in the status bar's corner, and whatever an update needs
-    /// next to it. Laid out right to left: the version sits furthest right,
-    /// and the update's one action to its left.
-    pub fn status_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(release) = self.release.clone() else {
-            let label = RichText::new(format!("TonePush {VERSION}"))
-                .small()
-                .color(theme::muted());
-            if ui
-                .add(egui::Label::new(label).sense(egui::Sense::click()))
-                .on_hover_text(format!("TonePush {VERSION} · click for the releases page"))
-                .clicked()
-            {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(RELEASES));
-            }
-            return;
-        };
+    /// The newer release on offer, if there is one.
+    pub fn available(&self) -> Option<&str> {
+        self.release
+            .as_ref()
+            .map(|release| release.version.as_str())
+    }
 
-        let hover = match &self.support {
-            Some(Err(reason)) => format!("{} Click to open the release.", advice(reason)),
-            _ => format!(
-                "TonePush {} is out. Click for what changed.",
-                release.version
-            ),
-        };
-        let label = RichText::new(format!(
-            "TonePush {VERSION} · {} available",
-            release.version
-        ))
-        .small()
-        .color(theme::accent());
-        if ui
-            .add(egui::Label::new(label).sense(egui::Sense::click()))
-            .on_hover_text(hover)
-            .clicked()
-        {
-            ui.ctx()
-                .open_url(egui::OpenUrl::new_tab(release_page(&release)));
-        }
-
-        if !matches!(self.support, Some(Ok(()))) {
-            return;
-        }
+    /// Which TonePush this is and, when a newer one is out, what updating
+    /// takes: the TonePush section of the settings. A copy that cannot
+    /// replace itself says which tool updates it; one that can downloads
+    /// only when asked and restarts only when asked again.
+    pub fn offer_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        match &self.download {
-            DownloadState::Idle => {
-                if ui
-                    .small_button("Update")
-                    .on_hover_text(format!(
-                        "Download TonePush {} and check its signature. Nothing is \
-                         installed until you restart.",
-                        release.version
-                    ))
-                    .clicked()
-                {
-                    self.download(&ctx);
-                }
-            }
-            DownloadState::Downloading { received, total } => {
-                let progress = if *total > 0 {
-                    *received as f32 / *total as f32
-                } else {
-                    0.0
+        ui.horizontal(|ui| {
+            theme::label(
+                ui,
+                &format!("TonePush {VERSION}"),
+                theme::regular(theme::BODY),
+                theme::text(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (label, url) = match &self.release {
+                    Some(release) => ("What's new", release_page(release).to_owned()),
+                    None => ("Releases", RELEASES.to_owned()),
                 };
-                crate::processor::operation_progress(ui, "Downloading update", progress);
-            }
-            DownloadState::Ready(_) => {
-                if ui
-                    .small_button(RichText::new("Restart to update").color(theme::accent()))
-                    .on_hover_text(format!(
-                        "TonePush closes, lets the pedal go and opens {}. If the new \
-                         version does not start, this one comes back.",
-                        release.version
-                    ))
+                if theme::Button::new(label)
+                    .ghost()
+                    .small()
+                    .icon(theme::Icon::ExternalLink)
+                    .show(ui)
+                    .on_hover_text("Open the release notes on GitHub")
                     .clicked()
                 {
-                    self.restart(&ctx);
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                 }
+            });
+        });
+        let Some(release) = self.release.clone() else {
+            return;
+        };
+        theme::label(
+            ui,
+            &format!("TonePush {} is out.", release.version),
+            theme::medium(12.5),
+            theme::accent(),
+        );
+        match &self.support {
+            None => {
+                theme::label(
+                    ui,
+                    "Checking whether this copy can update itself.",
+                    theme::regular(12.0),
+                    theme::muted(),
+                );
             }
-            DownloadState::Installing => {
-                theme::spinner(ui);
-                ui.label(RichText::new("Restarting…").small().color(theme::muted()));
+            Some(Err(reason)) => {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(advice(reason))
+                            .font(theme::regular(12.0))
+                            .color(theme::muted()),
+                    )
+                    .wrap(),
+                );
             }
-            DownloadState::Failed(error) => {
-                if ui
-                    .small_button("Retry update")
-                    .on_hover_text(format!("The update did not finish: {error}"))
-                    .clicked()
-                {
-                    self.download(&ctx);
+            Some(Ok(())) => match &self.download {
+                DownloadState::Idle => {
+                    if theme::Button::new(&format!("Update to {}", release.version))
+                        .primary()
+                        .small()
+                        .icon(theme::Icon::Download)
+                        .show(ui)
+                        .on_hover_text(format!(
+                            "Download TonePush {} and check its signature. Nothing is \
+                             installed until you restart.",
+                            release.version
+                        ))
+                        .clicked()
+                    {
+                        self.download(&ctx);
+                    }
                 }
-            }
+                DownloadState::Downloading { received, total } => {
+                    let progress = if *total > 0 {
+                        *received as f32 / *total as f32
+                    } else {
+                        0.0
+                    };
+                    theme::label(
+                        ui,
+                        "Downloading the update",
+                        theme::regular(12.0),
+                        theme::muted(),
+                    );
+                    theme::progress(ui, progress, 6.0, None);
+                }
+                DownloadState::Ready(_) => {
+                    if theme::Button::new("Restart to update")
+                        .primary()
+                        .small()
+                        .icon(theme::Icon::RotateCw)
+                        .show(ui)
+                        .on_hover_text(format!(
+                            "TonePush closes, lets the pedal go and opens {}. If the new \
+                             version does not start, this one comes back.",
+                            release.version
+                        ))
+                        .clicked()
+                    {
+                        self.restart(&ctx);
+                    }
+                }
+                DownloadState::Installing => {
+                    ui.horizontal(|ui| {
+                        let (spot, _) =
+                            ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
+                        crate::shell::spin(ui, spot.center(), 5.5);
+                        theme::label(ui, "Restarting", theme::regular(12.0), theme::muted());
+                    });
+                }
+                DownloadState::Failed(error) => {
+                    let error = error.clone();
+                    if theme::Button::new("Retry the update")
+                        .small()
+                        .show(ui)
+                        .clicked()
+                    {
+                        self.download(&ctx);
+                    }
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("The update did not finish: {error}"))
+                                .font(theme::regular(12.0))
+                                .color(theme::muted()),
+                        )
+                        .wrap(),
+                    );
+                }
+            },
         }
     }
 }
@@ -651,6 +698,16 @@ mod tests {
         // Restart does nothing without a verified download.
         updates.restart(&ctx);
         assert!(matches!(updates.download, DownloadState::Failed(_)));
+    }
+
+    /// The sidebar offers a newer release only once the check has found one.
+    #[test]
+    fn a_found_release_is_on_offer() {
+        let ctx = egui::Context::default();
+        let mut updates = Updates::default();
+        assert_eq!(updates.available(), None);
+        updates.receive(&ctx, Message::Checked(Some(release())));
+        assert_eq!(updates.available(), Some("99.0.0"));
     }
 
     #[test]

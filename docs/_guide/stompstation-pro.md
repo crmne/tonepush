@@ -6,9 +6,11 @@ nav_order: 3
 
 The StompStation PRO uses a different USB protocol and has a different fixed
 signal chain from a Line 6 pedal. It does not use a different TonePush. Once it
-connects, the same editor shell appears: the setlist on the left, modelled
-signal chain across the top, knobs for the selected block in the middle, and
-the full local/Cloud library along the bottom.
+connects, the same editor appears: the pedal and its presets in the sidebar,
+the loaded preset across the top, and the same three pages. **Edit** holds the
+modelled signal chain and the selected block's knobs, **Library** the full
+local and Cloud library, and **Pedal** the pedal's backups, NAM and IR
+libraries and settings.
 
 TonePush support is hardware-tested with a StompStation PRO running firmware
 1.5.12. The protocol implementation is independent and based on the vendor's
@@ -22,7 +24,8 @@ TonePush discovers the pedal's USB serial port automatically. On Linux,
 `install.sh` installs a udev rule matching `SONULAB` / `StompStation PRO`; replug
 the pedal after installation so the rule takes effect.
 
-The status bar shows the identity and firmware actually read from the pedal.
+The card at the top of the sidebar shows the identity and firmware actually
+read from the pedal.
 TonePush enables persistent writes only for the hardware identity and firmware
 combination that was verified during development. An unknown future firmware
 can still be inspected without pretending its write behavior is unchanged.
@@ -49,7 +52,7 @@ schema.
 
 ## Local tones, setlists, and Cloud
 
-The library along the bottom is the same component used with an HX pedal:
+The Library page is the same one used with an HX pedal:
 
 - **Tones** stores byte-exact `.vxpreset` bytes in TonePush's content-addressed
   local library, with names, tags, ratings, Song details, immutable versions,
@@ -68,11 +71,14 @@ slot's fixed-capacity padding, and import validates and restores it. It is not a
 translation into an invented preset model, and TonePush can add an official
 vendor container alongside it if VoidX publishes one later.
 
-Use the computer icon on a preset row to keep that preset. The icon distinguishes
-not kept, kept and identical, and a different local version under the same
-name. The computer icon in the SETLIST header captures the whole pedal. To send
-a local or Cloud tone, press its pedal action and choose the destination in the
-actual preset list; occupied rows say what would be replaced before you click.
+Right-click a preset in the list and choose **Keep in library** to keep it, or
+**Update in library** when your library holds a different version under the
+same name. A check beside a preset means your library holds it unchanged, and
+an orange compare mark that it holds a different version. The computer icon at
+the top of the preset list captures the whole pedal. To send a local or Cloud
+tone, press its pedal action and choose the destination in the actual preset
+list; free slots are amber, and an occupied row says what it would replace
+before you click.
 
 HX and PRO tones share one library without becoming interchangeable. TonePush
 routes only a compatible native artifact to the connected pedal, prevents a
@@ -81,8 +87,8 @@ cross-device tones as separate objects.
 
 ## NAM and impulse-response libraries
 
-Press the device name in the status bar for the PRO-specific libraries and
-backup tools. These are capabilities of the pedal, not a second preset UI:
+The Pedal page holds the PRO-specific libraries and backup tools, a tab each.
+These are capabilities of the pedal, not a second preset UI:
 
 - Import/export, rename, reorder, or clear NAM amp and NAM drive models.
 - Import/export mono 48 kHz WAV impulse responses.
@@ -107,10 +113,13 @@ CRC-32 covers the whole model. A preset saved over itself under the same name
 is therefore noticed and read again. Full reads batch several
 strictly identified chunks per protocol frame. A pedal with no prior bundle
 still opens immediately for live editing; only Save and other flash operations
-wait for you to choose a complete backup.
+wait for you to choose a complete backup. The line under the preset's name says
+which it is ("Protected by the 14:02 backup", or "Saving waits for a backup of
+this pedal"), and the foot of the sidebar keeps saying it on every page.
 
-On a new machine, open the device window and choose **Backup & restore → Capture
-complete backup**. A bundle contains:
+On a new machine, open the Pedal page and choose **Back up to a file…** on its
+Backups tab, or **Use an existing backup…** for a bundle taken earlier. A
+bundle contains:
 
 - exact fixed-size bytes for all occupied presets, IRs, NAM amps, and NAM
   drives;

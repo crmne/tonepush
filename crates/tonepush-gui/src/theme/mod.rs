@@ -483,6 +483,46 @@ pub const RADIUS_TILE: u8 = 12;
 pub const RADIUS_CARD: u8 = 14;
 pub const RADIUS_DIALOG: u8 = 16;
 
+/// The three sizes the layout is drawn for, by window width: S up to 1100
+/// points (compact tiles, smaller knobs, shorter labels), M the reference
+/// (1280 × 760), and L from 1800 points (larger tiles and knobs, and every
+/// lens on screen at once).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tier {
+    S,
+    M,
+    L,
+}
+
+impl Tier {
+    #[must_use]
+    pub fn of(width: f32) -> Tier {
+        if width <= 1100.0 {
+            Tier::S
+        } else if width >= 1800.0 {
+            Tier::L
+        } else {
+            Tier::M
+        }
+    }
+
+    /// The window's tier this frame.
+    #[must_use]
+    pub fn now(ctx: &egui::Context) -> Tier {
+        Tier::of(ctx.content_rect().width())
+    }
+
+    /// One of three values, by tier.
+    #[must_use]
+    pub fn pick<T>(self, s: T, m: T, l: T) -> T {
+        match self {
+            Tier::S => s,
+            Tier::M => m,
+            Tier::L => l,
+        }
+    }
+}
+
 /// egui's own widgets in the palette's colours, with the design's type scale
 /// and spacing, for the parts of the interface egui draws itself: text
 /// fields, menus, scroll bars, tooltips and combo boxes.
@@ -868,6 +908,11 @@ drawings! {
     "Connected Devices" => "connected-devices",
 }
 
+/// TonePush's own mark: the app icon as it is packaged, so the editor shows
+/// whatever icon the release ships.
+const MARK_URI: &str = "bytes://tonepush-mark.svg";
+const MARK: &[u8] = include_bytes!("../../../../packaging/icons/tonepush.svg");
+
 /// Hand the icons and drawings to egui's loaders, once, so they can be drawn
 /// by URI like any other image.
 pub fn register_icons(ctx: &egui::Context) {
@@ -878,6 +923,12 @@ pub fn register_icons(ctx: &egui::Context) {
         let svg = String::from_utf8_lossy(bytes).replace("currentColor", "#ffffff");
         ctx.include_bytes(*uri, svg.into_bytes());
     }
+    ctx.include_bytes(MARK_URI, MARK);
+}
+
+/// Paint TonePush's mark, in its own colours, filling `rect`.
+pub fn paint_mark(ui: &egui::Ui, rect: egui::Rect) {
+    egui::Image::new(MARK_URI).paint_at(ui, rect);
 }
 
 /// The drawing for a category, by the name HX Edit gives it.

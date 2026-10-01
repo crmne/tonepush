@@ -13,6 +13,9 @@ use voidx_proto::{NodeDescription, NodeKind, NodePath, Preset};
 
 use crate::{config, processor, theme, LibraryLookup};
 
+mod frame;
+pub(crate) use frame::{slot_label, Picked};
+
 /// Keep PRO favourites apart from the first HX setlist in the existing local
 /// preferences file. The UI is shared; only the device-address key differs.
 const FAVORITES_SETLIST: i64 = -1;
@@ -201,11 +204,16 @@ enum Evt {
     },
     Success(String),
     Failed(String),
+    /// The pedal answered, on firmware TonePush has not been verified
+    /// against: it is browsed, exported and backed up, and nothing else.
+    ReadOnly(String),
     Disconnected,
 }
 
+/// The tabs of the PRO's page.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
+    Backups,
     Library(Library),
     Settings,
 }
@@ -227,9 +235,16 @@ pub(crate) struct Panel {
     status: String,
     snapshot: Option<Snapshot>,
     rollback: Option<PathBuf>,
+    /// When the backup the rollback guard holds was taken, for the deck and
+    /// the sidebar's foot.
+    rollback_time: Option<SystemTime>,
+    /// Whether the worker's last word was a failure, so the deck says it in
+    /// the voice of a problem rather than of a note.
+    failed: bool,
+    /// Why this pedal is read only, when it is.
+    read_only: Option<String>,
     tab: Tab,
     selected_group: String,
-    show_device: bool,
     search: String,
     shelf_search: String,
     drafts: BTreeMap<String, Value>,
@@ -274,9 +289,11 @@ impl Panel {
             status: "Looking for a StompStation PRO…".into(),
             snapshot: None,
             rollback: None,
-            tab: Tab::Settings,
+            rollback_time: None,
+            failed: false,
+            read_only: None,
+            tab: Tab::Backups,
             selected_group: String::new(),
-            show_device: false,
             search: String::new(),
             shelf_search: String::new(),
             drafts: BTreeMap::new(),
@@ -325,6 +342,8 @@ impl Panel {
                 Ok(Evt::Connected(snapshot)) => {
                     self.active = true;
                     self.online = true;
+                    self.failed = false;
+                    self.read_only = None;
                     self.status.clear();
                     self.preset_hashes.clear();
                     self.install_snapshot(snapshot, true);
@@ -395,6 +414,11 @@ impl Panel {
                     path,
                     preset_hashes,
                 }) => {
+                    // The bundle is written once and published whole, so the
+                    // folder's time is when the backup was taken.
+                    self.rollback_time = std::fs::metadata(&path)
+                        .and_then(|metadata| metadata.modified())
+                        .ok();
                     self.rollback = Some(path);
                     self.preset_hashes = preset_hashes;
                     self.working = None;
@@ -405,30 +429,39 @@ impl Panel {
                     self.redo_depth = redo;
                 }
                 Ok(Evt::Busy(busy)) => self.busy = busy,
-                Ok(Evt::Progress(line)) => self.status = line,
+                Ok(Evt::Progress(line)) => {
+                    self.failed = false;
+                    self.status = line;
+                }
                 Ok(Evt::Working { what, progress }) => {
                     self.working = Some((what, progress.clamp(0.0, 1.0)));
                 }
                 Ok(Evt::Success(line)) => {
                     self.working = None;
+                    self.failed = false;
                     self.status = line;
                 }
                 Ok(Evt::Failed(line)) => {
                     self.working = None;
+                    self.failed = true;
                     self.status = line;
                 }
+                Ok(Evt::ReadOnly(reason)) => self.read_only = Some(reason),
                 Ok(Evt::Disconnected) => {
                     if self.active {
                         self.online = false;
                         self.status = "StompStation PRO disconnected".into();
                     }
                     self.rollback = None;
+                    self.rollback_time = None;
+                    self.read_only = None;
                     self.preset_hashes.clear();
                     self.working = None;
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.online = false;
+                    self.failed = true;
                     self.status = "StompStation PRO worker stopped".into();
                     break;
                 }
@@ -626,114 +659,6 @@ impl Panel {
         }
     }
 
-    pub(crate) fn top_bar(&mut self, root: &mut egui::Ui) {
-        let snapshot = self.snapshot.clone();
-        processor::top_bar(root, "pro_top", |ui| {
-            ui.add_space(8.0);
-            if let Some(snapshot) = &snapshot {
-                let title = snapshot
-                    .active_preset
-                    .as_deref()
-                    .unwrap_or("StompStation PRO");
-                let slot = active_preset_index(snapshot)
-                    .map(|index| format!("{:02}", index + 1))
-                    .unwrap_or_else(|| "--".into());
-                if let Some(name) = processor::preset_title(
-                    ui,
-                    &slot,
-                    title,
-                    self.dirty,
-                    self.rollback.is_some(),
-                    &mut self.renaming_header,
-                ) {
-                    if let Some(index) = active_preset_index(snapshot) {
-                        let _ = self.tx.send(Cmd::Rename {
-                            library: Library::Presets,
-                            index,
-                            name,
-                        });
-                    }
-                }
-                ui.add_space(12.0);
-                let save_enabled =
-                    self.dirty && self.rollback.is_some() && !self.save_name.trim().is_empty();
-                let save_disabled = if self.rollback.is_none() {
-                    "Save becomes available after a current rollback is verified"
-                } else {
-                    "Save - no changes to save"
-                };
-                let actions = processor::preset_tools(
-                    ui,
-                    self.online,
-                    self.undo_depth,
-                    self.redo_depth,
-                    self.dirty,
-                    save_enabled,
-                    save_disabled,
-                );
-                if actions.undo {
-                    let _ = self.tx.send(Cmd::Undo);
-                }
-                if actions.redo {
-                    let _ = self.tx.send(Cmd::Redo);
-                }
-                if actions.save {
-                    let _ = self.tx.send(Cmd::SavePreset(self.save_name.trim().into()));
-                }
-                if actions.discard {
-                    self.discard_changes(snapshot);
-                }
-            }
-            if self.busy {
-                theme::spinner(ui);
-            }
-            if let Some(snapshot) = &snapshot {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(8.0);
-                    self.tempo_control(ui, snapshot);
-                });
-            }
-        });
-    }
-
-    fn tempo_control(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
-        let Some((path, description)) = snapshot.app.iter().find(|(path, description)| {
-            path.as_str().ends_with("\\tempo_bpm")
-                && matches!(description.kind, Some(NodeKind::Float))
-        }) else {
-            return;
-        };
-        let Some(tempo) = self
-            .drafts
-            .get(path.as_str())
-            .and_then(Value::as_f64)
-            .map(|value| value as f32)
-        else {
-            return;
-        };
-        if let Some(bpm) =
-            processor::tempo_control(ui, tempo, &mut self.tempo_draft, &mut self.taps)
-        {
-            let value = Value::from(f64::from(bpm));
-            if description.validate_value(&value).is_ok() {
-                let before = self
-                    .drafts
-                    .get(path.as_str())
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                self.drafts.insert(path.to_string(), value.clone());
-                self.recompute_dirty();
-                let _ = self.tx.send(Cmd::SetNode {
-                    path: path.clone(),
-                    description: Box::new(description.clone()),
-                    before,
-                    value,
-                    persistent: false,
-                });
-            }
-        }
-    }
-
     /// Load another preset, asking first when that would throw away edits:
     /// the pedal rebuilds its live tree from the stored preset, and the
     /// worker forgets the undo history with it.
@@ -750,7 +675,7 @@ impl Panel {
         self.confirmation = Some(Confirmation {
             question: format!(
                 "This preset has changes that are not saved. Load {} {name} and lose them?",
-                index + 1
+                slot_label(index)
             ),
             action: "Discard and load",
             command: Cmd::SelectPreset(index),
@@ -812,72 +737,6 @@ impl Panel {
         }
     }
 
-    pub(crate) fn status_bar(&mut self, root: &mut egui::Ui, updates: &mut crate::update::Updates) {
-        let snapshot = self.snapshot.clone();
-        processor::status_bar(root, "pro_status", |ui| {
-            ui.add_space(8.0);
-            theme::status_dot(
-                ui,
-                if self.online {
-                    egui::Color32::from_rgb(0x4c, 0xc0, 0x60)
-                } else {
-                    theme::muted()
-                },
-            );
-            let device_name = snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.identity.name.as_str())
-                .unwrap_or("No device");
-            if processor::device_button(
-                ui,
-                self.online,
-                RichText::new(device_name).strong(),
-                "device settings, backup and restore",
-            )
-            .clicked()
-            {
-                self.tab = Tab::Settings;
-                self.show_device = !self.show_device;
-            }
-            if let Some(snapshot) = &snapshot {
-                ui.label(
-                    RichText::new(format!("firmware {}", snapshot.identity.version))
-                        .color(theme::muted()),
-                );
-            }
-            if self.online {
-                if ui.small_button("Disconnect").clicked() {
-                    let _ = self.tx.send(Cmd::Disconnect);
-                }
-            } else if ui.small_button("Reconnect").clicked() {
-                let _ = self.tx.send(Cmd::Connect);
-            }
-            if let Some((what, progress)) = &self.working {
-                processor::operation_progress(ui, what, *progress);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-                updates.status_ui(ui);
-                let guard = if self.rollback.is_some() {
-                    "Automatic backup ready"
-                } else {
-                    "Automatic backup required for Save"
-                };
-                let guard = ui.label(RichText::new(guard).small().color(theme::muted()));
-                if let Some(path) = &self.rollback {
-                    guard.on_hover_text(format!(
-                        "TonePush can restore persistent changes from {}",
-                        path.display()
-                    ));
-                }
-                if !self.status.is_empty() {
-                    ui.separator();
-                    ui.label(RichText::new(&self.status).small().color(theme::muted()));
-                }
-            });
-        });
-    }
-
     pub(crate) fn body(&mut self, root: &mut egui::Ui) {
         let snapshot = self.snapshot.clone();
         if let Some(snapshot) = &snapshot {
@@ -917,11 +776,8 @@ impl Panel {
         });
     }
 
+    /// The questions and previews that float over whichever page shows.
     pub(crate) fn windows(&mut self, ctx: &egui::Context) {
-        let snapshot = self.snapshot.clone();
-        if let Some(snapshot) = &snapshot {
-            self.device_window(ctx, snapshot);
-        }
         self.confirmation_window(ctx);
         self.preview_window(ctx);
     }
@@ -950,305 +806,6 @@ impl Panel {
         if !open {
             self.preview = None;
         }
-    }
-
-    pub(crate) fn preset_list(
-        &mut self,
-        root: &mut egui::Ui,
-        lookup: &LibraryLookup,
-        config: &mut config::Config,
-        sending: Option<&str>,
-    ) -> Option<usize> {
-        let snapshot = self.snapshot.clone();
-        let mut picked = None;
-        let mut cancel_send = false;
-        processor::preset_panel(root, "pro_presets", |ui| {
-            let Some(snapshot) = &snapshot else { return };
-            let Some(presets) = snapshot
-                .libraries
-                .iter()
-                .find(|state| state.library == Library::Presets)
-            else {
-                return;
-            };
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("SETLIST").small().color(theme::muted()))
-                    .on_hover_text("Use ↑/↓ to move through presets when no field is active");
-                let (mark, colour) = if self.show_favorites_only {
-                    (theme::Icon::StarOn, theme::accent())
-                } else {
-                    (theme::Icon::Star, theme::muted())
-                };
-                if theme::small_icon_button(ui, mark, Some(colour))
-                    .on_hover_text("Show favourites only")
-                    .clicked()
-                {
-                    self.show_favorites_only = !self.show_favorites_only;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::place_enabled(
-                        ui,
-                        theme::Icon::Computer,
-                        theme::Sync::Absent,
-                        self.online,
-                    )
-                    .on_hover_text("keep every preset on the pedal, in order, as a setlist")
-                    .clicked()
-                    {
-                        let _ = self.tx.send(Cmd::CaptureSetlist);
-                    }
-                });
-            });
-            if let Some(name) = sending {
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("Choose a slot for {name}"))
-                            .small()
-                            .color(theme::accent()),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("Cancel").clicked() {
-                            cancel_send = true;
-                        }
-                    });
-                });
-            }
-            ui.separator();
-            egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let mut toggle = None;
-                let mut read = None;
-                let mut rename = None;
-                for (index, name) in presets.info.names.iter().enumerate() {
-                    let favorite = config.is_favorite(FAVORITES_SETLIST, index as i64);
-                    if self.show_favorites_only && !favorite {
-                        continue;
-                    }
-                    let label = name.as_deref().unwrap_or("Empty");
-                    let selected = name.as_deref() == snapshot.active_preset.as_deref();
-                    let label = format!("{:>2}  {label}", index + 1);
-                    let text = if selected {
-                        RichText::new(&label).color(theme::accent()).strong()
-                    } else if name.is_some() {
-                        RichText::new(&label)
-                    } else {
-                        RichText::new(&label).color(theme::muted())
-                    };
-                    ui.horizontal(|ui| {
-                        ui.set_min_height(20.0);
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        let (star, colour) = if favorite {
-                            (theme::Icon::StarOn, theme::accent())
-                        } else {
-                            (theme::Icon::Star, theme::muted())
-                        };
-                        if theme::small_icon_button(ui, star, Some(colour))
-                            .on_hover_text(if favorite { "Remove favourite" } else { "Favourite" })
-                            .clicked()
-                        {
-                            toggle = Some(index);
-                        }
-                        if name.is_some() {
-                            let state = self.slot_sync(index, lookup);
-                            let keep = theme::place_enabled(
-                                ui,
-                                theme::Icon::Computer,
-                                state,
-                                self.online && !matches!(state, theme::Sync::Working),
-                            );
-                            let keep = match state {
-                                theme::Sync::Absent => keep.on_hover_text("Not in your library. Keep it"),
-                                theme::Sync::Same => keep.on_hover_text("In your library"),
-                                theme::Sync::Differs => keep.on_hover_text(
-                                    "In your library under this name, but different. Update it from the pedal",
-                                ),
-                                theme::Sync::Working => keep.on_hover_text("Saving…"),
-                                theme::Sync::Unknown => keep.on_hover_text("Check and keep in your library"),
-                            };
-                            if keep.clicked() && state != theme::Sync::Same {
-                                read = Some((index, matches!(state, theme::Sync::Differs)));
-                            }
-                        } else {
-                            ui.add_space(16.0);
-                        }
-                        processor::preset_dirty_marker(ui, selected && self.dirty);
-                        if sending.is_some() {
-                            let empty = name.is_none();
-                            let target_text = if empty {
-                                RichText::new(format!("{:>2}  empty", index + 1)).color(theme::accent())
-                            } else {
-                                RichText::new(&label).color(theme::muted())
-                            };
-                            let target = ui.add(
-                                egui::Button::new(()).left_text(target_text).frame(false)
-                                    .min_size(egui::vec2(ui.available_width(), 18.0)),
-                            );
-                            let target = if empty { target.on_hover_text("Put it here") } else {
-                                target.on_hover_text(format!("Replace {}", name.as_deref().unwrap_or_default()))
-                            };
-                            if target.clicked() {
-                                picked = Some(index);
-                            }
-                        } else if matches!(&self.renaming_preset, Some((slot, _)) if *slot == index) {
-                            if let Some((_, draft)) = self.renaming_preset.as_mut() {
-                                let field = ui.add(
-                                    egui::TextEdit::singleline(draft)
-                                        .desired_width(180.0)
-                                        .hint_text("preset name"),
-                                );
-                                if !field.has_focus() && !field.lost_focus() {
-                                    field.request_focus();
-                                }
-                                if field.lost_focus() {
-                                    if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                                        rename = Some((index, draft.clone()));
-                                    }
-                                    self.renaming_preset = None;
-                                }
-                            }
-                        } else {
-                            let row = ui.add_enabled_ui(name.is_some(), |ui| ui.selectable_label(selected, text)).inner;
-                            if row.clicked() {
-                                self.select_preset(index);
-                            }
-                            row.context_menu(|ui| {
-                                if ui
-                                    .add_enabled(
-                                        self.rollback.is_some(),
-                                        egui::Button::new("Rename"),
-                                    )
-                                    .clicked()
-                                {
-                                    self.renaming_preset = Some((index, name.clone().unwrap_or_default()));
-                                    ui.close();
-                                }
-                                if ui.button("Copy").clicked() {
-                                    let _ = self.tx.send(Cmd::ReadPreset { index, target: ReadTarget::Clipboard });
-                                    ui.close();
-                                }
-                                if ui
-                                    .add_enabled(
-                                        self.rollback.is_some() && self.clipboard.is_some(),
-                                        egui::Button::new("Paste"),
-                                    )
-                                    .clicked()
-                                {
-                                    if let Some((name, bytes)) = self.clipboard.clone() {
-                                        let _ = self.tx.send(Cmd::ImportBytes { index, name, bytes });
-                                    }
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui.button("Save to file…").clicked() {
-                                    let stem = sanitise(name.as_deref().unwrap_or("preset"));
-                                    if let Some(path) = rfd::FileDialog::new()
-                                        .set_file_name(format!("{stem}.vxpreset"))
-                                        .add_filter("StompStation PRO preset", &["vxpreset"])
-                                        .save_file()
-                                    {
-                                        let _ = self.tx.send(Cmd::ReadPreset { index, target: ReadTarget::File(path) });
-                                    }
-                                    ui.close();
-                                }
-                                if ui
-                                    .add_enabled(
-                                        self.rollback.is_some(),
-                                        egui::Button::new("Load from file…"),
-                                    )
-                                    .clicked()
-                                {
-                                    if let Some(file) = rfd::FileDialog::new()
-                                        .add_filter("StompStation PRO preset", &["vxpreset"])
-                                        .pick_file()
-                                    {
-                                        let import_name = file.file_stem().and_then(|stem| stem.to_str())
-                                            .unwrap_or("Preset").to_owned();
-                                        self.confirmation = Some(Confirmation {
-                                            action: "Write to pedal",
-                                            question: format!("Replace slot {} with {import_name}?", index + 1),
-                                            command: Cmd::Import { library: Library::Presets, index, name: import_name, file },
-                                        });
-                                    }
-                                    ui.close();
-                                }
-                                if ui.button("Keep in library").clicked() {
-                                    read = Some((index, false));
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui
-                                    .add_enabled(
-                                        self.rollback.is_some() && index > 0,
-                                        egui::Button::new("Move up"),
-                                    )
-                                    .clicked()
-                                {
-                                    let _ = self.tx.send(Cmd::Move {
-                                        library: Library::Presets,
-                                        from: index,
-                                        to: index - 1,
-                                    });
-                                    ui.close();
-                                }
-                                if ui
-                                    .add_enabled(
-                                        self.rollback.is_some()
-                                            && index + 1 < presets.info.count,
-                                        egui::Button::new("Move down"),
-                                    )
-                                    .clicked()
-                                {
-                                    let _ = self.tx.send(Cmd::Move {
-                                        library: Library::Presets,
-                                        from: index,
-                                        to: index + 1,
-                                    });
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui
-                                    .add_enabled(
-                                        self.rollback.is_some(),
-                                        egui::Button::new("Remove"),
-                                    )
-                                    .clicked()
-                                {
-                                    self.confirmation = Some(Confirmation {
-                                        action: "Write to pedal",
-                                        question: format!("Empty slot {} back to a blank preset?", index + 1),
-                                        command: Cmd::Clear { library: Library::Presets, index },
-                                    });
-                                    ui.close();
-                                }
-                            });
-                        }
-                    });
-                }
-                if let Some(index) = toggle {
-                    config.toggle_favorite(FAVORITES_SETLIST, index as i64);
-                }
-                if let Some((index, replace)) = read {
-                    let _ = self.tx.send(Cmd::ReadPreset {
-                        index,
-                        target: ReadTarget::Library { replace },
-                    });
-                }
-                if let Some((index, name)) = rename {
-                    let _ = self.tx.send(Cmd::Rename {
-                        library: Library::Presets,
-                        index,
-                        name,
-                    });
-                }
-            });
-        });
-        if cancel_send {
-            return Some(usize::MAX);
-        }
-        picked
     }
 
     fn signal_chain(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
@@ -1397,47 +954,6 @@ impl Panel {
         }
         ui.separator();
         self.slot_rows_ui(ui, state, needle, Some((path, description, current)));
-    }
-
-    fn device_window(&mut self, ctx: &egui::Context, snapshot: &Snapshot) {
-        if !self.show_device {
-            return;
-        }
-        let mut open = true;
-        egui::Window::new("Device")
-            .open(&mut open)
-            .default_width(760.0)
-            .default_height(560.0)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "{}  ·  firmware {}  ·  {}",
-                        snapshot.identity.name, snapshot.identity.version, snapshot.transport
-                    ))
-                    .color(theme::muted()),
-                );
-                ui.add_space(8.0);
-                self.backup_actions(ui, snapshot);
-                theme::section_break(ui);
-                ui.horizontal_wrapped(|ui| {
-                    tab_button(ui, &mut self.tab, Tab::Library(Library::Irs), "IRs");
-                    tab_button(ui, &mut self.tab, Tab::Library(Library::Amps), "NAM amps");
-                    tab_button(
-                        ui,
-                        &mut self.tab,
-                        Tab::Library(Library::Drives),
-                        "NAM drives",
-                    );
-                    tab_button(ui, &mut self.tab, Tab::Settings, "Settings");
-                });
-                ui.separator();
-                ui.add_enabled_ui(self.online && !self.busy, |ui| match self.tab {
-                    Tab::Library(library) => self.library_ui(ui, snapshot, library),
-                    Tab::Settings => self.nodes_ui(ui, snapshot, true, None),
-                });
-            });
-        self.show_device = open;
     }
 
     fn nodes_ui(
@@ -2281,51 +1797,6 @@ impl Panel {
         }
     }
 
-    fn backup_actions(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
-        let available = self.online && !self.busy;
-        let actions =
-            processor::backup_section(ui, available, available && self.rollback.is_some());
-        if actions.backup {
-            if let Some(path) = rfd::FileDialog::new()
-                .set_title("Where to put the backup")
-                .set_file_name(format!("{}.vxbundle", sanitise(&snapshot.identity.name)))
-                .save_file()
-            {
-                let _ = self.tx.send(Cmd::Backup(path));
-            }
-        }
-        if actions.restore {
-            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                self.confirmation = Some(Confirmation {
-                    action: "Write to pedal",
-                    question: format!(
-                        "Restore every library and safe setting from {}?",
-                        path.display()
-                    ),
-                    command: Cmd::Restore(path),
-                });
-            }
-        }
-        if self.rollback.is_none() {
-            ui.add_space(5.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("A current backup is required before persistent writes.")
-                        .small()
-                        .color(theme::muted()),
-                );
-                if ui
-                    .add_enabled(available, egui::Button::new("Use existing backup…"))
-                    .clicked()
-                {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        let _ = self.tx.send(Cmd::UseRollback(path));
-                    }
-                }
-            });
-        }
-    }
-
     fn confirmation_window(&mut self, ctx: &egui::Context) {
         let Some(confirmation) = &self.confirmation else {
             return;
@@ -2354,12 +1825,6 @@ impl Panel {
         } else if cancel {
             self.confirmation = None;
         }
-    }
-}
-
-fn tab_button(ui: &mut egui::Ui, tab: &mut Tab, value: Tab, label: &str) {
-    if ui.selectable_label(*tab == value, label).clicked() {
-        *tab = value;
     }
 }
 
@@ -3396,6 +2861,7 @@ impl Worker {
         if let Some(reason) = read_only {
             self.rollback = None;
             self.rollback_path = None;
+            self.send(Evt::ReadOnly(reason.clone()));
             self.send(Evt::Success(format!(
                 "Read only: {reason}. Browsing, export and Backup work; changes are off"
             )));
@@ -4525,6 +3991,14 @@ pub(crate) mod demo {
             self.status.clear();
             self.install_snapshot(snapshot(), true);
             self.rollback = Some(PathBuf::from("stompstation-pro-demo.vxbundle"));
+            self.rollback_time = jiff::Zoned::now()
+                .with()
+                .hour(14)
+                .minute(2)
+                .second(0)
+                .build()
+                .ok()
+                .map(|time| SystemTime::from(time.timestamp()));
             for (path, value) in [
                 ("root\\app\\amp\\gain", 6.2),
                 ("root\\app\\delay\\mix", 28.0),
@@ -4535,6 +4009,16 @@ pub(crate) mod demo {
             self.recompute_dirty();
             self.selected_group = "amp".into();
             self.undo_depth = 2;
+        }
+
+        /// Which slots hold what the library holds, as a backup would say.
+        pub(crate) fn demo_library_marks(&mut self, hashes: BTreeMap<usize, String>) {
+            self.preset_hashes = hashes;
+        }
+
+        /// Open the pedal's page on its backups.
+        pub(crate) fn demo_page(&mut self) {
+            self.tab = Tab::Backups;
         }
     }
 }

@@ -14,11 +14,13 @@ mod eq;
 /// Public so the desktop entry point can bring an older library across before
 /// the first window opens. Nothing else here needs to be.
 pub mod library;
+mod pages;
 mod pro;
 mod processor;
 #[cfg(test)]
 mod screenshots;
 mod session;
+mod shell;
 mod table;
 mod theme;
 pub mod update;
@@ -254,15 +256,16 @@ pub struct App {
     clipboard: Option<(String, Vec<u8>)>,
     /// Where the bytes should go once `Cmd::CopyPreset` answers.
     pending_copy: CopyTarget,
-    /// Whether the device window is open. It holds the pedal's own libraries -
-    /// impulse responses and favourite blocks - and nothing else; the global EQ
-    /// and the preferences have their own windows behind their own buttons,
-    /// because one window holding all four was a scroll, not a panel.
-    show_device: bool,
-    /// Whether the global EQ panel is open.
-    show_eq: bool,
-    /// Whether the preferences window is open.
-    show_preferences: bool,
+    /// Which page the window shows: the loaded preset, the library, or the
+    /// pedal itself.
+    page: shell::Page,
+    /// Which tab of the HX's page is open.
+    pedal_tab: pages::PedalTab,
+    /// Whether the sidebar is put away (Ctrl+B), giving the page the width.
+    sidebar_hidden: bool,
+    /// What the automatic backup holds and when it was read, for the
+    /// sidebar's foot and the Pedal page. Read with the mirror, from disk.
+    automatic_backup: Option<hx_usb::backup::Manifest>,
     /// When the EQ last wrote to the device. Dragging a band across the curve
     /// is sixty changes a second and the pedal does not want sixty writes; it
     /// wants to be heard moving, so the writes are paced rather than deferred.
@@ -492,10 +495,9 @@ pub struct App {
     /// The preset being renamed - its slot index and the draft name. Drives the
     /// inline field on both the loaded title and any right-clicked list row.
     renaming: Option<(i64, String)>,
+    /// What the worker has been doing. A debugging aid, not something to look
+    /// at while playing, so it lives on the Pedal page's Activity tab.
     log: Vec<String>,
-    /// The activity log is a debugging aid, not something to look at while
-    /// playing, so it stays out of the way until asked for.
-    show_activity: bool,
     status: String,
     /// A backup or restore in flight: what it is doing, and how far along.
     working: Option<(String, f32)>,
@@ -970,7 +972,7 @@ impl App {
 
     fn active_slot_label(&self, slot: i64) -> String {
         if self.pro_active() {
-            format!("{}", slot + 1)
+            pro::slot_label(slot.max(0) as usize)
         } else {
             hx_proto::PROFILES
                 .iter()
@@ -1024,9 +1026,10 @@ impl App {
             clipboard: None,
             pending_copy: CopyTarget::Clipboard,
             dirty: false,
-            show_device: false,
-            show_eq: false,
-            show_preferences: false,
+            page: shell::Page::Edit,
+            pedal_tab: pages::PedalTab::Backups,
+            sidebar_hidden: false,
+            automatic_backup: None,
             eq_wrote_at: None,
             global_eq: false,
             undo_depth: 0,
@@ -1124,7 +1127,6 @@ impl App {
             assignments: Vec::new(),
             renaming: None,
             log: Vec::new(),
-            show_activity: false,
             status: "Looking for a device…".into(),
             working: None,
             settings: Default::default(),
@@ -1216,6 +1218,9 @@ impl App {
                     // after this refreshes just the preset it changed.
                     if let Some(dir) = session::automatic_dir() {
                         let _ = self.to_device.send(Cmd::BackUp(dir));
+                    }
+                    if self.page == shell::Page::Pedal {
+                        self.read_pedal_page();
                     }
                 }
                 Ok(Evt::Disconnected) => {
@@ -1638,8 +1643,9 @@ impl App {
         let ctx = ui.ctx().clone();
         // Every token this frame reads the theme egui resolved for it.
         theme::follow(&ctx);
+        let tier = theme::Tier::now(&ctx);
 
-        let pro_active = self.pro.claims_ui() && self.connection != Connection::Online;
+        let pro_active = self.pro_active();
         if pro_active {
             // The shared library/cloud code keys discovery and publishing off
             // these public device facts. They describe the active adapter; no
@@ -1651,11 +1657,12 @@ impl App {
         } else {
             self.shortcuts(&ctx);
         }
+        self.frame_shortcuts(&ctx);
         self.observe_library_device();
         self.finish_extraction();
-        // Both arrive from a thread and neither belongs to any one panel: one
-        // is a person approving a sign-in somewhere else, the other is the site
-        // taking a tone.
+        // Both arrive from a thread and neither belongs to any one page: one
+        // is a person approving a sign-in somewhere else, the other is the
+        // site taking a tone.
         self.settle_signing_in();
         self.settle_publishing(&ctx);
         self.settle_cloud_search(&ctx);
@@ -1663,55 +1670,70 @@ impl App {
         if !pro_active {
             self.dropped_files(&ctx);
         }
-        if pro_active {
-            self.pro.top_bar(ui);
-            self.pro.status_bar(ui, &mut self.updates);
-            // This is the exact TonePush library surface used by HX devices:
-            // local Tones, ordered Setlists, and Cloud all occupy the same
-            // shared state and the same widgets.
-            self.library_strip(ui);
-            let sending = self.sending.as_ref().map(|sending| sending.name.clone());
-            if let Some(slot) = self.pro.preset_list(
-                ui,
-                &self.library_lookup,
-                &mut self.config,
-                sending.as_deref(),
-            ) {
-                if slot == usize::MAX {
-                    self.sending = None;
+
+        // The sidebar claims the left edge first, so it runs the window's
+        // full height; each page then lays out what is left.
+        self.sidebar(ui, tier);
+        match self.page {
+            shell::Page::Edit => {
+                self.deck(ui, tier);
+                if pro_active {
+                    self.pro.body(ui);
                 } else {
-                    self.finish_sending(slot as i64);
+                    self.signal_chain(ui);
+                    // The shelf sits beside the pedal being edited rather
+                    // than under it, so choosing a different model is plainly
+                    // a secondary action.
+                    self.shelf(ui);
+                    self.editor(ui);
+                    self.insert_picker(&ctx);
                 }
             }
-            self.pro.body(ui);
-            self.pro.windows(&ctx);
-            self.updates.acknowledge();
-            return;
+            shell::Page::Library => {
+                self.small_deck(ui);
+                self.library_page(ui, tier);
+            }
+            shell::Page::Pedal => {
+                self.small_deck(ui);
+                if pro_active {
+                    self.pro.pedal_page(ui);
+                } else {
+                    self.pedal_page(ui);
+                }
+            }
         }
-        self.top_bar(ui);
-        self.status_bar(ui);
-        // Before the preset list on purpose: an egui panel claims its edge
-        // from what is left, so the library has to be laid out first to run the
-        // full width of the window rather than stopping at the preset list.
-        self.library_strip(ui);
-        self.preset_list(ui);
-        self.activity(ui);
-        self.signal_chain(ui);
-        // The shelf sits beside the pedal being edited rather than under it,
-        // so choosing a different model is plainly a secondary action.
-        self.shelf(ui);
-        self.editor(ui);
-        self.insert_picker(&ctx);
-        self.device_window(&ctx);
-        self.eq_window(&ctx);
-        self.preferences_window(&ctx);
-        self.preview_window(&ctx);
+
+        // Questions and windows over whichever page is showing: each can be
+        // asked from the sidebar, the library or the pedal page alike.
+        if pro_active {
+            self.pro.windows(&ctx);
+        } else {
+            self.confirm_clear_window(&ctx);
+            self.preview_window(&ctx);
+        }
+        self.confirm_push_window(&ctx);
+        self.confirm_delete_window(&ctx);
+        self.name_clash_window(&ctx);
+        self.save_setlist_window(&ctx);
+        self.confirm_switch_window(&ctx);
         // Over everything: the one step the app cannot work without.
         self.onboarding_modal(&ctx);
         self.closing_window(&ctx);
         // The first frame is up: an update that relaunched into this version
         // has started, so its helper can stop standing ready to roll back.
         self.updates.acknowledge();
+    }
+
+    /// The window's own keys: Ctrl+B puts the sidebar away and brings it
+    /// back. Skipped while a field has the keyboard.
+    fn frame_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+        let toggle = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::B);
+        if ctx.input_mut(|input| input.consume_shortcut(&toggle)) {
+            self.sidebar_hidden = !self.sidebar_hidden;
+        }
     }
 
     /// Keep the window while the worker is talking to the pedal, and close
@@ -1764,68 +1786,6 @@ impl App {
                 }
             });
         });
-    }
-
-    /// One row: the preset you are editing, and what you can do to it.
-    ///
-    /// This had grown to two rows holding two menus, a connection state and a
-    /// log toggle - an inventory of the program rather than of the music. The
-    /// preset actions moved to the preset list they act on, the device moved
-    /// to a status bar at the bottom, and what is left is the preset itself.
-    fn top_bar(&mut self, root_ui: &mut egui::Ui) {
-        let ctx = root_ui.ctx().clone();
-        processor::top_bar(root_ui, "top", |ui| {
-            // What preset, which of its three states, and what you can
-            // do to it - in that order, because that is the order the
-            // question comes in. Tempo is not part of that question, so
-            // it is not in the middle of it.
-            ui.add_space(8.0);
-            self.preset_title(ui);
-            ui.add_space(12.0);
-            self.snapshot_bar(ui);
-            ui.add_space(12.0);
-            self.preset_tools(ui);
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-                self.tempo_control(ui);
-            });
-        });
-        self.confirm_clear_window(&ctx);
-    }
-
-    /// What you can do to the loaded preset, as drawn actions beside its name.
-    ///
-    /// Only the three that act on the preset as a whole live here. Copy, paste
-    /// and remove are on the things they act on - a block's own header, and a
-    /// preset's own right-click menu - because a Remove button sitting next to
-    /// Save, one that writes flash and cannot be undone, is a trap.
-    fn preset_tools(&mut self, ui: &mut egui::Ui) {
-        if self.preset_index < 0 {
-            return;
-        }
-        let live = matches!(self.connection, Connection::Online);
-        let actions = processor::preset_tools(
-            ui,
-            live,
-            self.undo_depth,
-            self.redo_depth,
-            self.dirty,
-            self.dirty,
-            "Save - no changes to save",
-        );
-        if actions.undo {
-            self.send(Cmd::Undo);
-        }
-        if actions.redo {
-            self.send(Cmd::Redo);
-        }
-        if actions.save {
-            self.send(Cmd::SavePreset);
-        }
-        if actions.discard {
-            self.discard_changes();
-        }
     }
 
     /// Emptying a slot writes flash and cannot be undone, so it asks. The
@@ -1891,134 +1851,6 @@ impl App {
         }
     }
 
-    /// The device, along the bottom, where a status bar belongs.
-    fn status_bar(&mut self, root_ui: &mut egui::Ui) {
-        processor::status_bar(root_ui, "status", |ui| {
-            ui.add_space(8.0);
-            let colour = match self.connection {
-                Connection::Online => egui::Color32::from_rgb(0x4c, 0xc0, 0x60),
-                _ => theme::muted(),
-            };
-            theme::status_dot(ui, colour);
-
-            // The device's name is the way in to its settings: that is
-            // where you would look for them.
-            let name = if self.device.is_empty() {
-                if self.connection == Connection::Connecting {
-                    "Looking for a pedal…".to_owned()
-                } else {
-                    "No device".to_owned()
-                }
-            } else {
-                self.device.clone()
-            };
-            // A framed button, not a bare label. This is the way in
-            // to everything about the device - its impulse responses,
-            // its favourite blocks, and now backing it up and putting a
-            // backup back - and a word you have to guess is clickable
-            // is a door with no handle.
-            if processor::device_button(
-                ui,
-                matches!(self.connection, Connection::Online),
-                RichText::new(name).strong(),
-                "everything about the pedal: backup and restore, \
-                             impulse responses, favourite blocks",
-            )
-            .clicked()
-            {
-                self.show_device = !self.show_device;
-                if self.show_device {
-                    self.send(Cmd::ReadSettings);
-                    self.send(Cmd::ListFavourites);
-                }
-            }
-            if !self.firmware.is_empty() {
-                // Same size as the device name, so the two share a
-                // baseline instead of the smaller one riding high.
-                ui.label(
-                    RichText::new(format!("firmware {}", self.firmware)).color(theme::muted()),
-                );
-            }
-            // The other two things that belong to the pedal rather than
-            // to a preset, each behind its own button rather than
-            // stacked under the impulse responses in one long scroll.
-            let live = matches!(self.connection, Connection::Online);
-            if theme::icon_button(ui, theme::Icon::Sliders, live)
-                .on_hover_text("Global EQ")
-                .clicked()
-            {
-                self.show_eq = !self.show_eq;
-                if self.show_eq {
-                    self.send(Cmd::ReadSettings);
-                }
-            }
-            if theme::icon_button(ui, theme::Icon::Gear, live)
-                .on_hover_text("Preferences")
-                .clicked()
-            {
-                self.show_preferences = !self.show_preferences;
-                if self.show_preferences {
-                    self.send(Cmd::ReadSettings);
-                }
-            }
-
-            // Connecting belongs with the device it connects to, not in
-            // the far corner: "no device" and the button that does
-            // something about it should be within a glance of each other.
-            match self.connection {
-                Connection::Online => {
-                    if ui
-                        .small_button("Disconnect")
-                        .on_hover_text("let the pedal go, so another editor can have it")
-                        .clicked()
-                    {
-                        self.status.clear();
-                        self.send(Cmd::Disconnect);
-                    }
-                }
-                Connection::Connecting => {
-                    theme::spinner(ui);
-                    ui.label(
-                        RichText::new("Looking for a connected pedal…")
-                            .small()
-                            .color(theme::muted()),
-                    );
-                }
-                Connection::Offline => {
-                    if ui
-                        .small_button("Connect")
-                        .on_hover_text("look for a pedal on USB")
-                        .clicked()
-                    {
-                        self.connection = Connection::Connecting;
-                        self.send(Cmd::Connect);
-                        self.pro.reconnect();
-                    }
-                }
-            }
-            // A backup reads all 126 presets. That is seconds rather
-            // than minutes now, but silence for seconds still reads as
-            // a window that has stopped answering.
-            if let Some((what, progress)) = self.working.clone() {
-                processor::operation_progress(ui, &what, progress);
-            }
-
-            // Laid out right to left, so what is added first sits
-            // furthest right: the version in the corner, where a
-            // version goes.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-                self.version_label(ui);
-                // Only failures reach here now, and a failure earns its
-                // separator. Silence is the healthy state.
-                if !self.status.is_empty() {
-                    ui.separator();
-                    ui.label(RichText::new(&self.status).small().color(theme::muted()));
-                }
-            });
-        });
-    }
-
     /// Take the site's answer if it has arrived, and say whether a tone is on
     /// it.
     ///
@@ -2067,17 +1899,6 @@ impl App {
             })
             .collect();
         self.cloud_check = Some(cloud::published(hashes));
-    }
-
-    /// Which TonePush this is, in the corner where a version belongs.
-    ///
-    /// It says nothing at all until there is something to say. When a newer
-    /// release exists the label picks up the accent and gains a clause, and a
-    /// copy that can replace itself gets one small button beside it - a modal
-    /// on startup would be an editor interrupting a person to talk about
-    /// itself.
-    fn version_label(&mut self, ui: &mut egui::Ui) {
-        self.updates.status_ui(ui);
     }
 
     /// The editing keys every editor answers to. Skipped while something has
@@ -2399,83 +2220,6 @@ impl App {
         }
     }
 
-    /// Back up and restore, on the preset list.
-    ///
-    /// These act on the **whole pedal**, which is why they are here and named
-    /// this way. What you can do to one preset - rename, copy, save to a file -
-    /// lives on that preset's own right-click menu, where an action cannot be
-    /// mistaken for one that touches all 126.
-    fn backup_actions(&mut self, ui: &mut egui::Ui) {
-        let live = matches!(self.connection, Connection::Online);
-        let actions = processor::backup_section(ui, live, live);
-        if actions.backup {
-            if let Some(dir) = rfd::FileDialog::new()
-                .set_title("Where to put the backup")
-                .set_file_name(format!("{}.hxbundle", sanitise(&self.device)))
-                .save_file()
-            {
-                self.note("backing up the pedal".to_owned());
-                self.send(Cmd::BackUp(dir));
-            }
-        }
-        if actions.restore {
-            if let Some(dir) = rfd::FileDialog::new()
-                .set_title("Choose a backup to restore")
-                .pick_folder()
-            {
-                match hx_usb::backup::open(&dir) {
-                    Ok(m) => {
-                        let kept = m.presets.iter().filter(|n| !n.is_empty()).count();
-                        self.note(format!("restoring {kept} presets from {}", dir.display()));
-                        self.send(Cmd::RestoreAll(dir));
-                    }
-                    Err(e) => self.note(format!("that is not a backup: {e}")),
-                }
-            }
-        }
-    }
-
-    /// The loaded preset, click-to-rename.
-    fn preset_title(&mut self, ui: &mut egui::Ui) {
-        if self.preset_index < 0 {
-            return;
-        }
-        if self.loading {
-            theme::spinner(ui);
-        } else if self
-            .busy_since
-            .is_some_and(|since| since.elapsed() > Duration::from_millis(150))
-        {
-            // An edit is on its way to the pedal. Only conversations that
-            // last are worth announcing - a flicker per knob tick is noise.
-            theme::spinner(ui).on_hover_text("writing to the pedal…");
-        }
-        if let Some(name) = processor::preset_title(
-            ui,
-            &self.active_slot_label(self.preset_index),
-            &self.preset_name,
-            self.dirty,
-            true,
-            &mut self.renaming_header,
-        ) {
-            self.send(Cmd::Rename {
-                index: self.preset_index,
-                name,
-            });
-        }
-    }
-
-    /// Laid out right to left, in the corner it sits in: Tap goes on first so
-    /// it ends up rightmost, and the reading lands to its left.
-    fn tempo_control(&mut self, ui: &mut egui::Ui) {
-        let Some(tempo) = self.tempo else { return };
-        if let Some(bpm) =
-            processor::tempo_control(ui, tempo, &mut self.tempo_draft, &mut self.taps)
-        {
-            self.set_tempo(bpm);
-        }
-    }
-
     /// Ask the pedal for a tempo, if it is one a preset can hold.
     ///
     /// The field takes whatever parses and a tap can come out anywhere from
@@ -2488,390 +2232,6 @@ impl App {
             return self.problem(session::tempo_refusal());
         }
         self.edit(Cmd::SetTempo(bpm));
-    }
-
-    /// Snapshots are three saved states of the same preset. The active one is
-    /// highlighted, clicking switches, and right-clicking renames - none of
-    /// which was discoverable when they were plain buttons.
-    fn snapshot_bar(&mut self, ui: &mut egui::Ui) {
-        if self.snapshots.is_empty() {
-            return;
-        }
-        let mut pick = None;
-        let mut rename = None;
-
-        for (i, name) in self.snapshots.iter().enumerate() {
-            match &mut self.snapshot_draft {
-                Some((editing, draft)) if *editing == i => {
-                    let edit = ui.add(egui::TextEdit::singleline(draft).desired_width(96.0));
-                    if !edit.has_focus() && !edit.lost_focus() {
-                        edit.request_focus();
-                    }
-                    if edit.lost_focus() {
-                        if ui.input(|inp| inp.key_pressed(egui::Key::Enter)) {
-                            rename = Some((i, draft.clone()));
-                        }
-                        self.snapshot_draft = None;
-                    }
-                }
-                _ => {
-                    let active = i == self.current_snapshot;
-                    let text = if active {
-                        RichText::new(name).color(theme::accent()).strong()
-                    } else {
-                        RichText::new(name).color(theme::muted())
-                    };
-                    let button = ui.selectable_label(active, text);
-                    if button.clicked() {
-                        pick = Some(i);
-                    }
-                    if button.secondary_clicked() {
-                        self.snapshot_draft = Some((i, name.clone()));
-                    }
-                    button.on_hover_text(
-                        "snapshots are saved states of this preset\nclick to switch, right-click to rename",
-                    );
-                }
-            }
-        }
-
-        if let Some(index) = pick {
-            self.current_snapshot = index;
-            self.send(Cmd::SelectSnapshot(index as i64));
-        }
-        if let Some((index, name)) = rename {
-            self.send(Cmd::RenameSnapshot { index, name });
-        }
-    }
-
-    fn preset_list(&mut self, root_ui: &mut egui::Ui) {
-        let ctx = root_ui.ctx().clone();
-        let mut capture = false;
-        let mut cancel_send = false;
-        let mut picked: Option<i64> = None;
-        processor::preset_panel(root_ui, "presets", |ui| {
-            ui.add_space(4.0);
-            // The actions sit on the list they act on, the way HX Edit
-            // puts COPY / PASTE / IMPORT / EXPORT on its preset header. A
-            // menu called "Preset" at the top of the window made you go
-            // looking somewhere else for something that belongs here.
-            ui.horizontal(|ui| {
-                // SETLIST, not PRESETS: what the pedal holds is a setlist,
-                // and it is the same word the device itself uses for a bank
-                // of 126. Calling the panel Presets was always a half-truth.
-                ui.label(RichText::new("SETLIST").small().color(theme::muted()))
-                    .on_hover_text("Use ↑/↓ to move through presets when no field is active");
-                // The same drawn star as the rows use. As a small text
-                // glyph it sat on its own baseline, a few pixels above the
-                // word beside it.
-                let (mark, colour) = if self.show_favorites_only {
-                    (theme::Icon::StarOn, theme::accent())
-                } else {
-                    (theme::Icon::Star, theme::muted())
-                };
-                if theme::small_icon_button(ui, mark, Some(colour))
-                    .on_hover_text("Show favourites only")
-                    .clicked()
-                {
-                    self.show_favorites_only = !self.show_favorites_only;
-                }
-                // The counterpart to the per-preset computer beside it:
-                // that one keeps a tone, this one keeps the whole pedal.
-                // Backup and Restore used to sit here too and do not
-                // belong: they act on the whole device, settings and
-                // impulse responses included, so they live behind the
-                // device's own button.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let live = matches!(self.connection, Connection::Online);
-                    if theme::place_enabled(ui, theme::Icon::Computer, theme::Sync::Absent, live)
-                        .on_hover_text("keep every preset on the pedal, in order, as a setlist")
-                        .clicked()
-                    {
-                        capture = true;
-                    }
-                });
-            });
-            // While a tone is on its way to the pedal, the list says so and
-            // says how to stop. Without this the highlighted rows would be
-            // a state with no explanation and no way out but a click.
-            if let Some(sending) = &self.sending {
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("Choose a slot for {}", sending.name))
-                            .small()
-                            .color(theme::accent()),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("Cancel").clicked() {
-                            cancel_send = true;
-                        }
-                    });
-                });
-            }
-            ui.separator();
-
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    // Show slot labels alone until the names arrive.
-                    let total = if self.presets.is_empty() {
-                        self.preset_count as i64
-                    } else {
-                        self.presets.len() as i64
-                    };
-                    let setlist = self.setlist;
-                    let mut load = None;
-                    let mut toggle = None;
-                    let mut rename_start = None;
-                    let mut menu_action = None;
-                    // Some(Some(name)) commits a rename, Some(None) cancels.
-                    let mut rename_result: Option<Option<(i64, String)>> = None;
-                    let mut shown_any = false;
-                    for index in 0..total {
-                        let fav = self.config.is_favorite(setlist, index);
-                        if self.show_favorites_only && !fav {
-                            continue;
-                        }
-                        shown_any = true;
-                        let name = self
-                            .presets
-                            .get(index as usize)
-                            .cloned()
-                            .unwrap_or_default();
-                        let selected = index == self.preset_index;
-                        let label = format!("{}  {}", self.active_slot_label(index), name);
-                        ui.horizontal(|ui| {
-                            // One height for the row, and every widget in it
-                            // centred on that: a text star, a drawn icon and
-                            // a label are three different heights, and left
-                            // to themselves they sat on three baselines.
-                            ui.set_min_height(20.0);
-                            // Two icons that belong together sit together;
-                            // the default gap made them look like controls
-                            // for different things.
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            // The star leads the row, clear of the scrollbar
-                            // that overlaps the right edge and eats the click.
-                            // The same kind of thing as the keep button
-                            // beside it: a drawn icon that lights under the
-                            // pointer. As a text glyph it did not read as
-                            // something you could press at all.
-                            let (mark, colour) = if fav {
-                                (theme::Icon::StarOn, theme::accent())
-                            } else {
-                                (theme::Icon::Star, theme::muted())
-                            };
-                            if theme::small_icon_button(ui, mark, Some(colour))
-                                .on_hover_text(if fav { "Remove favourite" } else { "Favourite" })
-                                .clicked()
-                            {
-                                toggle = Some(index);
-                            }
-                            // Keeping is a thing you do to *a* preset, so it
-                            // sits on the preset - beside its own star, not
-                            // in the list's title where it could only ever
-                            // mean the loaded one.
-                            //
-                            // And it is a dot rather than a button, because
-                            // the question a person actually has is "is this
-                            // one saved?", which a button can only answer by
-                            // disappearing. Three states in one place: not
-                            // in the library, in it and identical, in it
-                            // under this name and different.
-                            // This row *is* the pedal, so the pedal is not
-                            // one of the icons: what it shows is the two
-                            // other places a tone can be.
-                            let state = self.slot_sync(index);
-                            let held = theme::place(ui, theme::Icon::Computer, state);
-                            let held = match state {
-                                theme::Sync::Absent => {
-                                    held.on_hover_text("Not in your library. Keep it")
-                                }
-                                theme::Sync::Same => held.on_hover_text("In your library"),
-                                theme::Sync::Differs => held.on_hover_text(
-                                    "In your library under this name, but different. \
-                                         Update it from the pedal",
-                                ),
-                                theme::Sync::Working => held.on_hover_text("Saving…"),
-                                theme::Sync::Unknown => held,
-                            };
-                            if held.clicked() {
-                                match state {
-                                    theme::Sync::Absent => {
-                                        menu_action = Some((index, RowAction::Keep))
-                                    }
-                                    theme::Sync::Differs => {
-                                        menu_action = Some((index, RowAction::Update))
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            processor::preset_dirty_marker(ui, selected && self.dirty);
-                            let renaming_this = self.sending.is_none()
-                                && matches!(&self.renaming, Some((i, _)) if *i == index);
-                            if self.sending.is_some() {
-                                // Every row is a target now. An empty slot
-                                // is the safe one and reads as such; an
-                                // occupied one says what it would cost
-                                // before it costs it, which is the whole
-                                // reason for picking in the list rather
-                                // than in a dialog with a slot number in it.
-                                let empty = name.trim().is_empty();
-                                let text = if empty {
-                                    RichText::new(format!(
-                                        "{}  empty",
-                                        self.active_slot_label(index)
-                                    ))
-                                    .color(theme::accent())
-                                } else {
-                                    RichText::new(&label).color(theme::muted())
-                                };
-                                let target = ui.add(
-                                    egui::Button::new(())
-                                        .left_text(text)
-                                        .frame(false)
-                                        .min_size(egui::vec2(ui.available_width(), 18.0)),
-                                );
-                                let target = if empty {
-                                    target.on_hover_text("Put it here")
-                                } else {
-                                    target.on_hover_text(format!("Replace {name}"))
-                                };
-                                if target.clicked() {
-                                    picked = Some(index);
-                                }
-                            } else if renaming_this {
-                                if let Some((_, draft)) = self.renaming.as_mut() {
-                                    let edit = ui.add(
-                                        egui::TextEdit::singleline(draft)
-                                            .desired_width(180.0)
-                                            .hint_text("preset name"),
-                                    );
-                                    if !edit.has_focus() && !edit.lost_focus() {
-                                        edit.request_focus();
-                                    }
-                                    if edit.lost_focus() {
-                                        rename_result = Some(
-                                            ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                                .then(|| (index, draft.clone())),
-                                        );
-                                    }
-                                }
-                            } else {
-                                let text = if selected {
-                                    RichText::new(&label).color(theme::accent()).strong()
-                                } else {
-                                    RichText::new(&label)
-                                };
-                                // A plain, content-sized label: left-aligned
-                                // as before, never centered (no forced width).
-                                let row = ui.selectable_label(selected, text);
-                                if row.clicked() {
-                                    load = Some(index);
-                                }
-                                // A preset picked on the pedal itself should
-                                // be in view here too, without fighting
-                                // manual scrolling.
-                                if selected && self.reveal_preset {
-                                    row.scroll_to_me(Some(egui::Align::Center));
-                                    self.reveal_preset = false;
-                                }
-                                // Right-click a preset to rename it in place,
-                                // whether or not it is the one loaded.
-                                // Everything that acts on this one preset,
-                                // on the preset itself. The header's Back up
-                                // and Restore act on all 126, and keeping the
-                                // two apart is what stops either being
-                                // mistaken for the other.
-                                row.context_menu(|ui| {
-                                    if ui.button("Rename").clicked() {
-                                        rename_start = Some((index, name.clone()));
-                                        ui.close();
-                                    }
-                                    if ui.button("Copy").clicked() {
-                                        menu_action = Some((index, RowAction::Copy));
-                                        ui.close();
-                                    }
-                                    let can_paste = self.clipboard.is_some();
-                                    if ui
-                                        .add_enabled(can_paste, egui::Button::new("Paste"))
-                                        .clicked()
-                                    {
-                                        menu_action = Some((index, RowAction::Paste));
-                                        ui.close();
-                                    }
-                                    ui.separator();
-                                    if ui.button("Save to file…").clicked() {
-                                        menu_action = Some((index, RowAction::Export));
-                                        ui.close();
-                                    }
-                                    if ui.button("Load from file…").clicked() {
-                                        menu_action = Some((index, RowAction::Import));
-                                        ui.close();
-                                    }
-                                    if ui.button("Keep in library").clicked() {
-                                        menu_action = Some((index, RowAction::Keep));
-                                        ui.close();
-                                    }
-                                    ui.separator();
-                                    // Last, alone, below a line: it empties
-                                    // the slot in flash and undo does not
-                                    // reach it. It asks before it does.
-                                    if ui.button("Remove").clicked() {
-                                        menu_action = Some((index, RowAction::Remove));
-                                        ui.close();
-                                    }
-                                });
-                            }
-                        });
-                    }
-                    if self.show_favorites_only && !shown_any {
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new("No favorites yet. Tap a star to add one.")
-                                .small()
-                                .color(theme::muted()),
-                        );
-                    }
-                    if let Some(index) = toggle {
-                        self.config.toggle_favorite(setlist, index);
-                    }
-                    if let Some(index) = load {
-                        // Selecting a preset throws away whatever is in the
-                        // edit buffer. That is the device's rule, not ours,
-                        // and it costs a person their unsaved work in
-                        // silence - so it asks first.
-                        self.request_preset(index);
-                    }
-                    if let Some((index, action)) = menu_action {
-                        self.row_action(index, action);
-                    }
-                    if let Some(started) = rename_start {
-                        self.renaming = Some(started);
-                    }
-                    if let Some(result) = rename_result {
-                        self.renaming = None;
-                        if let Some((index, name)) = result {
-                            self.send(Cmd::Rename { index, name });
-                        }
-                    }
-                });
-        });
-
-        if capture {
-            self.send(Cmd::CaptureSetlist);
-        }
-        if cancel_send {
-            self.sending = None;
-        }
-        if let Some(slot) = picked {
-            self.finish_sending(slot);
-        }
-        // Escape gets out of picking the way it gets out of everything else.
-        if self.sending.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.sending = None;
-        }
     }
 
     /// Keep the loaded preset's document in the library, as the device's own
@@ -3218,6 +2578,8 @@ impl App {
                         if let Some(i) = self.lib_setlist {
                             self.select_setlist_entry(i);
                         }
+                        // The setlist just named is the thing to look at.
+                        self.go_to(shell::Page::Library);
                     }
                     Err(why) => {
                         self.note(why);
@@ -3292,6 +2654,7 @@ impl App {
     /// millisecond, and a mirror that is rebuilt entirely cannot drift, which
     /// a mirror patched in six places eventually would.
     fn refresh_mirror(&mut self) {
+        self.read_automatic_backup();
         let Some(dir) = session::automatic_dir() else {
             return;
         };
@@ -4374,248 +3737,6 @@ impl App {
         }
     }
 
-    /// The library's one-row heading: identity and views on the left, public
-    /// search fixed to the true centre, actions on the right. These are three
-    /// child UIs over one row so a growing window adds space around search
-    /// instead of dragging it away from the centre.
-    fn library_header(&mut self, ui: &mut egui::Ui) {
-        let available = ui.available_rect_before_wrap();
-        let row = egui::Rect::from_min_size(
-            available.min,
-            egui::vec2(available.width(), ui.spacing().interact_size.y),
-        );
-        let search_width = 260.0f32.min((row.width() - 420.0).max(140.0));
-        let search_rect =
-            egui::Rect::from_center_size(row.center(), egui::vec2(search_width, row.height()));
-        let left_rect = row.with_max_x(search_rect.min.x - 6.0);
-        let right_rect = row.with_min_x(search_rect.max.x + 6.0);
-
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .id_salt("library-header-left")
-                .max_rect(left_rect)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            |ui| {
-                ui.label(RichText::new("LIBRARY").small().color(theme::muted()));
-                ui.add_space(6.0);
-                // The selector, rather than tabs on the window: this is one
-                // library with local and public views of the same Tones.
-                let cloud_count = self.cloud_total.unwrap_or(self.cloud_entries.len());
-                for (view, label, count) in [
-                    (LibraryView::Tones, "Tones", self.scoped_tone_count()),
-                    (
-                        LibraryView::Setlists,
-                        "Setlists",
-                        self.scoped_setlist_count(),
-                    ),
-                    (LibraryView::Cloud, "Cloud", cloud_count),
-                ] {
-                    let on = self.lib_showing == view;
-                    if theme::shelf_pill(ui, &format!("{label} {count}"), on).clicked() {
-                        self.show_library_view(view);
-                    }
-                }
-            },
-        );
-
-        let showing = self.lib_showing;
-        let search = ui
-            .scope_builder(
-                egui::UiBuilder::new()
-                    .id_salt("library-header-search")
-                    .max_rect(search_rect)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                |ui| {
-                    let (query, hint) = match showing {
-                        LibraryView::Tones => (&mut self.tone_search, "Search this library…"),
-                        LibraryView::Setlists => {
-                            (&mut self.setlist_search, "Search these setlists…")
-                        }
-                        LibraryView::Cloud => (&mut self.library_search, "Search TonePush…"),
-                    };
-                    ui.add_sized(
-                        search_rect.size(),
-                        egui::TextEdit::singleline(query).hint_text(hint),
-                    )
-                },
-            )
-            .inner;
-        if search.changed() && showing == LibraryView::Cloud {
-            self.cloud_search_due =
-                Some(std::time::Instant::now() + std::time::Duration::from_millis(350));
-        }
-        if showing == LibraryView::Cloud
-            && search.has_focus()
-            && ui.input(|input| input.key_pressed(egui::Key::Enter))
-        {
-            self.cloud_search_due = Some(std::time::Instant::now());
-        }
-
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .id_salt("library-header-right")
-                .max_rect(right_rect)
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
-            |ui| {
-                // Refresh is the Cloud view's one extra action. Pedal scope
-                // and account identity stay put as the view changes.
-                if self.lib_showing == LibraryView::Cloud {
-                    if self.cloud_searching.is_some() || self.cloud_download.is_some() {
-                        theme::spinner(ui);
-                    }
-                    if self.auditioning.is_some() && ui.button("Done auditioning").clicked() {
-                        self.end_audition();
-                    }
-                    if ui
-                        .button("Refresh")
-                        .on_hover_text("fetch this search and order from TonePush again")
-                        .clicked()
-                    {
-                        self.refresh_cloud();
-                    }
-                }
-                self.account_control(ui);
-                let selected = self
-                    .library_device_filter
-                    .as_deref()
-                    .unwrap_or("All pedals")
-                    .to_owned();
-                let connected = self.library_connected_device.clone();
-                let mut changed = false;
-                egui::ComboBox::from_id_salt("library-device-scope")
-                    .selected_text(selected)
-                    .width(150.0)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(self.library_device_filter.is_none(), "All pedals")
-                            .clicked()
-                        {
-                            self.library_device_filter = None;
-                            changed = true;
-                        }
-                        if !connected.is_empty()
-                            && ui
-                                .selectable_label(
-                                    self.library_device_filter.as_deref()
-                                        == Some(connected.as_str()),
-                                    &connected,
-                                )
-                                .clicked()
-                        {
-                            self.library_device_filter = Some(connected.clone());
-                            changed = true;
-                        }
-                    });
-                if changed {
-                    self.lib_selected = None;
-                    self.lib_setlist = None;
-                    self.cloud_loaded_device = None;
-                    self.refresh_cloud();
-                }
-            },
-        );
-        ui.allocate_rect(row, egui::Sense::hover());
-    }
-
-    /// The computer's library, along the bottom of the window.
-    ///
-    /// Always open and the full width of the window, under the preset list as
-    /// well as under the chain - because the pedal is the top half and this is
-    /// the other half, not a drawer that belongs to the editor. Drag its edge
-    /// to give it more or less room; it does not close, the same way the pedal
-    /// does not close.
-    fn library_strip(&mut self, root_ui: &mut egui::Ui) {
-        let ctx = root_ui.ctx().clone();
-        egui::Panel::bottom("library")
-            .resizable(true)
-            .default_size(260.0)
-            .size_range(96.0..=680.0)
-            .show(root_ui, |ui| {
-                ui.add_space(4.0);
-                self.library_header(ui);
-                ui.separator();
-                match self.lib_showing {
-                    // Local and public Tones are the same screen shape: a
-                    // browse rail, rows, and an inspector. Keep that geometry
-                    // in one place; only the contents know who owns the data.
-                    view @ (LibraryView::Tones | LibraryView::Cloud) => {
-                        let cloud = view == LibraryView::Cloud;
-                        egui::Panel::left("tone-tags")
-                            .resizable(false)
-                            .default_size(150.0)
-                            .show(ui, |ui| {
-                                egui::ScrollArea::vertical()
-                                    .auto_shrink([false, false])
-                                    .id_salt("tone-tags-scroll")
-                                    .show(ui, |ui| {
-                                        if cloud {
-                                            self.cloud_tags_rail(ui);
-                                        } else {
-                                            self.library_tags_rail(ui);
-                                        }
-                                    });
-                            });
-                        egui::Panel::right("tone-inspector")
-                            .resizable(true)
-                            .default_size(310.0)
-                            .show(ui, |ui| {
-                                // Scrolled, not grown. Without this the
-                                // inspector's field stack decided the panel's
-                                // height, which is how the library ended up
-                                // taller than it was dragged to and sitting on
-                                // top of the status bar.
-                                egui::ScrollArea::vertical()
-                                    .auto_shrink([false, false])
-                                    .id_salt("tone-inspector-scroll")
-                                    .show(ui, |ui| {
-                                        if cloud {
-                                            self.cloud_inspector(ui);
-                                        } else {
-                                            self.library_inspector(ui);
-                                        }
-                                    });
-                            });
-                        egui::CentralPanel::default().show(ui, |ui| {
-                            if cloud {
-                                self.cloud_table(ui);
-                            } else {
-                                self.library_table(ui);
-                            }
-                        });
-                    }
-                    // Setlists on the left, what is in the chosen one on the
-                    // right, drawn by the same table the tones use. A setlist
-                    // is a list of tones, so it should look like one.
-                    LibraryView::Setlists => {
-                        egui::Panel::left("lib-setlists")
-                            .resizable(true)
-                            // A floor taken from the table it holds, not
-                            // guessed. Without one the panel could be dragged
-                            // - or restored from a remembered width - down to
-                            // about a hundred pixels, where the headers sat on
-                            // top of each other and "Put this setlist on the
-                            // pedal" wrapped a word to a line.
-                            .min_size(table::width_wanted(&setlist_rail_columns()))
-                            // Clamp remembered pre-split widths too. An old
-                            // full-width rail otherwise leaves the new slots
-                            // table with literally no central panel.
-                            .max_size(560.0)
-                            .default_size(340.0)
-                            // Not wrapped in a scroll area: the table does its
-                            // own scrolling, and a virtualised table inside a
-                            // scroll is two scrollbars fighting over one wheel.
-                            .show(ui, |ui| self.setlist_rail(ui));
-                        egui::CentralPanel::default().show(ui, |ui| self.setlist_slots(ui));
-                    }
-                }
-            });
-        self.confirm_push_window(&ctx);
-        self.confirm_delete_window(&ctx);
-        self.name_clash_window(&ctx);
-        self.save_setlist_window(&ctx);
-        self.confirm_switch_window(&ctx);
-    }
-
     /// Every setlist in the library, down the left, as the table everything
     /// else uses.
     ///
@@ -5416,54 +4537,6 @@ impl App {
             })
             .filter(|c| c.always() || !self.lib_hidden.contains(c))
             .collect()
-    }
-
-    /// Who this computer publishes as, and how it gets to be anybody.
-    ///
-    /// Sitting in the library's own header because that is where publishing
-    /// happens: signing in is not a preference, it is the thing that makes the
-    /// cloud icon do something.
-    fn account_control(&mut self, ui: &mut egui::Ui) {
-        if let Some(signing) = &self.signing_in {
-            ui.label(
-                RichText::new(format!("code {}", signing.code))
-                    .small()
-                    .color(theme::accent()),
-            )
-            .on_hover_text(format!(
-                "approve it at {}\nthen this signs itself in",
-                signing.url
-            ));
-            theme::spinner(ui);
-            if ui.small_button("Cancel").clicked() {
-                self.signing_in = None;
-            }
-            return;
-        }
-
-        match self.config.account.clone() {
-            Some(account) => {
-                ui.menu_button(RichText::new(account).small(), |ui| {
-                    if ui.button("Sign out").clicked() {
-                        self.config.sign_out();
-                        ui.close();
-                    }
-                    if ui.button("Open TonePush").clicked() {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(cloud::site()));
-                        ui.close();
-                    }
-                });
-            }
-            None => {
-                if ui
-                    .small_button("Sign in")
-                    .on_hover_text("to publish Songs and Tones")
-                    .clicked()
-                {
-                    self.start_signing_in(ui.ctx());
-                }
-            }
-        }
     }
 
     /// Ask the site for a pairing, open it, and watch for the answer.
@@ -6306,305 +5379,6 @@ impl App {
             return self.note(format!("could not write {}: {e}", details.display()));
         }
         self.note(format!("exported {} to {}", entry.name, dir.display()));
-    }
-
-    /// The impulse response slots, mirroring HX Edit's IRs tab.
-    /// Everything about the *device* rather than the preset.
-    ///
-    /// Impulse responses used to sit in a permanent side panel next to a
-    /// browser category also called IR, which invited exactly the question of
-    /// what the difference was. It is this: the **IR category** puts an IR
-    /// *block* in your signal chain, and that block plays whichever of the
-    /// device's IR slots you point it at. This window is those slots - the
-    /// device's library, shared by every preset. The list refreshes itself
-    /// whenever it changes, so there is nothing to press.
-    fn device_window(&mut self, ctx: &egui::Context) {
-        if !self.show_device {
-            return;
-        }
-        let mut open = true;
-        egui::Window::new("Device")
-            .open(&mut open)
-            .default_width(460.0)
-            .default_height(480.0)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                // Explanatory text has to be told how wide it may be, or egui
-                // lays it out on one line and the window grows to fit it.
-                ui.set_max_width(440.0);
-                ui.label(
-                    RichText::new(format!("{}  ·  firmware {}", self.device, self.firmware))
-                        .color(theme::muted()),
-                );
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .id_salt("device")
-                    .show(ui, |ui| {
-                        ui.add_space(8.0);
-                        self.backup_actions(ui);
-
-                        theme::section_break(ui);
-
-                        let free_ir = session::free_ir_slot(&self.irs);
-                        let mut import_ir = false;
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("IMPULSE RESPONSES")
-                                    .small()
-                                    .color(theme::muted()),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    import_ir = ui
-                                        .add_enabled(
-                                            free_ir.is_some(),
-                                            egui::Button::new("Import IR…"),
-                                        )
-                                        .on_disabled_hover_text("every IR slot is in use")
-                                        .clicked();
-                                },
-                            );
-                        });
-                        if import_ir {
-                            if let Some(file) = rfd::FileDialog::new()
-                                .add_filter("WAV", &["wav"])
-                                .pick_file()
-                            {
-                                self.load_ir(file);
-                            }
-                        }
-
-                        if self.irs.is_empty() {
-                            ui.label(RichText::new("No impulse responses").color(theme::muted()));
-                        }
-                        let irs = self.irs.clone();
-                        let mut ir_save = None;
-                        let mut ir_rename_start = None;
-                        let mut ir_rename: Option<Option<(i64, String)>> = None;
-                        for (slot, name) in &irs {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("{:>3}", slot + 1)).monospace());
-                                // Renaming happens in place: the name is the
-                                // only thing about a slot you can edit, so
-                                // clicking it is where you would try.
-                                match &mut self.renaming_ir {
-                                    Some((editing, draft)) if editing == slot => {
-                                        let field = ui.add(
-                                            egui::TextEdit::singleline(draft).desired_width(180.0),
-                                        );
-                                        field.request_focus();
-                                        if field.lost_focus() {
-                                            let done =
-                                                ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                            ir_rename = Some(done.then(|| (*slot, draft.clone())));
-                                        }
-                                    }
-                                    _ => {
-                                        if ui
-                                            .add(egui::Button::new(name).frame(false))
-                                            .on_hover_text("click to rename")
-                                            .clicked()
-                                        {
-                                            ir_rename_start = Some((*slot, name.clone()));
-                                        }
-                                    }
-                                }
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui.small_button("Clear").clicked() {
-                                            self.send(Cmd::ClearIr(*slot));
-                                        }
-                                        // An IR that only ever existed on the
-                                        // pedal can now come back off it.
-                                        if ui
-                                            .small_button("Save…")
-                                            .on_hover_text("write this IR out as a WAV")
-                                            .clicked()
-                                        {
-                                            ir_save = Some((*slot, name.clone()));
-                                        }
-                                    },
-                                );
-                            });
-                        }
-                        if let Some((slot, name)) = ir_save {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .set_file_name(format!("{}.wav", sanitise(&name)))
-                                .add_filter("WAV", &["wav"])
-                                .save_file()
-                            {
-                                self.send(Cmd::SaveIr { slot, file: path });
-                            }
-                        }
-                        if let Some(started) = ir_rename_start {
-                            self.renaming_ir = Some(started);
-                        }
-                        if let Some(result) = ir_rename {
-                            self.renaming_ir = None;
-                            if let Some((slot, name)) = result {
-                                self.send(Cmd::RenameIr { slot, name });
-                            }
-                        }
-
-                        theme::section_break(ui);
-
-                        let favourites = self.favourites.clone();
-                        let selected = self.selected_block();
-                        let free = (0..16).find(|i| !favourites.iter().any(|(n, _)| n == i));
-                        let add_label = selected.as_ref().map_or_else(
-                            || "Add current block".to_owned(),
-                            |(_, name)| format!("Add “{name}”"),
-                        );
-                        let mut add_favourite = false;
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("FAVORITE BLOCKS")
-                                    .small()
-                                    .color(theme::muted()),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    add_favourite = ui
-                                        .add_enabled(
-                                            selected.is_some() && free.is_some(),
-                                            egui::Button::new(add_label),
-                                        )
-                                        .on_disabled_hover_text(if selected.is_none() {
-                                            "select an effect block in the chain first"
-                                        } else {
-                                            "every favorite slot is in use"
-                                        })
-                                        .clicked();
-                                },
-                            );
-                        });
-                        if add_favourite {
-                            if let (Some((block, name)), Some(index)) = (selected, free) {
-                                self.send(Cmd::SaveFavourite { block, index, name });
-                            }
-                        }
-                        if favourites.is_empty() {
-                            ui.label(RichText::new("No favorite blocks").color(theme::muted()));
-                        }
-                        let mut forget = None;
-                        for (index, name) in &favourites {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("{:>3}", index + 1)).monospace());
-                                ui.label(name);
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui.small_button("Remove").clicked() {
-                                            forget = Some(*index);
-                                        }
-                                    },
-                                );
-                            });
-                        }
-                        if let Some(index) = forget {
-                            self.send(Cmd::ClearFavourite(index));
-                        }
-
-                        theme::section_break(ui);
-                        ui.label(RichText::new("DIAGNOSTICS").small().color(theme::muted()));
-                        ui.checkbox(&mut self.show_activity, "Device activity");
-                    });
-            });
-        self.show_device = open;
-    }
-
-    /// The device's preferences, behind the cogwheel.
-    ///
-    /// Everything global except the EQ, which is a shape rather than a list and
-    /// has a panel of its own.
-    fn preferences_window(&mut self, ctx: &egui::Context) {
-        if !self.show_preferences {
-            return;
-        }
-        let mut open = true;
-        egui::Window::new("Preferences")
-            .open(&mut open)
-            .default_width(420.0)
-            .default_height(440.0)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.set_max_width(400.0);
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        self.settings_list(ui, |group| group != "Global EQ")
-                    });
-            });
-        self.show_preferences = open;
-    }
-
-    /// The global EQ, drawn as what it does rather than as eleven numbers.
-    ///
-    /// Two cuts and three peaking bands, over a log frequency axis. The handles
-    /// are the controls: drag a band to move and lift it, scroll on one to
-    /// narrow it, drag a cut along the floor. The numbers underneath say
-    /// exactly where everything landed, because a curve is for aiming and a
-    /// number is for repeating.
-    fn eq_window(&mut self, ctx: &egui::Context) {
-        if !self.show_eq {
-            return;
-        }
-        let mut open = true;
-        egui::Window::new("Global EQ")
-            .open(&mut open)
-            .default_width(560.0)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                if !matches!(self.connection, Connection::Online) {
-                    ui.label(
-                        RichText::new("connect to read the device's EQ").color(theme::muted()),
-                    );
-                    return;
-                }
-                // Not "some settings have arrived" but "the EQ's own have":
-                // `eq_curve_now` substitutes sensible numbers for ids it has
-                // not seen, and a panel that can be dragged while it is showing
-                // substitutes would write them over the pedal's real ones.
-                if !self.eq_settings_known() {
-                    ui.label(RichText::new("reading the device's EQ…").color(theme::muted()));
-                    return;
-                }
-                // The bypass leads, because a curve you cannot hear is the
-                // first thing to check and the last thing anyone remembers.
-                let mut on = self.settings.get(&id::EQ_ON).is_some_and(|v| *v >= 0.5);
-                ui.horizontal(|ui| {
-                    if ui.add(theme::switch(&mut on)).changed() {
-                        self.settings.insert(id::EQ_ON, on as u8 as f32);
-                        self.send(Cmd::WriteSetting {
-                            id: id::EQ_ON,
-                            value: on as u8 as f32,
-                        });
-                    }
-                    ui.label(if on { "On" } else { "Off" });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .small_button("Flatten")
-                            .on_hover_text("every band back to no gain, both cuts off")
-                            .clicked()
-                        {
-                            self.flatten_eq();
-                        }
-                    });
-                });
-                ui.add_space(6.0);
-                self.eq_curve(ui, on);
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(6.0);
-                self.eq_controls(ui);
-            });
-        self.show_eq = open;
     }
 
     /// The numbers under the curve, one group per handle.
@@ -7837,33 +6611,6 @@ impl App {
     /// question as any other switch when that is not the preset loaded.
     fn load_preview(&mut self, preview: Preview) {
         self.on_preset(preview.dest, AfterSwitch::Tone(Box::new(preview)));
-    }
-
-    fn activity(&mut self, root_ui: &mut egui::Ui) {
-        if !self.show_activity {
-            return;
-        }
-        egui::Panel::bottom("activity")
-            .exact_size(100.0)
-            .show(root_ui, |ui| {
-                ui.label(
-                    RichText::new("DEVICE ACTIVITY")
-                        .small()
-                        .color(theme::muted()),
-                );
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for line in &self.log {
-                            ui.label(
-                                RichText::new(line)
-                                    .small()
-                                    .monospace()
-                                    .color(theme::muted()),
-                            );
-                        }
-                    });
-            });
     }
 
     /// The signal path, drawn the way it is wired.

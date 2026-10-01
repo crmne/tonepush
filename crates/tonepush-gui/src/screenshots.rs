@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use egui_kittest::Harness;
 
-use crate::{session, theme, App, Connection};
+use crate::{session, shell, theme, App, Connection};
 
 /// The sizes the design was drawn at: the smallest supported window, the
 /// reference, and a large display at a scale of one.
@@ -46,14 +46,35 @@ enum Scene {
     NoDevice,
     /// The HX Stomp with a setlist about to be written, asking first.
     SetlistConfirm,
+    /// The library's tones, one of them on its way to a slot.
+    HxLibrary,
+    /// The HX Stomp's own page, on its backups.
+    HxPedal,
+    /// The StompStation PRO's own page, on its backups.
+    ProPedal,
+    /// The HX Stomp with TonePush's settings open.
+    Settings,
+    /// The HX Stomp's page, on its impulse responses.
+    HxPedalIrs,
+    /// The HX Stomp's page, on its global EQ.
+    HxPedalEq,
+    /// The HX Stomp's page, on its settings.
+    HxPedalSettings,
 }
 
 impl Scene {
-    const ALL: [Scene; 4] = [
+    const ALL: [Scene; 11] = [
         Scene::HxEdit,
         Scene::ProEdit,
         Scene::NoDevice,
         Scene::SetlistConfirm,
+        Scene::HxLibrary,
+        Scene::HxPedal,
+        Scene::ProPedal,
+        Scene::Settings,
+        Scene::HxPedalIrs,
+        Scene::HxPedalEq,
+        Scene::HxPedalSettings,
     ];
 
     fn name(self) -> &'static str {
@@ -62,6 +83,13 @@ impl Scene {
             Scene::ProEdit => "pro-edit",
             Scene::NoDevice => "no-device",
             Scene::SetlistConfirm => "setlist-confirm",
+            Scene::HxLibrary => "hx-library",
+            Scene::HxPedal => "hx-pedal",
+            Scene::ProPedal => "pro-pedal",
+            Scene::Settings => "settings",
+            Scene::HxPedalIrs => "hx-pedal-irs",
+            Scene::HxPedalEq => "hx-pedal-eq",
+            Scene::HxPedalSettings => "hx-pedal-settings",
         }
     }
 
@@ -71,11 +99,46 @@ impl Scene {
         app.cloud_check = None;
         library(app);
         match self {
-            Scene::HxEdit => hx_stomp(app),
-            Scene::ProEdit => app.pro.show_demo(),
+            Scene::HxEdit | Scene::Settings => hx_stomp(app),
+            Scene::ProEdit => pro(app),
             Scene::SetlistConfirm => {
                 hx_stomp(app);
+                app.page = shell::Page::Library;
+                app.lib_showing = crate::LibraryView::Setlists;
+                app.select_setlist_entry(0);
                 app.confirm_push = Some(0);
+            }
+            Scene::HxLibrary => {
+                hx_stomp(app);
+                app.page = shell::Page::Library;
+                let sending = app
+                    .lib_entries
+                    .iter()
+                    .position(|entry| entry.name == "Slapback Twang")
+                    .expect("the library holds Slapback Twang");
+                app.select_lib_entry(sending);
+                app.sending = Some(crate::Sending {
+                    hash: app.lib_entries[sending].hash.clone(),
+                    name: app.lib_entries[sending].name.clone(),
+                });
+            }
+            Scene::HxPedal => {
+                hx_stomp(app);
+                app.page = shell::Page::Pedal;
+            }
+            Scene::HxPedalIrs | Scene::HxPedalEq | Scene::HxPedalSettings => {
+                hx_stomp(app);
+                app.page = shell::Page::Pedal;
+                app.pedal_tab = match self {
+                    Scene::HxPedalIrs => crate::pages::PedalTab::Irs,
+                    Scene::HxPedalEq => crate::pages::PedalTab::Eq,
+                    _ => crate::pages::PedalTab::Settings,
+                };
+            }
+            Scene::ProPedal => {
+                pro(app);
+                app.page = shell::Page::Pedal;
+                app.pro.demo_page();
             }
             Scene::NoDevice => {
                 app.connection = Connection::Offline;
@@ -85,6 +148,35 @@ impl Scene {
             }
         }
     }
+}
+
+/// Today at 14:02, when every invented backup was taken.
+fn two_minutes_past_two() -> std::time::SystemTime {
+    jiff::Zoned::now()
+        .with()
+        .hour(14)
+        .minute(2)
+        .second(0)
+        .build()
+        .map(|time| std::time::SystemTime::from(time.timestamp()))
+        .expect("today at 14:02 is a time")
+}
+
+/// The StompStation PRO, with the library holding three of its presets.
+fn pro(app: &mut App) {
+    app.pro.show_demo();
+    app.library_connected_device = "StompStation PRO".to_owned();
+    app.library_device_filter = Some("StompStation PRO".to_owned());
+    let marks = [(1, "Glass Wall"), (7, "Velvet Drive"), (8, "Shimmer Lead")]
+        .into_iter()
+        .filter_map(|(slot, name)| {
+            app.lib_entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| (slot, entry.hash.clone()))
+        })
+        .collect();
+    app.pro.demo_library_marks(marks);
 }
 
 /// The app for one scene, built on the harness's own context the first time
@@ -106,6 +198,7 @@ impl Demo {
             let (_silent, from_device) = mpsc::channel();
             let mut app = App::new(ui.ctx(), to_device, from_device);
             theme::choose(ui.ctx(), self.appearance);
+            app.config.appearance = self.appearance;
             self.scene.stage(&mut app);
             self.app = Some(app);
             return;
@@ -115,6 +208,9 @@ impl Demo {
         let window = ui.ctx().content_rect();
         let mut root = ui.new_child(egui::UiBuilder::new().max_rect(window));
         root.set_clip_rect(window);
+        if self.scene == Scene::Settings {
+            egui::Popup::open_id(ui.ctx(), shell::settings_popup());
+        }
         app.draw(&mut root);
     }
 }
@@ -312,6 +408,7 @@ fn library(app: &mut App) {
             }
         })
         .collect();
+    app.library_lookup.indexed = app.lib_entries.iter().map(|e| e.hash.clone()).collect();
     app.library_lookup.reindex(&app.lib_entries);
 
     let slot = |name: &str| crate::library::Slot {
@@ -426,6 +523,9 @@ fn hx_stomp(app: &mut App) {
     app.connection = Connection::Online;
     app.status.clear();
     app.device = "HX Stomp".to_owned();
+    // The library is already scoped to the pedal, as it is once one connects.
+    app.library_connected_device = "HX Stomp".to_owned();
+    app.library_device_filter = Some("HX Stomp".to_owned());
     app.firmware = "3.80".to_owned();
     app.preset_count = 126;
     app.presets = (0..126)
@@ -450,6 +550,85 @@ fn hx_stomp(app: &mut App) {
     app.current_snapshot = 1;
     app.dirty = true;
     app.undo_depth = 3;
+    // What the pedal holds, as the automatic backup would say: the slots the
+    // library holds unchanged, and one it holds in another version.
+    for (index, name) in app.presets.clone().iter().enumerate() {
+        if let Some(entry) = app.lib_entries.iter().find(|entry| &entry.name == name) {
+            let hash = if name == "Tape Echo Clean" {
+                "an earlier version".to_owned()
+            } else {
+                entry.hash.clone()
+            };
+            app.mirror.insert(index as i64, hash);
+        }
+    }
+    let captured = two_minutes_past_two()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    app.automatic_backup = Some(hx_usb::backup::Manifest {
+        version: 1,
+        device: "HX Stomp".to_owned(),
+        firmware: "3.80".to_owned(),
+        captured,
+        setlists: vec!["SETLIST 1".to_owned()],
+        presets: app.presets.clone(),
+        more_setlists: Vec::new(),
+        irs: [
+            ("0", "Silver Bell 2x12"),
+            ("1", "Field Coil 1x12"),
+            ("2", "Blue Room 4x12"),
+            ("3", "Lido Rooftop Hall"),
+        ]
+        .into_iter()
+        .map(|(slot, name)| (slot.to_owned(), name.to_owned()))
+        .collect(),
+        globals: 154,
+    });
+    app.irs = vec![
+        (0, "Silver Bell 2x12".to_owned()),
+        (1, "Field Coil 1x12".to_owned()),
+        (2, "Blue Room 4x12".to_owned()),
+        (3, "Lido Rooftop Hall".to_owned()),
+    ];
+    app.favourites = vec![
+        (0, "Minotaur".to_owned()),
+        (1, "Plateaux".to_owned()),
+        (2, "Transistor Tape".to_owned()),
+    ];
+    // Every setting at a plain value, and the global EQ shaped.
+    use hx_proto::settings::{Kind as Setting, SETTINGS};
+    app.settings = SETTINGS
+        .iter()
+        .map(|setting| {
+            let value = match &setting.kind {
+                Setting::Switch(..) => 1.0,
+                Setting::Choice(_) => 0.0,
+                Setting::Number { min, max, .. } => (min + max) / 2.0,
+            };
+            (setting.id, value)
+        })
+        .collect();
+    for (id, value) in [
+        (crate::id::EQ_ON, 1.0),
+        (crate::id::LOW_CUT, 80.0),
+        (crate::id::LOW_FREQ, 120.0),
+        (crate::id::LOW_Q, 0.7),
+        (crate::id::LOW_GAIN, 2.5),
+        (crate::id::MID_FREQ, 800.0),
+        (crate::id::MID_Q, 1.0),
+        (crate::id::MID_GAIN, -2.0),
+        (crate::id::HIGH_FREQ, 4000.0),
+        (crate::id::HIGH_Q, 0.7),
+        (crate::id::HIGH_GAIN, 1.5),
+        (crate::id::HIGH_CUT, 12000.0),
+    ] {
+        app.settings.insert(id, value);
+    }
+    app.log = vec![
+        "connected to HX Stomp, firmware 3.80".to_owned(),
+        "backed up 126 presets, 154 settings and 4 impulse responses".to_owned(),
+        "loaded 01B Plexi Crunch".to_owned(),
+    ];
 
     let Some(catalog) = app.catalog.as_ref() else {
         // Without HX Edit's data there are no model names to show.

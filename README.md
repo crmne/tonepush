@@ -107,13 +107,13 @@ Ubuntu: `libxkbcommon-dev libwayland-dev libgl1-mesa-dev`.
 ### Updates
 
 TonePush asks GitHub (`api.github.com`) once a day whether a newer release
-exists, and nothing else leaves your machine for it. When one does, the version
-in the status bar says so. The macOS app from the DMG and the editor unpacked
-from a Linux or Windows archive can update themselves: click **Update**, then
-**Restart to update**. The download is checked against TonePush's release
+exists, and nothing else leaves your machine for it. When one does, the foot of
+the sidebar says so, and the settings beside it make the offer. The macOS app
+from the DMG and the editor unpacked from a Linux or Windows archive can update
+themselves: click **Update to** the new version, then **Restart to update**. The download is checked against TonePush's release
 signature first, and if the new version does not start the old one comes back.
 Copies installed with Homebrew, the AUR or a .deb/.rpm are left to that package
-manager, and the status bar says which. An AppImage is replaced by downloading
+manager, and the settings say which. An AppImage is replaced by downloading
 the new one.
 
 ### HX model names and pictures
@@ -205,11 +205,11 @@ That gives a loop worth naming:
 1. **Make a tone on the pedal.** Swap blocks, turn knobs, reorder the chain. The
    editor writes the pedal's scratch buffer, so everything is audible at once
    and nothing is permanent until you save.
-2. **Keep the ones worth keeping.** Each preset in the list has a button that
-   copies it into your library, whole: the device's own document, so the
-   snapshots and the routing come too.
+2. **Keep the ones worth keeping.** Each preset's menu in the list keeps it in
+   your library, whole: the device's own document, so the snapshots and the
+   routing come too.
 3. **Build a setlist.** Get the pedal holding the presets you want, in the order
-   you want, then click the computer icon in the SETLIST header. That records
+   you want, then click the computer icon at the top of the preset list. That records
    every slot the connected pedal provides and what is in it.
 4. **Play it back.** One button puts a setlist onto the pedal again, or you can
    send a single preset out of one into the slot it came from.

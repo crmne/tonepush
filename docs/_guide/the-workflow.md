@@ -24,13 +24,13 @@ You do not have to save to keep a tone, though. That is what the next step is fo
 
 ### 2. Keep the ones worth keeping
 
-Every preset in the list has a button beside its star that copies it into your library. What goes in is the device's own document, byte for byte, so the snapshots and the routing come with it. Nothing is rebuilt from what the editor happens to show, which means nothing is quietly dropped.
+Right-click a preset in the list and choose **Keep in library** to copy it into your library. What goes in is the device's own document, byte for byte, so the snapshots and the routing come with it. Nothing is rebuilt from what the editor happens to show, which means nothing is quietly dropped. A check beside a preset means your library holds it unchanged; an orange compare mark means your library holds a different version under that name, and the same menu offers **Update in library**.
 
 Tones in your library are ordinary files in an ordinary folder. You can back them up, sync them, or read them with something else.
 
 ### 3. Build a setlist
 
-Get the pedal holding the presets you want, in the order you want them, then open the Setlists half of the library and choose **Capture the pedal**. That records every slot and what is in it.
+Get the pedal holding the presets you want, in the order you want them, then click the computer icon at the top of the preset list (**Keep every preset on the pedal, in order, as a setlist**). That records every slot and what is in it; name it, and it opens on the Library page.
 
 Give it the name of the gig, the venue, the date. You will want them later.
 

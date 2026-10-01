@@ -57,17 +57,28 @@ Plug in the pedal and start the editor:
 tonepush-gui
 ```
 
-It connects on launch. The signal chain runs across the top, presets down the left, and the selected block's knobs fill the middle, with the model browser on the right.
+It connects on launch. The sidebar on the left is the pedal: its name and
+firmware at the top, then its presets in its own banks. Across the top runs the
+loaded preset, with what state it is in, its snapshots, the tempo, undo, redo
+and Save. The switch at the top of the sidebar turns the rest of the window
+into one of three pages:
 
-That layout, and the local Tones / Setlists / Cloud library below it, is the
-same for both families. The available blocks and operations follow the pedal's
-capabilities. The PRO does not need HX Edit resources; it supplies its names,
+- **Edit**, the loaded preset: the signal chain across the top, the selected
+  block's knobs in the middle and the model browser on the right.
+- **Library**, your tones, setlists and the TonePush Cloud.
+- **Pedal**, the pedal itself: its backups, impulse responses, favourite
+  blocks, global EQ, settings and an activity log.
+
+Ctrl+B (Cmd+B on macOS) hides the sidebar when the page needs the width.
+
+That layout is the same for both families. The available blocks and operations
+follow the pedal's capabilities. The PRO does not need HX Edit resources; it supplies its names,
 ranges, choices, NAM models, and IR names through its own schema. See the
 [StompStation PRO guide](/stompstation-pro/) for its verified rollback guard.
 
 A few things worth knowing on day one:
 
-- **Edits are live but not saved.** The device edits a scratch copy: a changed parameter is audible immediately but vanishes on reload unless you press Save. The amber dot next to Save tells you when there is something to save.
+- **Edits are live but not saved.** The device edits a scratch copy: a changed parameter is audible immediately but vanishes on reload unless you press Save. When there is something to save, the line under the preset's name says **Changes not saved**, the preset's row has an orange dot, and Save turns amber.
 - **Add a block** by clicking any gap in the wire, then picking a pedal. Type to search; the picker opens ready for it.
 - **Make a parallel branch** by dragging a block onto the dashed branch below the line, or by clicking the + on it.
 - **Move the fork and merge** by dragging their dots along the line.

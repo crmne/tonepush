@@ -1504,6 +1504,90 @@ pub fn tabs(ui: &mut Ui, tabs: &[(&str, Option<String>)], selected: usize) -> Op
 }
 
 // ---------------------------------------------------------------------------
+// Toggles
+
+/// A two-state toggle, 34 by 20 points: a pill filled in `colour` with the
+/// knob at the right when on, raised with the knob at the left when off.
+pub fn toggle(ui: &mut Ui, on: &mut bool, colour: Color32) -> Response {
+    let (rect, mut response) = ui.allocate_exact_size(Vec2::new(34.0, 20.0), Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let y = rect.center().y;
+        if *on {
+            painter.rect_filled(rect, CornerRadius::same(10), colour);
+            painter.circle_filled(Pos2::new(rect.right() - 10.0, y), 7.0, Color32::WHITE);
+        } else {
+            painter.rect(
+                rect,
+                CornerRadius::same(10),
+                raised(),
+                Stroke::new(1.0, line_strong()),
+                egui::StrokeKind::Inside,
+            );
+            painter.circle_filled(Pos2::new(rect.left() + 10.0, y), 7.0, muted());
+        }
+    }
+    response
+}
+
+// ---------------------------------------------------------------------------
+// Fields
+
+/// A search field, 30 points: a sunken well with a magnifier, the hint in the
+/// faint ink until something is typed, and an amber ring while it has the
+/// keyboard. Returns the text edit's response.
+pub fn search_field(ui: &mut Ui, id: &str, query: &mut String, hint: &str, width: f32) -> Response {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
+    let id = ui.id().with(id);
+    let focused = ui.memory(|memory| memory.has_focus(id));
+    let well = if is_dark() { bg_deep() } else { panel() };
+    if focused {
+        ui.painter().rect_filled(
+            rect.expand(3.0),
+            CornerRadius::same(RADIUS_CONTROL + 3),
+            accent_soft(),
+        );
+    }
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(RADIUS_CONTROL),
+        well,
+        Stroke::new(1.0, if focused { accent_line() } else { line() }),
+        egui::StrokeKind::Inside,
+    );
+    paint_icon(
+        ui,
+        Icon::Search,
+        Pos2::new(rect.left() + 10.0 + 7.5, rect.center().y),
+        15.0,
+        muted(),
+    );
+    let inner = Rect::from_min_max(
+        Pos2::new(rect.left() + 10.0 + 15.0 + 8.0, rect.top()),
+        Pos2::new(rect.right() - 8.0, rect.bottom()),
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    child.add(
+        egui::TextEdit::singleline(query)
+            .id(id)
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .font(regular(BODY))
+            .text_color(text())
+            .hint_text(egui::RichText::new(hint).color(faint()).font(regular(BODY)))
+            .desired_width(inner.width()),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Knobs and switches
 
 /// How a knob responds to a vertical drag: 200 points sweeps the range, and

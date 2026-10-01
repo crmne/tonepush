@@ -99,19 +99,19 @@ which covers offline builds from the vendored-dependencies archive.
 ## Updating
 
 TonePush asks GitHub once a day whether a newer version exists; nothing else
-is sent. When there is one, the version in the bottom-right corner turns amber
-and says so.
+is sent. When there is one, the foot of the sidebar says so in amber (for
+example **0.8.0 is out**). Click it, or the settings button beside it, for the
+offer.
 
 - **The macOS app from the DMG, and the Windows and Linux archives:** click
-  **Update** next to it. TonePush downloads the new version, checks it against
+  **Update to 0.8.0**. TonePush downloads the new version, checks it against
   its release signature, and offers **Restart to update**. It closes, lets the
   pedal go and opens the new version; if that does not start, the previous one
   comes back. From an archive only the editor updates itself: keep
   `tonepush-portable.txt` next to `tonepush-gui`, and replace the `tonepush`
   command-line tool from a new archive when you want it newer too.
 - **Homebrew, the AUR, .deb or .rpm:** update through that package manager
-  (`brew upgrade`, your AUR helper, apt or dnf). Hovering the version says
-  which.
+  (`brew upgrade`, your AUR helper, apt or dnf). The settings say which.
 
 ## After installing
 

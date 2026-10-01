@@ -70,7 +70,11 @@ fn main() -> eframe::Result<()> {
     let ran = eframe::run_native(
         "TonePush",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 640.0]),
+            // The reference size of the 2026-10-01 design; 1024 x 640 is the
+            // smallest it was drawn for.
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([1280.0, 760.0])
+                .with_min_inner_size([1024.0, 640.0]),
             ..Default::default()
         },
         Box::new(move |cc| {
