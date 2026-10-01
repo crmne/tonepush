@@ -22,6 +22,8 @@ pub enum Step {
         block: i64,
         model: u32,
         name: String,
+        /// The cab riding along with an amp, making the block an Amp+Cab.
+        cab: Option<Cab>,
     },
     Param {
         block: i64,
@@ -34,6 +36,13 @@ pub enum Step {
         block: i64,
         enabled: bool,
     },
+}
+
+/// The cab half of an Amp+Cab block.
+#[derive(Debug, PartialEq)]
+pub struct Cab {
+    pub model: u32,
+    pub name: String,
 }
 
 /// What a file would do, before anything is sent.
@@ -103,6 +112,7 @@ pub fn plan_for(
         let Some(blocks) = tone.get(&name).and_then(|d| d.as_object()) else {
             break;
         };
+        let mut claimed_cabs = std::collections::BTreeSet::new();
         for (key, node) in blocks {
             // split, join, inputs and outputs are the wiring, not the tone, and
             // they are not addressable as a block.
@@ -112,9 +122,22 @@ pub fn plan_for(
             else {
                 continue;
             };
+            // An Amp+Cab is one slot on the device and two nodes in the file:
+            // the amp as `blockN` and its cab as `cabN` beside it. Leaving the
+            // cab out put the amp in alone, its cab gone without a word.
+            let cab = cab_of(blocks, node);
+            if let Ok(Some((cab_key, _))) = &cab {
+                claimed_cabs.insert(cab_key.to_owned());
+            }
             match slot_of(node, layout, dsp_index, numbered) {
-                Ok(position) => read_block(&mut plan, position, node, catalog, Bypass::Has),
+                Ok(position) => read_block(&mut plan, position, node, cab, catalog, Bypass::Has),
                 Err(why) => plan.skipped.push(format!("{name}/{key}: {why}")),
+            }
+        }
+        for key in blocks.keys().filter(|key| is_cab_key(key)) {
+            if !claimed_cabs.contains(key.as_str()) {
+                plan.skipped
+                    .push(format!("{name}/{key}: no block in the file names this cab"));
             }
         }
 
@@ -143,7 +166,14 @@ pub fn plan_for(
             }
             match slot {
                 Some(slot) => {
-                    read_block(&mut plan, slot as i64, node, catalog, Bypass::None);
+                    read_block(
+                        &mut plan,
+                        slot as i64,
+                        node,
+                        Ok(None),
+                        catalog,
+                        Bypass::None,
+                    );
                 }
                 // Without a layout there is no way to know which slot holds it,
                 // and on a chain that does not divide there is nothing to hold.
@@ -223,10 +253,91 @@ enum Bypass {
     None,
 }
 
+/// A file's `cabN` node, as opposed to a block, split or join.
+fn is_cab_key(key: &str) -> bool {
+    key.strip_prefix("cab")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The cab node riding with a block, said one of two ways, as the document
+/// builder reads it (`hx_catalog::slots_from_hlx`): HX Edit has the amp name
+/// its cab, `"@cab": "cab0"`; our own files have the cab name the amp's slot.
+fn cab_of<'a>(
+    blocks: &'a serde_json::Map<String, serde_json::Value>,
+    node: &serde_json::Value,
+) -> Result<Option<(&'a str, &'a serde_json::Value)>, String> {
+    if let Some(named) = node.get("@cab") {
+        let key = named
+            .as_str()
+            .ok_or_else(|| "@cab is not the name of a cab".to_owned())?;
+        return blocks
+            .get_key_value(key)
+            .map(|(key, cab)| Some((key.as_str(), cab)))
+            .ok_or_else(|| format!("its cab {key} is not in the file"));
+    }
+    let Some(slot) = node.get("@slot").and_then(serde_json::Value::as_u64) else {
+        return Ok(None);
+    };
+    Ok(blocks
+        .iter()
+        .filter(|(key, _)| is_cab_key(key))
+        .find(|(_, cab)| cab.get("@slot").and_then(serde_json::Value::as_u64) == Some(slot))
+        .map(|(key, cab)| (key.as_str(), cab)))
+}
+
+/// The cab to pair with the amp called `amp`, or `None` with the reason
+/// recorded. Its own parameters are reported rather than applied: the
+/// device takes a cab as part of the amp's set-model, and there is no
+/// verified message for setting a paired cab's values, so it starts from
+/// its defaults.
+fn read_cab(
+    plan: &mut Plan,
+    amp: &str,
+    node: &serde_json::Value,
+    catalog: &Catalog,
+) -> Option<Cab> {
+    let Some(symbol) = node.get("@model").and_then(|v| v.as_str()) else {
+        plan.skipped.push(format!(
+            "{amp}: its cab has no valid @model; placed without it"
+        ));
+        return None;
+    };
+    let Some(model) = hx_catalog::resolve(catalog, symbol, node) else {
+        plan.skipped.push(format!(
+            "{amp}: unknown cab model {symbol}; placed without it"
+        ));
+        return None;
+    };
+    let name = catalog
+        .model_number(model.number)
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| symbol.to_owned());
+    // Named from the model's own parameter list rather than by skipping `@`
+    // keys: a cab's parameters are `@`-prefixed themselves (`@mic`).
+    let settings: Vec<String> = catalog
+        .model_number(model.number)
+        .into_iter()
+        .flat_map(|m| &m.params)
+        .filter(|param| node.get(param.id.as_str()).is_some())
+        .map(|param| param.name.clone())
+        .collect();
+    if !settings.is_empty() {
+        plan.skipped.push(format!(
+            "{amp}: the {name} cab's own settings ({}) are not applied; it starts from its defaults",
+            settings.join(", ")
+        ));
+    }
+    Some(Cab {
+        model: model.number,
+        name,
+    })
+}
+
 fn read_block(
     plan: &mut Plan,
     position: i64,
     block: &serde_json::Value,
+    cab: Result<Option<(&str, &serde_json::Value)>, String>,
     catalog: &Catalog,
     bypass: Bypass,
 ) {
@@ -258,10 +369,20 @@ fn read_block(
         .model_number(model.number)
         .map(|m| m.name.clone())
         .unwrap_or_else(|| symbol.to_owned());
+    let cab = match cab {
+        Ok(Some((_, node))) => read_cab(plan, &name, node, catalog),
+        Ok(None) => None,
+        Err(why) => {
+            plan.skipped
+                .push(format!("{name}: {why}; placed without its cab"));
+            None
+        }
+    };
     plan.steps.push(Step::Model {
         block: position,
         model: model.number,
         name: name.clone(),
+        cab,
     });
 
     for (key, value) in block.as_object().into_iter().flatten() {
@@ -392,7 +513,8 @@ mod tests {
         assert!(plan.steps.contains(&Step::Model {
             block: 2,
             model: 101,
-            name: "Scream 808".into()
+            name: "Scream 808".into(),
+            cab: None,
         }));
         assert!(plan.steps.iter().any(|s| matches!(
             s,
@@ -616,6 +738,122 @@ mod tests {
         assert!(plan.steps.is_empty());
         assert!(
             plan.skipped.iter().any(|s| s.contains("no split")),
+            "{:?}",
+            plan.skipped
+        );
+    }
+
+    /// An amp and the cab it pairs with, from the catalog, as wire numbers.
+    fn amp_and_cab(catalog: &Catalog) -> (String, u32, String, u32, (String, String)) {
+        let amp = catalog
+            .models()
+            .find(|m| catalog.paired_cab(m).is_some())
+            .expect("an amp with a cab");
+        let cab = catalog.paired_cab(amp).unwrap();
+        let number = |id: &str| {
+            hx_catalog::resolve(catalog, id, &serde_json::json!({}))
+                .unwrap()
+                .number
+        };
+        let setting = cab.params.first().expect("a cab setting");
+        let setting = (setting.id.clone(), setting.name.clone());
+        (
+            amp.id.clone(),
+            number(&amp.id),
+            cab.id.clone(),
+            number(&cab.id),
+            setting,
+        )
+    }
+
+    /// HX Edit writes an Amp+Cab as the amp's block naming its cab node.
+    /// The cab used to be dropped without a word: the `cab0` node was not a
+    /// block, and `@cab` read as structure. It now rides with the amp's
+    /// model, and its own settings, which nothing applies, are reported.
+    #[test]
+    fn an_amp_keeps_the_cab_hx_edit_names_for_it() {
+        let Some(catalog) = catalog() else { return };
+        let (amp, amp_number, cab, cab_number, setting) = amp_and_cab(&catalog);
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": { "@model": amp, "@cab": "cab0", "@enabled": true },
+                "cab0": { "@model": cab, setting.0.clone(): 0.5 }
+            }}}
+        });
+
+        let plan = plan(&json, &catalog).unwrap();
+        assert!(
+            plan.steps.iter().any(|s| matches!(
+                s,
+                Step::Model { block: 0, model, cab: Some(Cab { model: paired, .. }), .. }
+                    if *model == amp_number && *paired == cab_number
+            )),
+            "{:?}",
+            plan.steps
+        );
+        assert_eq!(plan.skipped.len(), 1, "{:?}", plan.skipped);
+        assert!(
+            plan.skipped[0].contains("not applied") && plan.skipped[0].contains(&setting.1),
+            "{:?}",
+            plan.skipped
+        );
+    }
+
+    /// Our own files say whose cab it is from the other side: the cab names
+    /// the amp's slot.
+    #[test]
+    fn an_amp_keeps_the_cab_that_names_its_slot() {
+        let Some(catalog) = catalog() else { return };
+        let (amp, amp_number, cab, cab_number, _) = amp_and_cab(&catalog);
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": { "@model": amp, "@slot": 3 },
+                "cab0": { "@model": cab, "@slot": 3 }
+            }}}
+        });
+
+        let plan = plan(&json, &catalog).unwrap();
+        assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+        assert!(plan.steps.contains(&Step::Model {
+            block: 3,
+            model: amp_number,
+            name: catalog.model_number(amp_number).unwrap().name.clone(),
+            cab: Some(Cab {
+                model: cab_number,
+                name: catalog.model_number(cab_number).unwrap().name.clone(),
+            }),
+        }));
+    }
+
+    /// A cab nothing claims, or a claim on a cab that is not there, is said
+    /// rather than dropped.
+    #[test]
+    fn a_cab_that_cannot_be_placed_is_reported() {
+        let Some(catalog) = catalog() else { return };
+        let (amp, _, cab, _, _) = amp_and_cab(&catalog);
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                "block0": { "@model": amp, "@cab": "cab4" },
+                "cab1": { "@model": cab }
+            }}}
+        });
+
+        let plan = plan(&json, &catalog).unwrap();
+        assert!(plan.steps.iter().any(|s| matches!(
+            s,
+            Step::Model {
+                block: 0,
+                cab: None,
+                ..
+            }
+        )));
+        assert!(
+            plan.skipped.iter().any(|s| s.contains("cab4")),
+            "{:?}",
+            plan.skipped
+        );
+        assert!(
+            plan.skipped.iter().any(|s| s.contains("cab1")),
             "{:?}",
             plan.skipped
         );

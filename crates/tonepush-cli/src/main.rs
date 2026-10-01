@@ -1831,7 +1831,12 @@ fn show_import(file: &std::path::Path) -> Result<()> {
     println!("{}  ({} changes)\n", plan.name, plan.steps.len());
     for step in &plan.steps {
         match step {
-            hlx::Step::Model { block, name, .. } => println!("  block {block}: {name}"),
+            hlx::Step::Model {
+                block, name, cab, ..
+            } => match cab {
+                Some(cab) => println!("  block {block}: {name} + {} cab", cab.name),
+                None => println!("  block {block}: {name}"),
+            },
             hlx::Step::Param {
                 block, name, value, ..
             } => {
@@ -1860,7 +1865,12 @@ fn apply_import(session: &mut hx_usb::Session, file: &std::path::Path) -> Result
 
     for step in &plan.steps {
         match step {
-            hlx::Step::Model { block, model, .. } => session.set_model(*block, *model)?,
+            hlx::Step::Model {
+                block, model, cab, ..
+            } => match cab {
+                Some(cab) => session.set_model_pair(*block, *model, cab.model)?,
+                None => session.set_model(*block, *model)?,
+            },
             hlx::Step::Param {
                 block,
                 index,
