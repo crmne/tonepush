@@ -401,8 +401,11 @@ pub fn parse_slot_for(text: &str, presets_per_bank: u8) -> Option<i64> {
         return (index >= 0).then_some(index);
     }
     let text = text.trim();
-    let (bank, slot) = text.split_at(text.len().checked_sub(1)?);
-    let letter = slot.chars().next()?.to_ascii_uppercase();
+    // Split before the last character, not the last byte: a multibyte
+    // letter such as `1é` would otherwise split inside a code point.
+    let (split, last) = text.char_indices().next_back()?;
+    let bank = &text[..split];
+    let letter = last.to_ascii_uppercase();
     if !letter.is_ascii_uppercase() {
         return None;
     }
@@ -768,6 +771,14 @@ mod tests {
         // growing forever; the next well-formed message is usable.
         malformed.push(&[0, 0, 0, 0, 1, 0, 0, 0, 0xc0]);
         assert_eq!(malformed.take_messages().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn slot_parsing_rejects_a_multibyte_last_character_without_panicking() {
+        assert_eq!(parse_slot("1é"), None);
+        assert_eq!(parse_slot("é"), None);
+        assert_eq!(parse_slot("01Ä"), None);
+        assert_eq!(parse_slot("é1A"), None);
     }
 
     #[test]
