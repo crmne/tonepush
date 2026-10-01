@@ -36,10 +36,15 @@ pub enum Value {
     /// A string or binary field that is not text - typically a nested document.
     ///
     /// The second field is the header width the device used (1, 2 or 4 bytes,
-    /// or 0 for a fixstr). It is carried so a document can be written back
-    /// unchanged: the encoder would otherwise pick the narrowest tag that fits,
-    /// and a preset's own offset table stops matching the moment its length
-    /// changes.
+    /// or 0 for a fixstr), with [`BIN_FAMILY`] added when the field came in as
+    /// MessagePack bin (`c4`-`c6`) rather than str. It is carried so a
+    /// document can be written back unchanged: the encoder would otherwise
+    /// pick the narrowest str tag that fits, and a preset's own offset table
+    /// stops matching the moment its length changes.
+    ///
+    /// Text written with a wider header than it needs also decodes here
+    /// rather than as `Str`, since `Str` always encodes with the narrowest
+    /// header; [`Value::as_str`] still reads it as text.
     Bin(Vec<u8>, u8),
     Array(Vec<Value>),
     /// Insertion-ordered: the protocol's own key order is reproduced exactly on
@@ -47,17 +52,76 @@ pub enum Value {
     Map(Vec<(Key, Value)>),
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// Added to [`Value::Bin`]'s width for a field that arrived as MessagePack
+/// bin (`c4`, `c5`, `c6`) rather than as a str.
+pub const BIN_FAMILY: u8 = 0x80;
+
+#[derive(Clone)]
 pub enum Key {
     Int(i64),
     Str(String),
+    /// A key the wire spelled wider than it needed to (`cc 05` for 5, or a
+    /// short string behind a `d9` header), kept as the value it decoded to so
+    /// the map re-encodes byte for byte. It is the same key as the plain
+    /// `Int` or `Str` it names: it compares equal to it and is found by
+    /// [`Value::get`].
+    Wide(Box<Value>),
+}
+
+/// What a key names, whatever width it was written with.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PlainKey<'a> {
+    Int(i64),
+    Str(&'a str),
+}
+
+impl Key {
+    fn plain(&self) -> PlainKey<'_> {
+        match self {
+            Key::Int(i) => PlainKey::Int(*i),
+            Key::Str(s) => PlainKey::Str(s),
+            Key::Wide(value) => match value.as_i64() {
+                Some(i) => PlainKey::Int(i),
+                // The decoder only builds a wide key from an integer or text.
+                None => PlainKey::Str(value.as_str().unwrap_or_default()),
+            },
+        }
+    }
+
+    /// The integer this key names, if it is one.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self.plain() {
+            PlainKey::Int(i) => Some(i),
+            PlainKey::Str(_) => None,
+        }
+    }
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Self) -> bool {
+        self.plain() == other.plain()
+    }
+}
+
+impl Eq for Key {}
+
+impl PartialOrd for Key {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Key {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.plain().cmp(&other.plain())
+    }
 }
 
 impl fmt::Debug for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Key::Int(i) => write!(f, "{i}"),
-            Key::Str(s) => write!(f, "{s:?}"),
+        match self.plain() {
+            PlainKey::Int(i) => write!(f, "{i}"),
+            PlainKey::Str(s) => write!(f, "{s:?}"),
         }
     }
 }
@@ -110,9 +174,12 @@ impl Value {
         }
     }
 
+    /// Text, including text that arrived behind a wider str header than it
+    /// needed and so is held as [`Value::Bin`] to re-encode exactly.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Value::Str(s) => Some(s),
+            Value::Bin(raw, width) if width & BIN_FAMILY == 0 => c_string(raw),
             _ => None,
         }
     }
@@ -261,15 +328,15 @@ impl<'a> Decoder<'a> {
             0xc3 => Value::Bool(true),
             0xc4 => {
                 let n = self.uint(1)? as usize;
-                Value::Bin(self.take(n)?.to_vec(), 1)
+                Value::Bin(self.take(n)?.to_vec(), BIN_FAMILY | 1)
             }
             0xc5 => {
                 let n = self.uint(2)? as usize;
-                Value::Bin(self.take(n)?.to_vec(), 2)
+                Value::Bin(self.take(n)?.to_vec(), BIN_FAMILY | 2)
             }
             0xc6 => {
                 let n = self.uint(4)? as usize;
-                Value::Bin(self.take(n)?.to_vec(), 4)
+                Value::Bin(self.take(n)?.to_vec(), BIN_FAMILY | 4)
             }
             0xca => Value::F32(f32::from_bits(self.uint(4)? as u32)),
             0xcb => Value::F64(f64::from_bits(self.uint(8)?)),
@@ -324,14 +391,24 @@ impl<'a> Decoder<'a> {
     fn map(&mut self, n: usize) -> Result<Value> {
         let mut m = Vec::with_capacity(n.min(1024));
         for _ in 0..n {
-            let k = match self.value()? {
+            let from = self.pos;
+            let value = self.value()?;
+            let plain = match &value {
                 Value::UInt(u) | Value::Wide(u, _) => {
-                    Key::Int(i64::try_from(u).map_err(|_| Error::BadKey)?)
+                    Key::Int(i64::try_from(*u).map_err(|_| Error::BadKey)?)
                 }
-                Value::WideInt(i, _) => Key::Int(i),
-                Value::Int(i) => Key::Int(i),
-                Value::Str(s) => Key::Str(s),
+                Value::WideInt(i, _) | Value::Int(i) => Key::Int(*i),
+                Value::Str(s) => Key::Str(s.clone()),
+                Value::Bin(..) => Key::Str(value.as_str().ok_or(Error::BadKey)?.to_owned()),
                 _ => return Err(Error::BadKey),
+            };
+            // A plain key encodes with the narrowest header. If that is not
+            // how this one arrived, keep the original so it writes back the
+            // same.
+            let k = if Encoder::encode_key(&plain) == self.buf[from..self.pos] {
+                plain
+            } else {
+                Key::Wide(Box::new(value))
             };
             m.push((k, self.value()?));
         }
@@ -343,19 +420,40 @@ impl<'a> Decoder<'a> {
     /// bytes for the caller to re-parse.
     fn string(&mut self, n: usize, width: u8) -> Result<Value> {
         let raw = self.take(n)?;
-        let trimmed = raw.split(|&b| b == 0).next().unwrap_or(raw);
-        // Only the protocol's canonical spelling - printable text followed by
-        // exactly one NUL - can become `Str`. A standard MessagePack string
-        // with no NUL, an empty field, or extra padding has to stay raw bytes;
-        // otherwise encoding it again would add or remove bytes and invalidate
-        // a preset's offset table.
-        let is_text = raw.last() == Some(&0)
-            && trimmed.len() + 1 == raw.len()
-            && trimmed.iter().all(|&b| b >= 0x20 || b == b'\t');
-        match (is_text, std::str::from_utf8(trimmed)) {
-            (true, Ok(s)) => Ok(Value::Str(s.to_owned())),
+        // `Str` always encodes with the narrowest header, so text that came
+        // with a wider one is kept as bytes with its width, or writing it back
+        // would shrink the document.
+        match c_string(raw) {
+            Some(s) if str_width(n) == width => Ok(Value::Str(s.to_owned())),
             _ => Ok(Value::Bin(raw.to_vec(), width)),
         }
+    }
+}
+
+/// The text in a field spelled the protocol's canonical way: printable UTF-8
+/// followed by exactly one NUL. A standard MessagePack string with no NUL, an
+/// empty field, or extra padding is not text here; calling it text would make
+/// the encoder add or remove bytes and invalidate a preset's offset table.
+fn c_string(raw: &[u8]) -> Option<&str> {
+    let (&0, text) = raw.split_last()? else {
+        return None;
+    };
+    if text.iter().any(|&b| b < 0x20 && b != b'\t') {
+        return None;
+    }
+    std::str::from_utf8(text).ok()
+}
+
+/// The header width the encoder picks for a str of `n` bytes.
+fn str_width(n: usize) -> u8 {
+    if n < 32 {
+        0
+    } else if u8::try_from(n).is_ok() {
+        1
+    } else if u16::try_from(n).is_ok() {
+        2
+    } else {
+        4
     }
 }
 
@@ -457,18 +555,32 @@ impl Encoder {
                     self.buf.extend_from_slice(&(m.len() as u32).to_be_bytes());
                 }
                 for (k, val) in m {
-                    match k {
-                        Key::Int(i) => self.value(&Value::Int(*i)),
-                        Key::Str(s) => self.value(&Value::Str(s.clone())),
-                    }
+                    self.key(k);
                     self.value(val);
                 }
             }
         }
     }
 
-    /// Write a header of exactly the width the value arrived with.
+    fn key(&mut self, k: &Key) {
+        match k {
+            Key::Int(i) => self.value(&Value::Int(*i)),
+            Key::Str(s) => self.value(&Value::Str(s.clone())),
+            Key::Wide(value) => self.value(value),
+        }
+    }
+
+    fn encode_key(k: &Key) -> Vec<u8> {
+        let mut e = Encoder::new();
+        e.key(k);
+        e.buf
+    }
+
+    /// Write a header of exactly the width and type the value arrived with.
     fn str_header_of_width(&mut self, n: usize, width: u8) {
+        if width & BIN_FAMILY != 0 {
+            return self.bin_header(n, width & !BIN_FAMILY);
+        }
         match width {
             0 if n < 32 => self.buf.push(0xa0 | n as u8),
             1 if u8::try_from(n).is_ok() => {
@@ -485,6 +597,21 @@ impl Encoder {
             }
             // A blob that outgrew its original tag, or one we built ourselves.
             _ => self.str_header(n),
+        }
+    }
+
+    /// A bin header, at least as wide as it arrived and wider if the bytes
+    /// have outgrown it.
+    fn bin_header(&mut self, n: usize, width: u8) {
+        if width <= 1 && u8::try_from(n).is_ok() {
+            self.buf.push(0xc4);
+            self.buf.push(n as u8);
+        } else if width <= 2 && u16::try_from(n).is_ok() {
+            self.buf.push(0xc5);
+            self.buf.extend_from_slice(&(n as u16).to_be_bytes());
+        } else {
+            self.buf.push(0xc6);
+            self.buf.extend_from_slice(&(n as u32).to_be_bytes());
         }
     }
 
@@ -640,6 +767,55 @@ mod tests {
             let v = Decoder::new(raw).value().unwrap();
             assert_eq!(Encoder::encode(&v), raw, "signed width not preserved");
         }
+    }
+
+    /// Every header width and type the format allows for text, blobs and
+    /// map keys comes back exactly as it went in.
+    #[test]
+    fn string_bin_and_key_headers_keep_their_width_and_type() {
+        for raw in [
+            // Text behind headers wider than it needs.
+            &[0xd9, 0x03, b'h', b'i', 0][..],
+            &[0xda, 0x00, 0x03, b'h', b'i', 0][..],
+            &[0xdb, 0x00, 0x00, 0x00, 0x03, b'h', b'i', 0][..],
+            // MessagePack bin, which is not the str family.
+            &[0xc4, 0x02, 0x01, 0x02][..],
+            &[0xc4, 0x03, b'h', b'i', 0][..],
+            &[0xc5, 0x00, 0x02, 0x01, 0x02][..],
+            &[0xc6, 0x00, 0x00, 0x00, 0x02, 0x01, 0x02][..],
+            // Map keys written wider than they need.
+            &[0x81, 0xcc, 0x05, 0xc0][..],
+            &[0x81, 0xcd, 0x00, 0x05, 0xc0][..],
+            &[0x81, 0xd0, 0x05, 0xc0][..],
+            &[
+                0x81, 0xd3, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfb, 0xc0,
+            ][..],
+            &[0x81, 0xd9, 0x02, b'k', 0, 0xc0][..],
+        ] {
+            let value = Decoder::new(raw).value().unwrap();
+            assert_eq!(Encoder::encode(&value), raw, "{value:?} changed width");
+        }
+
+        // Wider spellings still read the same.
+        let text = Decoder::new(&[0xd9, 0x03, b'h', b'i', 0]).value().unwrap();
+        assert_eq!(text.as_str(), Some("hi"));
+        let bin = Decoder::new(&[0xc4, 0x03, b'h', b'i', 0]).value().unwrap();
+        assert_eq!(bin.as_str(), None);
+        assert_eq!(bin.as_raw(), Some(&b"hi\0"[..]));
+        let map = Decoder::new(&[0x82, 0xcc, 0x05, 0x01, 0xd0, 0x06, 0x02])
+            .value()
+            .unwrap();
+        assert_eq!(map.get(5).and_then(Value::as_i64), Some(1));
+        assert_eq!(map.get(6).and_then(Value::as_i64), Some(2));
+        let Value::Map(fields) = &map else {
+            panic!("expected a map");
+        };
+        assert_eq!(fields[0].0, Key::Int(5));
+        assert_eq!(fields[0].0.as_i64(), Some(5));
+
+        // A blob that outgrows its bin header is promoted within bin.
+        let grown = Encoder::encode(&Value::Bin(vec![0; 300], BIN_FAMILY | 1));
+        assert_eq!(&grown[..3], &[0xc5, 0x01, 0x2c]);
     }
 
     #[test]
