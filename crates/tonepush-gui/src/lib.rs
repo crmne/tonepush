@@ -1137,6 +1137,24 @@ impl App {
         self.send(cmd);
     }
 
+    /// Drop everything half-done that names a place in the loaded preset: a
+    /// value being typed, a drag, an open model picker. Each finishes by
+    /// sending a block position, and once the pedal has loaded another
+    /// preset that position is a different block.
+    fn forget_drafts(&mut self) {
+        self.param_draft = None;
+        self.assign_editing = None;
+        self.assign_selected = None;
+        self.assigning = None;
+        self.switch_draft = None;
+        self.renaming_header = None;
+        self.dragging = None;
+        self.dragging_junction = None;
+        if self.inserting_at.is_some() {
+            self.close_picker();
+        }
+    }
+
     fn drain_events(&mut self) {
         loop {
             match self.from_device.try_recv() {
@@ -1231,13 +1249,21 @@ impl App {
                     firmware,
                     tempo,
                     snapshots,
+                    snapshot,
                     chain,
                     layout,
                     assignments,
                     dirty,
                 }) => {
-                    if index != self.preset_index || layout != self.layout {
+                    // A switch the editor asked for has already moved the
+                    // selection, so a different preset arriving here is one
+                    // the pedal loaded by itself.
+                    let moved = index != self.preset_index;
+                    if moved || layout != self.layout {
                         self.fit_chain_on_next_frame = true;
+                    }
+                    if moved {
+                        self.forget_drafts();
                     }
                     self.layout = layout;
                     self.assignments = assignments;
@@ -1247,13 +1273,17 @@ impl App {
                     // The worker's word, not a blanket reset: most reloads are
                     // edits taking effect, and those leave changes to save.
                     self.dirty = dirty;
-                    self.reveal_preset = index != self.preset_index;
+                    self.reveal_preset = moved;
                     self.loading = false;
                     self.preset_index = index;
                     self.preset_name = name;
                     self.firmware = firmware;
                     self.tempo = tempo;
                     self.snapshots = snapshots;
+                    // The pedal's word for which snapshot is active, whether
+                    // it was picked here, on its footswitches, or came with
+                    // the preset. A click's own guess does not outlive it.
+                    self.current_snapshot = snapshot.unwrap_or_default();
                     self.chain = chain;
                     // Land on something editable rather than the input, which
                     // has nothing to show. A split or a join counts: changing
@@ -10969,6 +10999,7 @@ mod tests {
                 firmware: "3.80".into(),
                 tempo: Some(120.0),
                 snapshots: vec!["SNAPSHOT 1".into()],
+                snapshot: None,
                 layout: hx_proto::preset::Layout::default(),
                 assignments: Vec::new(),
                 dirty: false,
@@ -11139,6 +11170,7 @@ mod tests {
                 firmware: String::new(),
                 tempo: None,
                 snapshots: vec![],
+                snapshot: None,
                 assignments: vec![],
                 chain: vec![
                     slot(0, Kind::Input),
@@ -11295,6 +11327,7 @@ mod tests {
                 firmware: String::new(),
                 tempo: None,
                 snapshots: vec![],
+                snapshot: None,
                 assignments: vec![],
                 chain: vec![
                     slot(0, Kind::Input),
@@ -11368,6 +11401,7 @@ mod tests {
             firmware: "3.80".into(),
             tempo: None,
             snapshots: vec![],
+            snapshot: None,
             layout: hx_proto::preset::Layout::default(),
             assignments: Vec::new(),
             chain: vec![],
@@ -11384,6 +11418,76 @@ mod tests {
         events.send(loaded(false)).unwrap();
         app.drain_events();
         assert!(!app.dirty, "a fresh load has nothing to save");
+    }
+
+    /// A preset as the worker presents it: three snapshots, one block.
+    fn loaded(index: i64, snapshot: Option<usize>, dirty: bool) -> Evt {
+        Evt::Loaded {
+            index,
+            name: format!("Preset {index}"),
+            firmware: "3.80".into(),
+            tempo: Some(120.0),
+            snapshots: vec!["Verse".into(), "Chorus".into(), "Solo".into()],
+            snapshot,
+            layout: hx_proto::preset::Layout::default(),
+            assignments: Vec::new(),
+            chain: vec![session::Block {
+                position: 1,
+                routing: None,
+                kind: hx_proto::preset::Kind::Block,
+                model: 101,
+                enabled: true,
+                values: vec![0.5],
+                paired: None,
+                paired_values: vec![],
+            }],
+            dirty,
+        }
+    }
+
+    /// The bar lights the snapshot the pedal says is active, whoever picked
+    /// it. A preset that does not say starts at the first, rather than at
+    /// whichever one the previous preset was left on.
+    #[test]
+    fn the_lit_snapshot_is_the_one_the_pedal_has_active() {
+        let (mut app, events, _cmds) = app();
+        events.send(loaded(2, Some(2), false)).unwrap();
+        app.drain_events();
+        assert_eq!(app.current_snapshot, 2);
+
+        events.send(loaded(5, None, false)).unwrap();
+        app.drain_events();
+        assert_eq!(app.current_snapshot, 0);
+    }
+
+    /// A preset the pedal loaded by itself takes away whatever was half done
+    /// for the old one. Each of these finishes by sending a block position,
+    /// and in the new preset that position is a different block.
+    #[test]
+    fn a_preset_loaded_on_the_pedal_drops_what_was_half_done() {
+        let (mut app, events, _cmds) = app();
+        events.send(loaded(2, Some(0), true)).unwrap();
+        app.drain_events();
+        app.param_draft = Some((1, 0, "7.5".into()));
+        app.renaming_header = Some("Crunch".into());
+        app.dragging = Some(1);
+        app.inserting_at = Some(2);
+
+        events.send(loaded(5, Some(0), false)).unwrap();
+        app.drain_events();
+
+        assert_eq!(app.preset_index, 5);
+        assert!(app.reveal_preset, "the list follows the pedal");
+        assert!(app.param_draft.is_none());
+        assert!(app.renaming_header.is_none());
+        assert!(app.dragging.is_none());
+        assert!(app.inserting_at.is_none());
+
+        // A reload of the same preset, after an edit, leaves them alone.
+        app.param_draft = Some((1, 0, "7.5".into()));
+        events.send(loaded(5, Some(0), true)).unwrap();
+        app.drain_events();
+        assert!(app.param_draft.is_some());
     }
 
     #[test]

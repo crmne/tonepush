@@ -279,6 +279,10 @@ pub enum Evt {
         firmware: String,
         tempo: Option<f32>,
         snapshots: Vec<String>,
+        /// Which snapshot is active, as the document says. Picked here, on
+        /// the pedal's footswitches or by loading a preset, this is the one
+        /// the bar should light.
+        snapshot: Option<usize>,
         chain: Vec<Block>,
         layout: hx_proto::preset::Layout,
         /// Everything a controller drives in this preset, every block at once.
@@ -480,14 +484,28 @@ struct Worker {
     /// rather than in the UI because only the worker knows which reloads are
     /// fresh presets and which are edits taking effect.
     dirty: bool,
-    /// The loaded preset's slot and name, as last read from the device - so a
-    /// view built from a document we hold does not need a round trip to say
-    /// which preset it is.
-    shown: (i64, String),
+    /// The loaded preset as last read from the device - so a view built from
+    /// a document we hold does not need a round trip to say which preset it
+    /// is, and so a preset the pedal loaded by itself can be told apart from
+    /// the one on screen.
+    shown: Shown,
+    /// Whether the pedal declined, after an announcement, to say which
+    /// preset it has loaded, so the next poll asks again.
+    recheck: bool,
     /// Everything an audition temporarily displaces. Histories are moved here
     /// rather than copied: while a cloud Tone is sounding it is not an edit
     /// somebody can accidentally fold into their existing undo stack.
     audition: Option<Audition>,
+}
+
+/// Which preset the editor is showing, as the device named it.
+struct Shown {
+    setlist: i64,
+    /// The slot, or -1 before anything has been read.
+    index: i64,
+    name: String,
+    /// The snapshot its document had active when it was last presented.
+    snapshot: Option<usize>,
 }
 
 struct Audition {
@@ -510,7 +528,13 @@ impl Worker {
             future: Vec::new(),
             snapshot_taken: false,
             dirty: false,
-            shown: (-1, String::new()),
+            shown: Shown {
+                setlist: 0,
+                index: -1,
+                name: String::new(),
+                snapshot: None,
+            },
+            recheck: false,
             audition: None,
         }
     }
@@ -918,7 +942,7 @@ impl Worker {
                     if let Some(names) = self.try_on_device(|d| d.presets(setlist)) {
                         self.send(Evt::Presets(names));
                     }
-                    if self.shown.0 == index {
+                    if self.shown.index == index {
                         self.reload();
                     }
                     self.send(Evt::Activity(format!("emptied {}", self.slot_label(index))));
@@ -953,8 +977,8 @@ impl Worker {
                     if let Some(names) = self.try_on_device(|d| d.presets(setlist)) {
                         self.send(Evt::Presets(names));
                     }
-                    if self.shown.0 == index {
-                        self.shown.1 = name.clone();
+                    if self.shown.index == index {
+                        self.shown.name = name.clone();
                     }
                 }
             }
@@ -1331,22 +1355,26 @@ impl Worker {
     /// Put the device on `dest` so a load lands there, not over the open
     /// preset. A no-op when it is already the one loaded.
     fn go_to(&mut self, dest: i64) -> bool {
-        let current = self
-            .try_on_device(|device| device.preset_info())
-            .map(|(_, index, _)| index);
+        let current = self.try_on_device(|device| device.preset_info());
         if self.device.is_none() {
             return false;
         }
-        if current == Some(dest) {
+        let setlist = self.setlist;
+        if current.is_some_and(|(at, index, _)| (at, index) == (setlist, dest)) {
             return true;
         }
-        let setlist = self.setlist;
         if !self.run_on_device(|d| d.select_preset(setlist, dest)) {
             return false;
         }
         // The history belongs to the preset it was recorded on.
         self.forget_history();
         self.dirty = false;
+        // And what is presented next belongs to this one. A load shows the
+        // document it wrote without reading it back, so without this it went
+        // out under the previous preset's slot and name.
+        if let Some(info) = self.try_on_device(|device| device.preset_info()) {
+            self.adopt(info);
+        }
         true
     }
 
@@ -1766,11 +1794,31 @@ impl Worker {
         let Some(preset) = self.read_settled() else {
             return;
         };
-        let Some((_, index, name)) = self.try_on_device(|device| device.preset_info()) else {
+        let Some(info) = self.try_on_device(|device| device.preset_info()) else {
             return;
         };
-        self.shown = (index, name);
+        self.adopt(info);
         self.present(&preset);
+    }
+
+    /// Take the device's word for which preset is loaded.
+    ///
+    /// When it is not the preset on screen, the edit buffer belongs to
+    /// another preset now, and so does nothing recorded against the old one:
+    /// its undo history would write the old preset over the new one's buffer,
+    /// its unsaved flag would offer to save one into the other's slot, and an
+    /// audition would restore a buffer the pedal has already thrown away. A
+    /// switch of our own has dropped them already; this catches the ones the
+    /// pedal made by itself, whenever a read first notices.
+    fn adopt(&mut self, (setlist, index, name): (i64, i64, String)) {
+        if (setlist, index) != (self.shown.setlist, self.shown.index) {
+            self.forget_audition();
+            self.forget_history();
+            self.dirty = false;
+        }
+        self.shown.setlist = setlist;
+        self.shown.index = index;
+        self.shown.name = name;
     }
 
     /// Read the preset, giving the device time to settle first if it must.
@@ -1816,12 +1864,14 @@ impl Worker {
         // reads as though it starts nowhere.
         let chain = chain_of(preset);
         self.snapshot_taken = false;
+        self.shown.snapshot = active_snapshot(preset);
         self.send(Evt::Loaded {
-            index: self.shown.0,
-            name: self.shown.1.clone(),
+            index: self.shown.index,
+            name: self.shown.name.clone(),
             firmware,
             tempo: preset.tempo(),
             snapshots: preset.snapshots(),
+            snapshot: self.shown.snapshot,
             chain,
             layout: preset.layout(),
             assignments: preset.assignments(),
@@ -1830,26 +1880,61 @@ impl Worker {
     }
 
     fn poll(&mut self) {
+        let mut look = std::mem::take(&mut self.recheck);
         let Some(device) = self.device.as_mut() else {
             return;
         };
         let polled = device.poll_notifications();
+        let mut snapshot = None;
         if let Ok(events) = &polled {
             for (event, args) in events {
                 self.events
                     .send(Evt::Activity(format!("event {event}: {args:?}")));
+                match notice(*event, args) {
+                    Notice::Preset | Notice::Unknown => look = true,
+                    Notice::Snapshot(index) => snapshot = Some(index),
+                    Notice::Chatter => {}
+                }
             }
         }
         // An idle read timeout is already represented as `Ok(None)`. Anything
         // that reaches this error arm is transport or protocol loss, and the
         // next poll cannot safely reuse the session's sequence state.
-        match polled.map(|_| ()).and_then(|_| device.keepalive()) {
-            Ok(()) => {}
-            Err(e) => {
-                self.send(Evt::Failed(e.to_string()));
-                self.let_go();
-            }
+        if let Err(e) = polled.map(|_| ()).and_then(|_| device.keepalive()) {
+            self.send(Evt::Failed(e.to_string()));
+            return self.let_go();
         }
+        let reloaded = look && self.follow_preset();
+        if !reloaded && snapshot.is_some_and(|index| self.shown.snapshot != Some(index)) {
+            // Another snapshot is the same preset in another state: the
+            // chain is read again, and the history and unsaved changes stay.
+            self.reload();
+        }
+    }
+
+    /// Catch up with a preset the pedal loaded by itself.
+    ///
+    /// The pedal announces a switch from its own footswitches the way it
+    /// announces one of ours, so the announcement cannot say whose it was.
+    /// The device's answer to which preset is loaded can: anything but the
+    /// one on screen is reloaded, and `adopt` lets go of what belonged to the
+    /// old one. Before this, the editor kept showing the old preset, and undo,
+    /// Save and every knob acted on the new one with the old one's state.
+    /// Returns whether it reloaded.
+    fn follow_preset(&mut self) -> bool {
+        // Asked quietly: a pedal in the middle of a load may refuse, which is
+        // patience rather than news, so it is asked again next time.
+        let Some((setlist, index, name)) = self.try_optional_on_device(|d| d.preset_info()) else {
+            self.recheck = self.device.is_some();
+            return false;
+        };
+        if (setlist, index) == (self.shown.setlist, self.shown.index) {
+            return false;
+        }
+        let label = self.slot_label(index);
+        self.send(Evt::Activity(format!("the pedal loaded {label} {name}")));
+        self.reload();
+        true
     }
 
     /// Run something on the device, reporting failure. Returns whether it worked.
@@ -1915,6 +2000,69 @@ impl Worker {
     fn send(&self, evt: Evt) {
         self.events.send(evt);
     }
+}
+
+/// What a notification from the pedal means for the editor.
+#[derive(Debug, PartialEq)]
+enum Notice {
+    /// A preset is loading or has loaded: from the front panel, or the echo
+    /// of a switch the editor asked for.
+    Preset,
+    /// A snapshot was selected, by its zero-based index.
+    Snapshot(usize),
+    /// Nothing to follow: completions, the steady tick, edits echoed back.
+    Chatter,
+    /// An event never seen in a capture, which could be any of the above.
+    Unknown,
+}
+
+/// Read a notification by its id and arguments.
+///
+/// The ids are the ones every capture shows (docs/_reference/opcodes.md,
+/// section 3). A preset load is announced as event 8 when it starts and 4
+/// when it ends, each with the setlist and slot, and as event 22 reporting
+/// object 28, the loaded slot. Selecting a snapshot announces events 42 and
+/// 46 with its index under key 92 (`captures/05-snapshots.log`). Those were
+/// all captured from switches HX Edit asked for; a footswitch has not been
+/// captured, so an event that is not known to be chatter is treated as
+/// possibly a switch, which costs one question to the device.
+fn notice(event: i64, args: &hx_proto::msgpack::Value) -> Notice {
+    use hx_proto::msgpack::Value;
+    use hx_proto::rpc::key;
+
+    // State changes carry their own arguments one level down, under the
+    // same key the notification used for its arguments.
+    let inner = args.get(key::EVENT_ARGS).unwrap_or(args);
+    let number = |k| inner.get(k).and_then(Value::as_i64);
+    const LOADED_SLOT: i64 = 28;
+    match event {
+        4 | 8 => Notice::Preset,
+        22 if number(key::OBJECT_ID) == Some(LOADED_SLOT) => Notice::Preset,
+        42 | 46 => match number(key::SNAPSHOT).and_then(|n| usize::try_from(n).ok()) {
+            Some(index) => Notice::Snapshot(index),
+            None => Notice::Unknown,
+        },
+        1 | 6 | 20 | 21 | 22 | 23 | 30 | 31 | 33 | 34 | 37 | 39 | 49 | 56 | 59 | 60 => {
+            Notice::Chatter
+        }
+        _ => Notice::Unknown,
+    }
+}
+
+/// The snapshot a preset document has active.
+///
+/// Key 6 of the snapshot section: selecting the second, third and first
+/// snapshot in turn read back as 1, 2 and 0 there (`captures/05-snapshots.log`).
+fn active_snapshot(preset: &hx_proto::Preset) -> Option<usize> {
+    const SNAPSHOT_SECTION: i64 = 10;
+    const ACTIVE: i64 = 6;
+    let index = preset
+        .tone
+        .get(SNAPSHOT_SECTION)?
+        .get(ACTIVE)?
+        .as_i64()
+        .and_then(|n| usize::try_from(n).ok())?;
+    (index < preset.snapshots().len()).then_some(index)
 }
 
 /// Whether a failed device call leaves the session unusable.
@@ -2107,9 +2255,9 @@ mod tests {
 
     /// A pedal on the far side of the byte transport.
     ///
-    /// Enough of the channel protocol to carry requests in and answers out,
-    /// in front of one edit buffer and a few stored presets, so the worker
-    /// can be driven end to end with no hardware. It
+    /// Enough of the channel protocol to carry requests in, and answers and
+    /// notifications out, in front of one edit buffer and a few stored
+    /// presets, so the worker can be driven end to end with no hardware. It
     /// answers every request at once and keeps every one it was sent, which
     /// is how a test says what did, and did not, reach the pedal.
     struct Pedal {
@@ -2142,6 +2290,30 @@ mod tests {
         preset.encode()
     }
 
+    /// A document with another snapshot active, the way the pedal's own
+    /// buffer reads after one is picked.
+    fn with_snapshot(document: &[u8], index: i64) -> Vec<u8> {
+        let mut preset = hx_proto::Preset::parse(document).unwrap();
+        let active = preset
+            .tone
+            .get_mut(10)
+            .and_then(|section| section.get_mut(6))
+            .expect("the snapshot section names the active one");
+        *active = Value::Int(index);
+        preset.encode()
+    }
+
+    /// A state-change notification's arguments as the captures show them:
+    /// three tags, and the arguments themselves one level down.
+    fn state_change(tags: [i64; 3], args: Value) -> Value {
+        hx_proto::msgmap! {
+            82 => Value::Int(tags[0]),
+            68 => Value::Int(tags[1]),
+            121 => Value::Int(tags[2]),
+            key::EVENT_ARGS => args,
+        }
+    }
+
     impl Pedal {
         /// Slot 2, "Clean", is loaded; slot 5, "Lead", is stored beside it.
         fn new() -> Arc<Mutex<Pedal>> {
@@ -2165,6 +2337,48 @@ mod tests {
 
         fn opcodes(&self) -> Vec<i64> {
             self.requests.iter().map(|(opcode, _)| *opcode).collect()
+        }
+
+        /// Say something unasked, on the events channel.
+        fn notify(&mut self, event: i64, args: Value) {
+            self.reply(
+                ChannelId::EVENTS.device,
+                &Message::Notification { event, args },
+            );
+        }
+
+        /// Load a stored preset with nobody asking, as a footswitch does,
+        /// and say nothing about it.
+        fn switch_quietly(&mut self, index: i64) {
+            let (name, document) = self.stored[&index].clone();
+            self.loaded = (0, index, name);
+            self.buffer = document;
+        }
+
+        /// Announce a load the way every captured one is: event 8 as it
+        /// starts and event 4 as it ends, each naming the slot.
+        fn announce_load(&mut self, index: i64) {
+            for (event, step) in [(8, 5), (4, 6)] {
+                let slot = hx_proto::msgmap! {
+                    key::SETLIST => Value::Int(0),
+                    key::PRESET_INDEX => Value::Int(index),
+                };
+                self.notify(event, state_change([1, 1, step], slot));
+            }
+        }
+
+        /// A footswitch: the pedal loads the preset and says so.
+        fn switch_to(&mut self, index: i64) {
+            self.switch_quietly(index);
+            self.announce_load(index);
+        }
+
+        /// Send the last `count` messages in one transfer, the way the
+        /// device coalesces frames when it has several to say.
+        fn coalesce(&mut self, count: usize) {
+            let split = self.outbox.len() - count;
+            let frames: Vec<u8> = self.outbox.drain(split..).flatten().collect();
+            self.outbox.push_back(frames);
         }
 
         fn receive(&mut self, bytes: &[u8]) {
@@ -2297,9 +2511,20 @@ mod tests {
     /// The USB cable, as far as the session can tell.
     struct Cable(Arc<Mutex<Pedal>>);
 
+    impl Cable {
+        /// The pedal, even after a failed assertion poisoned the lock: the
+        /// session still drains it on the way down, and a second panic there
+        /// would abort the run instead of reporting the first.
+        fn pedal(&self) -> std::sync::MutexGuard<'_, Pedal> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
+
     impl hx_usb::Wire for Cable {
         fn send(&mut self, bytes: &[u8]) -> hx_usb::Result<()> {
-            let mut pedal = self.0.lock().unwrap();
+            let mut pedal = self.pedal();
             if pedal.unplugged {
                 return Err(hx_usb::Error::Usb("the cable is out".into()));
             }
@@ -2308,7 +2533,7 @@ mod tests {
         }
 
         fn recv(&mut self, _timeout: Duration) -> hx_usb::Result<Vec<u8>> {
-            let mut pedal = self.0.lock().unwrap();
+            let mut pedal = self.pedal();
             if pedal.unplugged {
                 return Err(hx_usb::Error::Usb("the cable is out".into()));
             }
@@ -2472,6 +2697,274 @@ mod tests {
         worker.opened(session(&next));
         worker.handle(Cmd::SelectBlock(1));
         assert!(!next.lock().unwrap().opcodes().contains(&op::WRITE_PRESET));
+    }
+
+    /// The shapes are the ones the captures hold, argument for argument.
+    #[test]
+    fn notifications_are_read_the_way_the_captures_show_them() {
+        let load = |step| {
+            let slot = hx_proto::msgmap! { 107 => Value::Int(0), 108 => Value::Int(12) };
+            state_change([1, 1, step], slot)
+        };
+        assert_eq!(notice(8, &load(5)), Notice::Preset);
+        assert_eq!(notice(4, &load(6)), Notice::Preset);
+
+        let object = |id, value| {
+            state_change(
+                [0, 9, 25],
+                hx_proto::msgmap! { 118 => Value::Int(id), 119 => value },
+            )
+        };
+        assert_eq!(notice(22, &object(28, Value::Int(12))), Notice::Preset);
+        assert_eq!(notice(22, &object(16, Value::F32(120.0))), Notice::Chatter);
+        assert_eq!(
+            notice(22, &state_change([0, 10, 27], Value::Nil)),
+            Notice::Chatter
+        );
+
+        let picked = |index| hx_proto::msgmap! { 92 => Value::Int(index) };
+        assert_eq!(notice(42, &picked(1)), Notice::Snapshot(1));
+        assert_eq!(notice(46, &picked(2)), Notice::Snapshot(2));
+        assert_eq!(
+            notice(42, &state_change([1, 1, 1], picked(0))),
+            Notice::Snapshot(0),
+            "the same, should a firmware wrap it like the others"
+        );
+        assert_eq!(notice(42, &Value::Nil), Notice::Unknown);
+
+        let done = hx_proto::msgmap! { 102 => Value::Int(1009), 103 => Value::Int(0) };
+        assert_eq!(notice(20, &done), Notice::Chatter);
+        let turned = hx_proto::msgmap! { 98 => Value::Int(6), 28 => Value::Int(2) };
+        assert_eq!(
+            notice(30, &state_change([0, 6, 20], turned)),
+            Notice::Chatter
+        );
+        assert_eq!(notice(77, &Value::Nil), Notice::Unknown);
+    }
+
+    #[test]
+    fn the_active_snapshot_is_read_from_the_document() {
+        let parse = |bytes: Vec<u8>| hx_proto::Preset::parse(&bytes).unwrap();
+        assert_eq!(active_snapshot(&parse(document(120.0))), Some(0));
+        let picked = parse(with_snapshot(&document(120.0), 2));
+        assert_eq!(active_snapshot(&picked), Some(2));
+        let beyond = parse(with_snapshot(&document(120.0), 9));
+        assert_eq!(active_snapshot(&beyond), None, "there is no tenth snapshot");
+    }
+
+    /// A preset loaded from the pedal's own footswitches has to replace the
+    /// one on screen and take the old one's undo history and unsaved flag
+    /// with it. Kept, undo wrote the old preset over the new one's buffer and
+    /// Save wrote the old edits into the new one's slot.
+    #[test]
+    fn a_preset_loaded_on_the_pedal_takes_the_old_history_with_it() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::SetTempo(100.0));
+        assert_eq!(worker.history.len(), 1);
+        assert!(worker.dirty);
+        let _ = events.try_iter().count();
+
+        pedal.lock().unwrap().switch_to(5);
+        worker.poll();
+
+        assert!(worker.history.is_empty());
+        assert!(!worker.dirty);
+        let said: Vec<Evt> = events.try_iter().collect();
+        assert!(said.iter().any(|e| matches!(
+            e,
+            Evt::Loaded { index: 5, name, dirty: false, .. } if name == "Lead"
+        )));
+        assert!(said
+            .iter()
+            .any(|e| matches!(e, Evt::History { undo: 0, redo: 0 })));
+
+        let asked = pedal.lock().unwrap().requests.len();
+        worker.handle(Cmd::Undo);
+        let pedal = pedal.lock().unwrap();
+        assert!(
+            !pedal.opcodes()[asked..].contains(&op::WRITE_PRESET),
+            "undo has nothing of the old preset's to write"
+        );
+        let buffer = hx_proto::Preset::parse(&pedal.buffer).unwrap();
+        assert_eq!(buffer.tempo(), Some(90.0), "the new preset is untouched");
+    }
+
+    /// The pedal announces a switch the editor asked for the same way, often
+    /// after the switch has been shown. The echo costs one question about
+    /// which preset is loaded, and nothing more.
+    #[test]
+    fn the_echo_of_a_switch_the_editor_asked_for_is_not_followed_twice() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::SelectPreset(5));
+        assert!(events
+            .try_iter()
+            .any(|e| matches!(e, Evt::Loaded { index: 5, .. })));
+
+        pedal.lock().unwrap().announce_load(5);
+        let asked = pedal.lock().unwrap().requests.len();
+        worker.poll();
+
+        assert_eq!(pedal.lock().unwrap().opcodes()[asked..], [op::PRESET_INFO]);
+        assert!(!events.try_iter().any(|e| matches!(e, Evt::Loaded { .. })));
+    }
+
+    /// A switch the pedal makes while the worker is busy can go unannounced:
+    /// a write's own wait reads the events channel too. The next reload that
+    /// asks which preset is loaded still notices.
+    #[test]
+    fn a_switch_noticed_by_a_later_read_still_drops_the_old_history() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::SetTempo(100.0));
+        pedal.lock().unwrap().switch_quietly(5);
+        let _ = events.try_iter().count();
+
+        worker.handle(Cmd::SelectSnapshot(1));
+
+        assert!(worker.history.is_empty());
+        assert!(!worker.dirty);
+        assert!(events.try_iter().any(|e| matches!(
+            e,
+            Evt::Loaded {
+                index: 5,
+                dirty: false,
+                ..
+            }
+        )));
+    }
+
+    /// A snapshot picked on the pedal is the same preset in another state:
+    /// the bar follows it, and the history and the unsaved changes stay.
+    #[test]
+    fn a_snapshot_picked_on_the_pedal_is_shown_and_keeps_the_edits() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::SetTempo(100.0));
+        let _ = events.try_iter().count();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.buffer = with_snapshot(&pedal.buffer, 2);
+            pedal.notify(42, hx_proto::msgmap! { key::SNAPSHOT => Value::Int(2) });
+        }
+
+        worker.poll();
+
+        assert_eq!(worker.history.len(), 1);
+        assert!(worker.dirty);
+        assert!(events.try_iter().any(|e| matches!(
+            e,
+            Evt::Loaded {
+                index: 2,
+                snapshot: Some(2),
+                dirty: true,
+                ..
+            }
+        )));
+
+        // Its second announcement finds it already shown.
+        pedal
+            .lock()
+            .unwrap()
+            .notify(46, hx_proto::msgmap! { key::SNAPSHOT => Value::Int(2) });
+        let asked = pedal.lock().unwrap().requests.len();
+        worker.poll();
+        assert_eq!(pedal.lock().unwrap().requests.len(), asked);
+    }
+
+    /// One poll can carry both: an event that calls for a check, and a
+    /// snapshot. A check that finds the same preset loaded still lets the
+    /// snapshot through.
+    #[test]
+    fn a_snapshot_is_shown_even_when_a_check_finds_the_same_preset() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.buffer = with_snapshot(&pedal.buffer, 1);
+            pedal.notify(77, Value::Nil);
+            pedal.notify(42, hx_proto::msgmap! { key::SNAPSHOT => Value::Int(1) });
+            pedal.coalesce(2);
+        }
+
+        worker.poll();
+
+        assert!(events.try_iter().any(|e| matches!(
+            e,
+            Evt::Loaded {
+                index: 2,
+                snapshot: Some(1),
+                ..
+            }
+        )));
+    }
+
+    /// A pedal in the middle of a load may refuse to say which preset it
+    /// has. That is patience rather than news: nothing is reported, and the
+    /// next poll asks again even when nothing more has been announced.
+    #[test]
+    fn a_pedal_too_busy_to_say_which_preset_is_asked_again() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.switch_quietly(5);
+            let slot = hx_proto::msgmap! { 107 => Value::Int(0), 108 => Value::Int(5) };
+            pedal.notify(8, state_change([1, 1, 5], slot));
+            pedal.refuse.insert(op::PRESET_INFO, -3);
+        }
+
+        worker.poll();
+        assert!(worker.device.is_some());
+        assert!(!events
+            .try_iter()
+            .any(|e| matches!(e, Evt::Failed(_) | Evt::Loaded { .. })));
+
+        pedal.lock().unwrap().refuse.clear();
+        worker.poll();
+        assert!(events
+            .try_iter()
+            .any(|e| matches!(e, Evt::Loaded { index: 5, .. })));
+    }
+
+    /// Once a preset is loaded the pedal ticks every 75 ms, and it echoes
+    /// every edit back. None of that is a reason to ask it anything.
+    #[test]
+    fn chatter_is_not_a_reason_to_ask_the_pedal_anything() {
+        let pedal = Pedal::new();
+        let (mut worker, _events) = worker(&pedal);
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.notify(22, state_change([0, 10, 27], Value::Nil));
+            let turned = hx_proto::msgmap! { 98 => Value::Int(1), 119 => Value::F32(0.5) };
+            pedal.notify(30, state_change([0, 6, 20], turned));
+        }
+        let asked = pedal.lock().unwrap().requests.len();
+
+        worker.poll();
+        worker.poll();
+
+        assert_eq!(pedal.lock().unwrap().requests.len(), asked);
+    }
+
+    /// No footswitch has been captured, so an event never seen before is
+    /// taken as a possible switch and settled by asking.
+    #[test]
+    fn an_event_never_seen_still_checks_which_preset_is_loaded() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.switch_quietly(5);
+            pedal.notify(77, Value::Nil);
+        }
+
+        worker.poll();
+
+        assert!(events
+            .try_iter()
+            .any(|e| matches!(e, Evt::Loaded { index: 5, .. })));
     }
 
     /// The other side of that rule: a failure on the wire still ends the
