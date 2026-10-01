@@ -158,8 +158,10 @@ impl Panel {
         if asked.favourites {
             self.show_favorites_only = !self.show_favorites_only;
         }
+        // Asked through the app, which keeps every capture of the pedal
+        // in one place.
         if asked.capture {
-            let _ = self.tx.send(Cmd::CaptureSetlist);
+            self.capture_asked = true;
         }
 
         let mode = if sending.is_some() {

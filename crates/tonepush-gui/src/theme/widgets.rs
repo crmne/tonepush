@@ -1022,6 +1022,8 @@ pub fn banner(
     card()
         .inner_margin(egui::Margin::symmetric(18, 16))
         .show(ui, |ui| {
+            // A block across its column, as the design's banners are.
+            ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 14.0;
                 let (well, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
@@ -1283,12 +1285,19 @@ pub fn outcomes(ui: &mut Ui, rows: &[Outcome]) {
         .inner_margin(egui::Margin::symmetric(0, 6))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 2.0;
             for row in rows {
                 ui.horizontal(|ui| {
                     ui.set_min_height(32.0);
                     ui.add_space(14.0);
                     let (icon, _) = ui.allocate_exact_size(Vec2::new(22.0, 20.0), Sense::hover());
-                    paint_icon(ui, row.icon, icon.center(), 15.0, muted());
+                    // What is lost reads as such: an emptied slot's bin is red.
+                    let ink = if row.icon == Icon::Remove {
+                        danger()
+                    } else {
+                        muted()
+                    };
+                    paint_icon(ui, row.icon, icon.center(), 15.0, ink);
                     ui.add_space(12.0);
                     let count = layout(
                         ui,
@@ -1530,6 +1539,100 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, colour: Color32) -> Response {
             );
             painter.circle_filled(Pos2::new(rect.left() + 10.0, y), 7.0, muted());
         }
+    }
+    response
+}
+
+/// A slider `width` points wide: a 4 point track in the strong line, amber
+/// up to a 14 point knob in the text ink. A click or a drag sets it, to
+/// whole steps of `step`; the response is changed when it moved.
+pub fn slider(
+    ui: &mut Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    step: f32,
+    width: f32,
+) -> Response {
+    let (rect, mut response) =
+        ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::click_and_drag());
+    let (min, max) = (*range.start(), *range.end());
+    let track = rect.shrink2(Vec2::new(7.0, 0.0));
+    if response.is_pointer_button_down_on() || response.clicked() {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let along = ((pointer.x - track.left()) / track.width()).clamp(0.0, 1.0);
+            let mut wanted = min + along * (max - min);
+            if step > 0.0 {
+                wanted = (wanted / step).round() * step;
+            }
+            let wanted = wanted.clamp(min, max);
+            if wanted != *value {
+                *value = wanted;
+                response.mark_changed();
+            }
+        }
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let along = if max > min {
+            ((*value - min) / (max - min)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let y = rect.center().y;
+        let knob = track.left() + along * track.width();
+        let bar = |left: f32, right: f32, colour: Color32| {
+            painter.rect_filled(
+                Rect::from_min_max(Pos2::new(left, y - 2.0), Pos2::new(right, y + 2.0)),
+                CornerRadius::same(2),
+                colour,
+            );
+        };
+        bar(track.left(), track.right(), line_strong());
+        bar(track.left(), knob, accent());
+        let ink = if response.hovered() || response.dragged() {
+            text()
+        } else {
+            text_soft()
+        };
+        painter.circle_filled(Pos2::new(knob, y), 7.0, ink);
+    }
+    response
+}
+
+/// A checkbox and its label: a 16 point square with a 4 point corner,
+/// outlined in the strong line when clear, amber with a dark tick when
+/// ticked. The label toggles it too.
+pub fn checkbox(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    let galley = layout(ui, label, regular(12.5), text_soft());
+    let size = Vec2::new(16.0 + 10.0 + galley.size().x, galley.size().y.max(18.0));
+    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let square = Rect::from_center_size(
+            Pos2::new(rect.left() + 8.0, rect.center().y),
+            Vec2::splat(16.0),
+        );
+        if *on {
+            painter.rect_filled(square, CornerRadius::same(4), accent());
+            paint_icon(ui, Icon::Check, square.center(), 12.0, accent_ink());
+        } else {
+            let edge = if response.hovered() {
+                muted()
+            } else {
+                line_strong()
+            };
+            painter.rect_stroke(
+                square,
+                CornerRadius::same(4),
+                Stroke::new(1.5, edge),
+                egui::StrokeKind::Inside,
+            );
+        }
+        centred_galley(ui, galley, square.right() + 10.0, rect.center().y);
     }
     response
 }

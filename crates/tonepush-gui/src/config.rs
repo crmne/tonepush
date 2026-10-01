@@ -61,6 +61,9 @@ pub struct Config {
     /// Edit's id: its Recent shelf.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_models: Vec<String>,
+    /// The backups saved to a file, newest first, for the Backups history.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backup_files: Vec<PathBuf>,
 }
 
 impl Config {

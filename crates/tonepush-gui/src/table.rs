@@ -1,9 +1,9 @@
 //! The library's table, and the only one in the app.
 //!
-//! Both halves of the library are drawn by this: tones and setlists differ in
-//! their columns and in nothing else, which is the point. They are one library
-//! with two views of itself, and two tables that behaved differently would say
-//! otherwise.
+//! Tones from the library and from TonePush's catalog are drawn by this: they
+//! differ in their columns and in nothing else, which is the point. They are
+//! one library with two views of itself, and two tables that behaved
+//! differently would say otherwise.
 //!
 //! Rows are virtualised, so a library of a few thousand tones lays out only the
 //! twenty you can see, and the first columns are sticky, so scrolling sideways
@@ -14,32 +14,26 @@
 //! costs a few short strings per row and it buys the whole thing being a value:
 //! sorting, selection and editing all happen on data rather than inside a
 //! drawing closure, where borrowing the app twice is a fight.
+//!
+//! It is drawn as the 2026-10-01 redesign draws a table: 36-point rows with a
+//! hairline between them and no stripes, a 32-point header of captions, the
+//! selection a neutral fill, and the sorted column named in the ink of the
+//! rows rather than in amber, which is kept for the next action.
 
-use egui::{RichText, Ui};
+use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
-use crate::theme;
+use crate::shell;
+use crate::theme::{self, Icon};
 
 /// How far a cell's contents sit from its column's left edge.
 const PADDING: f32 = 8.0;
 
-/// How tall one row is, and the header with it. Public because a caller that
-/// has to bound the table's height has to know what a row costs.
-pub const ROW_HEIGHT: f32 = 22.0;
+/// How tall one row is. Public because a caller that has to bound the table's
+/// height has to know what a row costs.
+pub const ROW_HEIGHT: f32 = 36.0;
 
-/// The width a table of these columns wants before it starts overlapping its
-/// own headers: every column, the padding each one adds, and the scrollbar down
-/// the right.
-///
-/// Public because a panel holding a table is the thing that gets dragged, and
-/// it cannot know what it is holding unless the table says so. The setlist rail
-/// had no floor and could be squeezed to a hundred pixels, where the headers
-/// sat on top of each other and the buttons below wrapped a word to a line.
-pub fn width_wanted(columns: &[Column]) -> f32 {
-    columns.iter().map(|c| c.width).sum::<f32>() + PADDING * columns.len() as f32 + SCROLLBAR
-}
-
-/// What the table keeps clear down its right for the scrollbar.
-const SCROLLBAR: f32 = 12.0;
+/// How tall the header is.
+pub const HEADER_HEIGHT: f32 = 32.0;
 
 /// What a cell holds.
 pub enum Cell {
@@ -47,6 +41,12 @@ pub enum Cell {
     Text(String),
     /// Text in the second voice: derived, not typed, and not editable.
     Dim(String),
+    /// A tone's name, in the row's strongest weight, with a quieter tag after
+    /// it for a tone from another pedal family ("PRO").
+    Name { text: String, tag: Option<String> },
+    /// Two things in one column, the second quieter: "Static Bloom · June
+    /// Arcade". Sorts on the first.
+    Pair { text: String, aside: String },
     /// Read-only text whose sort key is not its presentation (for example a
     /// comma-formatted download count or a shortened ISO timestamp).
     Value {
@@ -54,6 +54,13 @@ pub enum Cell {
         key: String,
         dim: bool,
     },
+    /// A chain as a strip of category colours; sorts on `key`.
+    Chain {
+        chain: Vec<shell::Mini>,
+        key: String,
+    },
+    /// A rating out of five as stars. Clicking a star rates, when `editable`.
+    Stars { rating: u8, editable: bool },
     /// Where a tone is: one icon per place, each its own button. The last
     /// value says whether this particular view offers an action there. Sync
     /// can still be unknown while sending is useful (for example before the
@@ -68,7 +75,9 @@ impl Cell {
     fn key(&self) -> SortKey {
         match self {
             Cell::Text(t) | Cell::Dim(t) => SortKey::Text(t.to_lowercase()),
-            Cell::Value { key, .. } => SortKey::Text(key.clone()),
+            Cell::Name { text, .. } | Cell::Pair { text, .. } => SortKey::Text(text.to_lowercase()),
+            Cell::Value { key, .. } | Cell::Chain { key, .. } => SortKey::Text(key.clone()),
+            Cell::Stars { rating, .. } => SortKey::Text(rating.to_string()),
             // Sorted so everything with something to do gathers at the top.
             Cell::Places(places) => SortKey::Text(
                 places
@@ -96,9 +105,6 @@ enum SortKey {
 /// into.
 pub struct Column {
     /// Owned rather than static: a header can depend on what is in the column.
-    /// The two ends of an assignment are a Min and a Max under an expression
-    /// pedal and an Off and an On under a footswitch, and they are the same
-    /// column.
     pub title: String,
     pub width: f32,
     pub editable: bool,
@@ -159,8 +165,7 @@ pub struct Grid {
     /// The rest of the sentence after [`Self::nothing_icon`], allowing the
     /// actual glyph to sit where its name would otherwise have to be.
     pub nothing_after_icon: &'static str,
-    /// How tall a row is. Zero means [`ROW_HEIGHT`], which is a line of text; a
-    /// table with knobs in it needs the room a knob takes.
+    /// How tall a row is. Zero means [`ROW_HEIGHT`].
     pub row_height: f32,
 }
 
@@ -215,6 +220,9 @@ pub struct Did {
     pub double_clicked: Option<usize>,
     /// Which row's place icon was pressed, and which of them.
     pub place: Option<(usize, usize)>,
+    /// A row rated with its stars, and the rating: clicking the rating a row
+    /// already has takes it away.
+    pub rated: Option<(usize, u8)>,
     /// Start typing in this cell.
     pub edit: Option<(usize, usize)>,
     /// Finish typing: keep it, or throw it away.
@@ -239,13 +247,24 @@ pub fn show(ui: &mut Ui, id: &str, grid: &mut Grid) -> Did {
         // shows nothing at all looks broken, and one that shows only a sentence
         // does not say what it is for.
         let column_visibility = draw_headers(ui, grid);
-        ui.add_space(10.0);
+        ui.add_space(14.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(grid.nothing_yet).color(theme::muted()));
+            ui.add_space(PADDING + 8.0);
+            theme::label(
+                ui,
+                grid.nothing_yet,
+                theme::regular(theme::BODY),
+                theme::muted(),
+            );
             if let Some(icon) = grid.nothing_icon {
                 theme::place_enabled(ui, icon, theme::Sync::Absent, false);
                 if !grid.nothing_after_icon.is_empty() {
-                    ui.label(RichText::new(grid.nothing_after_icon).color(theme::muted()));
+                    theme::label(
+                        ui,
+                        grid.nothing_after_icon,
+                        theme::regular(theme::BODY),
+                        theme::muted(),
+                    );
                 }
             }
         });
@@ -301,17 +320,21 @@ pub fn show(ui: &mut Ui, id: &str, grid: &mut Grid) -> Did {
         ctrl,
         shift,
     };
-    egui_table::Table::new()
-        .id_salt(id)
-        .num_rows(delegate.grid.rows.len() as u64)
-        .columns(columns)
-        .num_sticky_cols(delegate.grid.sticky)
-        .headers([egui_table::HeaderRow::new(ROW_HEIGHT)])
-        .show(ui, &mut delegate);
+    // The lines between columns show only where a column is being resized:
+    // the design's table has none at rest.
+    ui.scope(|ui| {
+        ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::NONE;
+        egui_table::Table::new()
+            .id_salt(id)
+            .num_rows(delegate.grid.rows.len() as u64)
+            .columns(columns)
+            .num_sticky_cols(delegate.grid.sticky)
+            .headers([egui_table::HeaderRow::new(HEADER_HEIGHT)])
+            .show(ui, &mut delegate);
+    });
     delegate.did
 }
 
-/// How tall this table's rows are: what it asked for, or a line of text.
 /// How wide a column may be dragged, given the width it starts at.
 ///
 /// 800 is the sensible stopping point for dragging a column of text wider, and
@@ -327,6 +350,7 @@ fn drag_ceiling(width: f32) -> f32 {
     width.max(800.0)
 }
 
+/// How tall this table's rows are: what it asked for, or the design's row.
 fn row_height(grid: &Grid) -> f32 {
     if grid.row_height > 0.0 {
         grid.row_height
@@ -335,29 +359,67 @@ fn row_height(grid: &Grid) -> f32 {
     }
 }
 
+/// A header's title, with the sort arrow after it when it orders the rows.
+fn paint_header(ui: &Ui, rect: Rect, title: &str, sorting: Option<bool>, hovered: bool) {
+    if hovered {
+        ui.painter().rect_filled(
+            rect.shrink2(Vec2::new(2.0, 4.0)),
+            CornerRadius::same(6),
+            theme::alpha(theme::hover(), 0.6),
+        );
+    }
+    if title.is_empty() {
+        return;
+    }
+    let galley = shell::galley(
+        ui,
+        title,
+        theme::semibold(12.0),
+        if sorting.is_some() {
+            theme::text_soft()
+        } else {
+            theme::muted()
+        },
+    );
+    let width = galley.size().x;
+    let x = rect.left() + PADDING;
+    shell::paint_line(ui, galley, x, rect.center().y);
+    if let Some(ascending) = sorting {
+        theme::paint_icon(
+            ui,
+            if ascending {
+                Icon::ChevronUp
+            } else {
+                Icon::ChevronDown
+            },
+            Pos2::new(x + width + 9.0, rect.center().y),
+            12.0,
+            theme::text_soft(),
+        );
+    }
+}
+
 /// The header row on its own, for when there are no rows to hang it above.
 fn draw_headers(ui: &mut Ui, grid: &Grid) -> Option<(usize, bool)> {
     let mut changed = None;
+    let top = ui.cursor().top();
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
         for (i, column) in grid.columns.iter().enumerate() {
             let width = if column.fills {
                 ui.available_width()
             } else {
-                column.width
+                column.width + PADDING
             };
             let (rect, hit) =
-                ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click());
-            if ui.is_rect_visible(rect) && !column.title.is_empty() {
-                ui.painter().text(
-                    rect.left_center() + egui::vec2(PADDING, 0.0),
-                    egui::Align2::LEFT_CENTER,
+                ui.allocate_exact_size(Vec2::new(width, HEADER_HEIGHT), Sense::click());
+            if ui.is_rect_visible(rect) {
+                paint_header(
+                    ui,
+                    rect,
                     &column.title,
-                    egui::TextStyle::Body.resolve(ui.style()),
-                    if i == grid.sort.0 {
-                        theme::accent()
-                    } else {
-                        theme::text()
-                    },
+                    (i == grid.sort.0).then_some(grid.sort.1),
+                    false,
                 );
             }
             if let Some(choice) = column_context_menu(&hit, &grid.column_choices) {
@@ -365,7 +427,12 @@ fn draw_headers(ui: &mut Ui, grid: &Grid) -> Option<(usize, bool)> {
             }
         }
     });
-    ui.separator();
+    let full = ui.max_rect();
+    ui.painter().hline(
+        full.x_range(),
+        top + HEADER_HEIGHT - 0.5,
+        Stroke::new(1.0, theme::line()),
+    );
     changed
 }
 
@@ -381,14 +448,24 @@ fn column_context_menu(
     }
     let mut changed = None;
     response.context_menu(|ui| {
-        ui.label(RichText::new("Columns").small().color(theme::muted()));
-        for (key, title, shown) in choices {
-            let mut visible = *shown;
-            if ui.checkbox(&mut visible, title).changed() {
-                changed = Some((*key, visible));
-            }
+        if let Some(choice) = column_menu(ui, choices) {
+            changed = Some(choice);
         }
     });
+    changed
+}
+
+/// Which columns to show, as a menu of checked rows. Shared with any button
+/// that offers the same choice.
+pub fn column_menu(ui: &mut Ui, choices: &[(usize, String, bool)]) -> Option<(usize, bool)> {
+    theme::menu_width(ui, 200.0);
+    theme::menu_header(ui, "Columns", None);
+    let mut changed = None;
+    for (key, title, shown) in choices {
+        if theme::menu_item(ui, shown.then_some(Icon::Check), title, None).clicked() {
+            changed = Some((*key, !*shown));
+        }
+    }
     changed
 }
 
@@ -410,6 +487,35 @@ struct Delegate<'a> {
     shift: bool,
 }
 
+/// Five stars at `x`, filled to `rating`; returns the star under the pointer.
+fn paint_stars(ui: &Ui, centre_y: f32, x: f32, rating: u8, pointer: Option<Pos2>) -> Option<u8> {
+    let mut under = None;
+    for star in 1..=5u8 {
+        let centre = Pos2::new(x + 6.0 + f32::from(star - 1) * 14.0, centre_y);
+        let hit = Rect::from_center_size(centre, Vec2::new(14.0, 18.0));
+        if pointer.is_some_and(|p| hit.contains(p)) {
+            under = Some(star);
+        }
+    }
+    let shown = under.unwrap_or(rating);
+    for star in 1..=5u8 {
+        let centre = Pos2::new(x + 6.0 + f32::from(star - 1) * 14.0, centre_y);
+        let filled = star <= shown;
+        theme::paint_icon(
+            ui,
+            if filled { Icon::StarOn } else { Icon::Star },
+            centre,
+            12.0,
+            if filled {
+                theme::accent()
+            } else {
+                theme::faint()
+            },
+        );
+    }
+    under
+}
+
 impl egui_table::TableDelegate for Delegate<'_> {
     fn header_cell_ui(&mut self, ui: &mut Ui, cell: &egui_table::HeaderCellInfo) {
         let Some(column) = self.grid.columns.get(cell.col_range.start) else {
@@ -420,34 +526,26 @@ impl egui_table::TableDelegate for Delegate<'_> {
         // of hunt-the-arrow.
         let index = cell.col_range.start;
         let (sorting, ascending) = self.grid.sort;
-        let arrow = match (index == sorting, ascending) {
-            (true, true) => " ↑",
-            (true, false) => " ↓",
-            _ => "",
-        };
         let size = ui.available_size();
-        let (rect, hit) = ui.allocate_exact_size(size, egui::Sense::click());
+        let (rect, hit) = ui.allocate_exact_size(size, Sense::click());
         if ui.is_rect_visible(rect) {
-            if hit.hovered() {
-                ui.painter()
-                    .rect_filled(rect, egui::CornerRadius::same(3), theme::raised());
-            }
-            ui.painter().text(
-                rect.left_center() + egui::vec2(PADDING, 0.0),
-                egui::Align2::LEFT_CENTER,
-                format!("{}{arrow}", column.title),
-                egui::TextStyle::Body.resolve(ui.style()),
-                if index == sorting {
-                    theme::accent()
-                } else {
-                    theme::text()
-                },
+            paint_header(
+                ui,
+                rect,
+                &column.title,
+                (index == sorting).then_some(ascending),
+                hit.hovered(),
+            );
+            ui.painter().hline(
+                rect.x_range(),
+                rect.bottom() - 0.5,
+                Stroke::new(1.0, theme::line()),
             );
         }
         let hover = if self.grid.column_choices.is_empty() {
-            "sort by this column"
+            "Sort by this column"
         } else {
-            "sort by this column · right-click to choose columns"
+            "Sort by this column. Right-click to choose columns"
         };
         let hit = hit.on_hover_text(hover);
         if let Some(choice) = column_context_menu(&hit, &self.grid.column_choices) {
@@ -461,25 +559,35 @@ impl egui_table::TableDelegate for Delegate<'_> {
     fn cell_ui(&mut self, ui: &mut Ui, cell: &egui_table::CellInfo) {
         let row = cell.row_nr as usize;
         let col = cell.col_nr;
-        if !ui.is_sizing_pass() && ui.clip_rect().intersect(ui.max_rect()).is_positive() {
+        let visible = !ui.is_sizing_pass() && ui.clip_rect().intersect(ui.max_rect()).is_positive();
+        if visible {
             self.did.last_visible = Some(self.did.last_visible.map_or(row, |last| last.max(row)));
         }
+        let rect = ui.max_rect();
         let picked =
             self.grid.chosen.get(row).copied().unwrap_or(false) || self.grid.selected == Some(row);
-        // Striping and selection are painted here rather than by the table:
-        // egui_table draws cells, and the row is the thing a person sees.
+        // The row under the pointer, across every column: egui_table draws
+        // cells, and the row is the thing a person sees.
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let hovered_row = pointer.is_some_and(|p| {
+            p.y >= rect.top() && p.y < rect.bottom() && ui.clip_rect().x_range().contains(p.x)
+        });
         // Selection is a neutral fill: amber is kept for the next action.
         let background = if picked {
             Some(theme::hover())
-        } else if row % 2 == 1 {
-            Some(theme::alpha(theme::raised(), 0.55))
+        } else if hovered_row {
+            Some(theme::alpha(theme::hover(), 0.45))
         } else {
             None
         };
         if let Some(fill) = background {
-            ui.painter()
-                .rect_filled(ui.max_rect(), egui::CornerRadius::ZERO, fill);
+            ui.painter().rect_filled(rect, CornerRadius::ZERO, fill);
         }
+        ui.painter().hline(
+            rect.x_range(),
+            rect.bottom() - 0.5,
+            Stroke::new(1.0, theme::line_soft()),
+        );
 
         // Every cell is inset from its column's edge. Without it the text sits
         // hard against the line beside it and the table reads as a spreadsheet
@@ -496,7 +604,7 @@ impl egui_table::TableDelegate for Delegate<'_> {
             // takes every keystroke twice: one Z typed arrived as ZZ. The
             // clipped copy is laid out for its width and left inert. Same for a
             // sizing pass, which is measuring rather than showing.
-            if ui.is_sizing_pass() || !ui.clip_rect().intersect(ui.max_rect()).is_positive() {
+            if !visible {
                 ui.label(self.grid.draft.clone());
                 return;
             }
@@ -506,6 +614,7 @@ impl egui_table::TableDelegate for Delegate<'_> {
             let mut shown = egui::TextEdit::singleline(&mut self.grid.draft)
                 .id(self.id.with(("editing", row, col)))
                 .desired_width(f32::INFINITY)
+                .font(theme::regular(theme::BODY))
                 .frame(egui::Frame::NONE)
                 .show(ui);
             let field = shown.response;
@@ -523,6 +632,11 @@ impl egui_table::TableDelegate for Delegate<'_> {
                 shown.state.cursor.set_char_range(Some(all));
                 shown.state.store(ui.ctx(), field.id);
             }
+            ui.painter().hline(
+                (rect.left() + PADDING)..=(rect.right() - 4.0),
+                rect.bottom() - 6.0,
+                Stroke::new(1.0, theme::accent_line()),
+            );
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.did.cancelled = true;
             } else if field.lost_focus() {
@@ -532,19 +646,15 @@ impl egui_table::TableDelegate for Delegate<'_> {
         }
 
         // The whole cell answers, not just the words in it. Without this a
-        // right-click landed only on the text, which in a row tall enough to
-        // hold a knob is a sliver of it, and the row's menu looked broken.
+        // right-click landed only on the text, which is a sliver of the row,
+        // and the row's menu looked broken.
         //
         // Claimed *before* the contents are drawn, which is the whole trick.
         // egui gives a tie to whichever widget was added last, so a target laid
         // over the cell afterwards quietly takes the clicks meant for what is
         // inside it: it is why pressing Push in the library only ever selected
-        // the row, and why a CC could be dragged but never clicked to type.
-        let whole = ui.interact(
-            ui.max_rect(),
-            ui.id().with(("cell", row, col)),
-            egui::Sense::click(),
-        );
+        // the row.
+        let whole = ui.interact(rect, ui.id().with(("cell", row, col)), Sense::click());
 
         let Some(content) = self.grid.rows.get(row).and_then(|r| r.get(col)) else {
             return;
@@ -552,62 +662,158 @@ impl egui_table::TableDelegate for Delegate<'_> {
         // Whether something inside the cell answered the click itself, so the
         // cell does not answer it a second time.
         let mut claimed = false;
-        let response = match content {
+        let left = rect.left() + PADDING;
+        let room = (rect.right() - left - 6.0).max(8.0);
+        let y = rect.center().y;
+        match content {
             Cell::Places(places) => {
                 let places = places.clone();
                 // On the row's centre line, like the text beside them.
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    for (n, (icon, state, hover, enabled)) in places.iter().enumerate() {
-                        let hit = theme::place_enabled(ui, *icon, *state, *enabled);
-                        let hit = if hover.is_empty() {
-                            hit
-                        } else {
-                            hit.on_hover_text(*hover)
-                        };
-                        if *enabled && hit.clicked() {
-                            self.did.place = Some((row, n));
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(Rect::from_min_max(
+                            Pos2::new(left, rect.top()),
+                            rect.right_bottom(),
+                        ))
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                child.spacing_mut().item_spacing.x = 4.0;
+                for (n, (icon, state, hover, enabled)) in places.iter().enumerate() {
+                    let hit = theme::place_enabled(&mut child, *icon, *state, *enabled);
+                    let hit = if hover.is_empty() {
+                        hit
+                    } else {
+                        hit.on_hover_text(*hover)
+                    };
+                    if *enabled && hit.clicked() {
+                        self.did.place = Some((row, n));
+                        claimed = true;
+                    }
+                }
+            }
+            Cell::Text(text) => {
+                let galley = shell::elided(
+                    ui,
+                    text.clone(),
+                    theme::regular(theme::BODY),
+                    theme::text(),
+                    room,
+                );
+                shell::paint_line(ui, galley, left, y);
+            }
+            Cell::Dim(text) => {
+                let galley = shell::elided(
+                    ui,
+                    text.clone(),
+                    theme::regular(theme::BODY),
+                    theme::muted(),
+                    room,
+                );
+                shell::paint_line(ui, galley, left, y);
+            }
+            Cell::Name { text, tag } => {
+                let tag = tag.as_ref().map(|tag| {
+                    ui.painter().layout_job(theme::paint::spaced(
+                        tag,
+                        theme::semibold(10.0),
+                        theme::faint(),
+                        0.04,
+                    ))
+                });
+                let tag_width = tag.as_ref().map_or(0.0, |tag| tag.size().x + 6.0);
+                let galley = shell::elided(
+                    ui,
+                    text.clone(),
+                    theme::semibold(theme::BODY),
+                    theme::text(),
+                    (room - tag_width).max(8.0),
+                );
+                let width = galley.size().x;
+                shell::paint_line(ui, galley, left, y);
+                if let Some(tag) = tag {
+                    let height = tag.size().y;
+                    ui.painter().galley(
+                        Pos2::new(left + width + 6.0, y - height / 2.0 + 0.5),
+                        tag,
+                        Color32::PLACEHOLDER,
+                    );
+                }
+            }
+            Cell::Pair { text, aside } => {
+                let first = shell::elided(
+                    ui,
+                    text.clone(),
+                    theme::regular(theme::BODY),
+                    theme::text_soft(),
+                    room,
+                );
+                let width = first.size().x;
+                shell::paint_line(ui, first, left, y);
+                if !aside.is_empty() && room - width > 30.0 {
+                    let dot = shell::galley(ui, " · ", theme::regular(theme::BODY), theme::faint());
+                    let dot_width = dot.size().x;
+                    shell::paint_line(ui, dot, left + width, y);
+                    let second = shell::elided(
+                        ui,
+                        aside.clone(),
+                        theme::regular(theme::BODY),
+                        theme::muted(),
+                        room - width - dot_width,
+                    );
+                    shell::paint_line(ui, second, left + width + dot_width, y);
+                }
+            }
+            Cell::Value { text, dim, .. } => {
+                let galley = shell::elided(
+                    ui,
+                    text.clone(),
+                    theme::regular(theme::BODY),
+                    if *dim {
+                        theme::muted()
+                    } else {
+                        theme::text_soft()
+                    },
+                    room,
+                );
+                shell::paint_line(ui, galley, left, y);
+            }
+            Cell::Chain { chain, .. } => {
+                if visible {
+                    let clip = Rect::from_min_max(
+                        Pos2::new(left, rect.top()),
+                        Pos2::new(rect.right() - 4.0, rect.bottom()),
+                    );
+                    let mut child = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(clip)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    child.set_clip_rect(clip.intersect(ui.clip_rect()));
+                    shell::mini_chain_sized(&mut child, chain, 12.0, 6.0);
+                }
+            }
+            Cell::Stars { rating, editable } => {
+                let under =
+                    paint_stars(ui, y, left, *rating, if *editable { pointer } else { None });
+                if *editable {
+                    if let Some(star) = under {
+                        if whole.clicked() {
+                            // The rating it has already, clicked again, is
+                            // taken away: the way to say "not rated".
+                            let rating = if star == *rating { 0 } else { star };
+                            self.did.rated = Some((row, rating));
                             claimed = true;
                         }
                     }
-                })
-                .response
+                }
             }
-            Cell::Text(text) | Cell::Dim(text) => {
-                let rich = if matches!(content, Cell::Dim(_)) {
-                    RichText::new(text).color(theme::muted())
-                } else {
-                    RichText::new(text)
-                };
-                ui.add(
-                    // Not selectable. egui makes label text selectable by
-                    // default, which puts an I-beam and a highlight on every
-                    // cell: it reads as an edit field that refuses to be edited.
-                    egui::Label::new(rich)
-                        .selectable(false)
-                        // Truncated, not wrapped: a wrapped name makes one row
-                        // twice the height of its neighbours and the table
-                        // ripples.
-                        .truncate()
-                        .sense(egui::Sense::click()),
-                )
-            }
-            Cell::Value { text, dim, .. } => {
-                let rich = if *dim {
-                    RichText::new(text).color(theme::muted())
-                } else {
-                    RichText::new(text)
-                };
-                ui.add(
-                    egui::Label::new(rich)
-                        .selectable(false)
-                        .truncate()
-                        .sense(egui::Sense::click()),
-                )
-            }
-        };
+        }
 
-        let response = response.union(whole);
+        let response = if matches!(content, Cell::Stars { editable: true, .. }) {
+            whole.on_hover_text("Click a star to rate it; click its rating again to clear it")
+        } else {
+            whole
+        };
 
         // A click the contents took is not a click on the cell as well:
         // pressing Push sends a tone, and should not also pick the row.
@@ -632,10 +838,18 @@ impl egui_table::TableDelegate for Delegate<'_> {
         if !self.grid.menu.is_empty() {
             let items = self.grid.menu.clone();
             response.context_menu(|ui| {
+                theme::menu_width(ui, 220.0);
                 for (n, item) in items.iter().enumerate() {
-                    if ui.button(item).clicked() {
+                    // What removes something is drawn as the destructive
+                    // item, as menus here always draw it.
+                    let destructive = item.starts_with("Delete") || item.starts_with("Remove");
+                    let chosen = if destructive {
+                        theme::menu_danger(ui, Icon::Remove, item).clicked()
+                    } else {
+                        theme::menu_item(ui, None, item, None).clicked()
+                    };
+                    if chosen {
                         self.did.chose = Some((row, n));
-                        ui.close();
                     }
                 }
             });
@@ -671,24 +885,6 @@ mod tests {
         assert_eq!(drag_ceiling(190.0), 800.0);
     }
 
-    /// The floor a panel puts under itself has to cover what it is holding.
-    #[test]
-    fn the_width_wanted_covers_every_column_and_its_padding() {
-        let columns = vec![
-            Column::new("Setlist", 120.0),
-            Column::new("Venue", 90.0),
-            Column::new("Date", 80.0),
-            Column::new("#", 34.0),
-        ];
-        let bare: f32 = columns.iter().map(|c| c.width).sum();
-        assert!(
-            width_wanted(&columns) > bare,
-            "a floor that is only the sum of the columns leaves no room for \
-             the padding each one adds, nor for the scrollbar"
-        );
-        assert_eq!(width_wanted(&columns), 324.0 + 32.0 + 12.0);
-    }
-
     #[test]
     fn sorting_keeps_row_state_with_its_row() {
         let mut grid = Grid {
@@ -709,5 +905,35 @@ mod tests {
         assert_eq!(grid.selected, Some(1));
         assert_eq!(grid.editing, Some((2, 0)));
         assert_eq!(grid.chosen, vec![false, false, true]);
+    }
+
+    /// Stars and names sort the way they read: by rating, and by name
+    /// whatever tag follows it.
+    #[test]
+    fn stars_and_names_sort_the_way_they_read() {
+        let mut grid = Grid {
+            rows: vec![
+                vec![Cell::Stars {
+                    rating: 4,
+                    editable: true,
+                }],
+                vec![Cell::Stars {
+                    rating: 1,
+                    editable: true,
+                }],
+                vec![Cell::Stars {
+                    rating: 5,
+                    editable: true,
+                }],
+            ],
+            sort: (0, false),
+            ..Default::default()
+        };
+        assert_eq!(grid.sort_rows(), vec![2, 0, 1], "highest first, descending");
+        let name = Cell::Name {
+            text: "Glass Wall".into(),
+            tag: Some("PRO".into()),
+        };
+        assert_eq!(name.key(), SortKey::Text("glass wall".into()));
     }
 }

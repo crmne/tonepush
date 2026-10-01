@@ -66,10 +66,12 @@ enum Scene {
     HxFootswitches,
     /// The Snapshots lens.
     HxSnapshots,
+    /// The library's setlists, one compared with the pedal bank by bank.
+    HxSetlists,
 }
 
 impl Scene {
-    const ALL: [Scene; 14] = [
+    const ALL: [Scene; 15] = [
         Scene::HxEdit,
         Scene::ProEdit,
         Scene::NoDevice,
@@ -84,6 +86,7 @@ impl Scene {
         Scene::HxBrowser,
         Scene::HxFootswitches,
         Scene::HxSnapshots,
+        Scene::HxSetlists,
     ];
 
     fn name(self) -> &'static str {
@@ -102,6 +105,7 @@ impl Scene {
             Scene::HxBrowser => "hx-browser",
             Scene::HxFootswitches => "hx-footswitches",
             Scene::HxSnapshots => "hx-snapshots",
+            Scene::HxSetlists => "hx-setlists",
         }
     }
 
@@ -113,12 +117,14 @@ impl Scene {
         match self {
             Scene::HxEdit | Scene::Settings => hx_stomp(app),
             Scene::ProEdit => pro(app),
-            Scene::SetlistConfirm => {
+            Scene::SetlistConfirm | Scene::HxSetlists => {
                 hx_stomp(app);
                 app.page = shell::Page::Library;
                 app.lib_showing = crate::LibraryView::Setlists;
                 app.select_setlist_entry(0);
-                app.confirm_push = Some(0);
+                if self == Scene::SetlistConfirm {
+                    app.confirm_push = Some(0);
+                }
             }
             Scene::HxLibrary => {
                 hx_stomp(app);
@@ -136,6 +142,7 @@ impl Scene {
             }
             Scene::HxPedal => {
                 hx_stomp(app);
+                backups_history(app);
                 app.page = shell::Page::Pedal;
             }
             Scene::HxPedalIrs | Scene::HxPedalEq | Scene::HxPedalSettings => {
@@ -173,6 +180,54 @@ impl Scene {
             }
         }
     }
+}
+
+/// A chain written a letter per block, as the fixture's tones write it: W
+/// wah, D drive, Y dynamics, E EQ, M modulation, L delay, R reverb, P pitch,
+/// F filter, A amp, C cab, I impulse response; lower case when off, and a
+/// parallel stretch in brackets.
+fn fixture_chain(code: &str) -> Vec<shell::Mini> {
+    let block = |letter: char| {
+        let category = match letter.to_ascii_uppercase() {
+            'W' => "Wah",
+            'D' => "Distortion",
+            'Y' => "Dynamics",
+            'E' => "EQ",
+            'M' => "Modulation",
+            'L' => "Delay",
+            'R' => "Reverb",
+            'P' => "Pitch/Synth",
+            'F' => "Filter",
+            'A' => "Amp",
+            'C' => "Cab",
+            'I' => "IR",
+            _ => "",
+        };
+        (
+            theme::category_colour(category),
+            letter.is_ascii_uppercase(),
+        )
+    };
+    let mut chain = Vec::new();
+    let mut stack: Option<Vec<(egui::Color32, bool)>> = None;
+    for letter in code.chars() {
+        match letter {
+            '[' => stack = Some(Vec::new()),
+            ']' => {
+                if let Some(lanes) = stack.take() {
+                    chain.push(shell::Mini::Stack(lanes));
+                }
+            }
+            letter => match stack.as_mut() {
+                Some(lanes) => lanes.push(block(letter)),
+                None => {
+                    let (colour, on) = block(letter);
+                    chain.push(shell::Mini::Block { colour, on });
+                }
+            },
+        }
+    }
+    chain
 }
 
 /// The model browser open on Minotaur's block, with Teemah! playing in its
@@ -408,25 +463,26 @@ fn screenshots() {
 /// family like a real one; the rows the table draws are held in memory.
 fn library(app: &mut App) {
     // Name | pedal | song | artist | character | rating | day kept in
-    // September | version | the one-line reading of its chain.
+    // September | version | the one-line reading of its chain | the chain,
+    // a letter per block (lower case when off, a stack in brackets).
     const TONES: [&str; 17] = [
-        "Plexi Crunch|hx|Original||drive|4|12|2|Full rig",
-        "Glass Clean|hx|Harbour Lights|The Night Signals|clean|4|10|1|Full rig",
-        "Brown Lead|hx|Static Bloom|June Arcade|hi-gain|4|11|3|Full rig",
-        "Ambient Swell|hx|Original||clean|3|10|1|Effects only",
-        "Velvet Drive|pro|Low Tide|Marlow Kent|drive|5|28|4|Full rig",
-        "Edge of Breakup|hx|Original||drive|4|14|1|Full rig",
-        "Doom Fuzz|hx|Iron Valley|Slow Comet|fuzz|3|15|1|Full rig",
-        "Worship Pad|hx|Original||clean|5|16|2|Effects only",
-        "Glass Wall|pro|Original||clean|4|29|1|Full rig",
-        "Slapback Twang|hx|Dust Road|The Night Signals|clean|0|17|1|Full rig",
-        "Funk Rhythm|hx|Original||clean|3|18|1|Full rig",
-        "Tape Echo Clean|hx|Paper Boats|June Arcade|clean|4|19|2|Amp and cab",
-        "Shimmer Lead|pro|Low Tide|Marlow Kent|hi-gain|4|29|2|Full rig",
-        "Surf Spring|hx|Original||clean|3|20|1|Amp and cab",
-        "Octave Fuzz|hx|Original||fuzz|2|21|1|Amp and cab",
-        "Dream Pop|hx|Glasshouse|Slow Comet|clean|4|23|1|Full rig",
-        "Garage Grit|hx|Original||drive|3|24|1|Amp and cab",
+        "Plexi Crunch|hx|Original||drive|4|12|2|Full rig|wDA[CC]lR",
+        "Glass Clean|hx|Harbour Lights|The Night Signals|clean|4|10|1|Full rig|YACMLR",
+        "Brown Lead|hx|Static Bloom|June Arcade|hi-gain|4|11|3|Full rig|DDACLR",
+        "Ambient Swell|hx|Original||clean|3|10|1|Effects only|YMLLR",
+        "Velvet Drive|pro|Low Tide|Marlow Kent|drive|5|28|4|Full rig|YDAIEMLR",
+        "Edge of Breakup|hx|Original||drive|4|14|1|Full rig|YDACR",
+        "Doom Fuzz|hx|Iron Valley|Slow Comet|fuzz|3|15|1|Full rig|DDACr",
+        "Worship Pad|hx|Original||clean|5|16|2|Effects only|YMLRR",
+        "Glass Wall|pro|Original||clean|4|29|1|Full rig|YMDAIELR",
+        "Slapback Twang|hx|Dust Road|The Night Signals|clean|0|17|1|Full rig|YACLR",
+        "Funk Rhythm|hx|Original||clean|3|18|1|Full rig|YFACR",
+        "Tape Echo Clean|hx|Paper Boats|June Arcade|clean|4|19|2|Amp and cab|DACLR",
+        "Shimmer Lead|pro|Low Tide|Marlow Kent|hi-gain|4|29|2|Full rig|YDAIMLR",
+        "Surf Spring|hx|Original||clean|3|20|1|Amp and cab|ACRR",
+        "Octave Fuzz|hx|Original||fuzz|2|21|1|Amp and cab|PDAC",
+        "Dream Pop|hx|Glasshouse|Slow Comet|clean|4|23|1|Full rig|YMACLR",
+        "Garage Grit|hx|Original||drive|3|24|1|Amp and cab|DAC",
     ];
     let field = |tone: &'static str, index: usize| tone.split('|').nth(index).unwrap_or_default();
     let hash = |name: &str| {
@@ -476,29 +532,117 @@ fn library(app: &mut App) {
                 rating: (rating > 0).then_some(f32::from(rating)),
                 version,
                 versions: version,
+                chain: fixture_chain(field(tone, 9)),
+                pro: field(tone, 1) == "pro",
             }
         })
         .collect();
     app.library_lookup.indexed = app.lib_entries.iter().map(|e| e.hash.clone()).collect();
     app.library_lookup.reindex(&app.lib_entries);
 
-    let slot = |name: &str| crate::library::Slot {
-        hash: hash(name),
+    // The setlists are written against the pedal's own presets, so they are
+    // made with the HX Stomp's fixture; see `setlists`.
+    app.lib_setlists = Vec::new();
+}
+
+/// The setlists, written against the HX Stomp's presets: Album release show
+/// differs from the pedal in six slots (four hold other presets, two it would
+/// empty), Rehearsal matches it, Studio session holds only its first 24,
+/// Summer tour is for a StompStation PRO, and Acoustic night only its first 12.
+fn setlists(app: &mut App) {
+    let store = |name: &str, salt: &str| {
+        crate::library::store(
+            name,
+            format!("TonePush screenshot preset: {name}{salt}").as_bytes(),
+            "hxpreset",
+        )
+        .expect("the scratch library takes a synthetic preset")
+    };
+    // What the pedal holds in every slot, as its backup would say: the
+    // library's copy where it keeps that preset, its own otherwise.
+    for (index, name) in app.presets.clone().iter().enumerate() {
+        if !shell::hx_slot_is_empty(name) && !app.mirror.contains_key(&(index as i64)) {
+            app.mirror.insert(index as i64, store(name, ""));
+        }
+    }
+    let on_pedal = |app: &App, index: usize| crate::library::Slot {
+        hash: app.mirror.get(&(index as i64)).cloned().unwrap_or_default(),
+        name: app.presets[index].clone(),
+        file: String::new(),
+    };
+    let filled = app
+        .presets
+        .iter()
+        .take_while(|name| !shell::hx_slot_is_empty(name))
+        .count();
+    let total = app.presets.len();
+    let mut album: Vec<crate::library::Slot> = (0..filled).map(|i| on_pedal(app, i)).collect();
+    // Older versions of three presets, a fourth the setlist plays instead,
+    // and two slots it leaves empty.
+    for index in [4, 12, 26] {
+        album[index].hash = store(&album[index].name, " as it was in September");
+    }
+    album[31] = crate::library::Slot {
+        hash: store("Night Verb", ""),
+        name: "Night Verb".to_owned(),
+        file: String::new(),
+    };
+    album[39] = crate::library::Slot::default();
+    album[40] = crate::library::Slot::default();
+    album.resize(total, crate::library::Slot::default());
+    let rehearsal: Vec<crate::library::Slot> = (0..total)
+        .map(|i| {
+            if i < filled {
+                on_pedal(app, i)
+            } else {
+                crate::library::Slot::default()
+            }
+        })
+        .collect();
+    let first = |count: usize| -> Vec<crate::library::Slot> {
+        (0..total)
+            .map(|i| {
+                if i < count {
+                    on_pedal(app, i)
+                } else {
+                    crate::library::Slot::default()
+                }
+            })
+            .collect()
+    };
+    let mut studio = first(24);
+    studio[7].hash = store(&studio[7].name, " from the studio");
+    let acoustic = first(12);
+    let pro_slot = |name: &str| crate::library::Slot {
+        hash: app
+            .lib_entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.hash.clone())
+            .unwrap_or_default(),
         name: name.to_owned(),
         file: String::new(),
     };
-    let setlist = |name: &str, venue: &str, date: &str, version: u32, tones: &[&str]| {
-        crate::library::Setlist {
-            series: hash(name),
-            version,
-            added_at: "2026-09-01T12:00:00Z".to_owned(),
-            modified_at: "2026-10-04T18:02:00Z".to_owned(),
-            name: name.to_owned(),
-            description: String::new(),
-            venue: venue.to_owned(),
-            date: date.to_owned(),
-            slots: tones.iter().map(|tone| slot(tone)).collect(),
-        }
+    let summer = vec![
+        pro_slot("Velvet Drive"),
+        pro_slot("Glass Wall"),
+        pro_slot("Shimmer Lead"),
+    ];
+    let setlist = |name: &str,
+                   venue: &str,
+                   date: &str,
+                   version: u32,
+                   captured: &str,
+                   slots: Vec<crate::library::Slot>| crate::library::Setlist {
+        series: format!("series-{name}"),
+        version,
+        added_at: "2026-07-01T12:00:00Z".to_owned(),
+        modified_at: captured.to_owned(),
+        name: name.to_owned(),
+        description: String::new(),
+        venue: venue.to_owned(),
+        date: date.to_owned(),
+        slots,
     };
     app.lib_setlists = vec![
         (
@@ -508,13 +652,8 @@ fn library(app: &mut App) {
                 "Lido Rooftop, Berlin",
                 "4 Oct 2026",
                 2,
-                &[
-                    "Glass Clean",
-                    "Plexi Crunch",
-                    "Brown Lead",
-                    "Edge of Breakup",
-                    "Ambient Swell",
-                ],
+                "2026-10-04T18:02:00Z",
+                album,
             ),
         ),
         (
@@ -524,7 +663,19 @@ fn library(app: &mut App) {
                 "Room 3",
                 "28 Sep 2026",
                 1,
-                &["Glass Clean", "Plexi Crunch"],
+                "2026-09-28T19:30:00Z",
+                rehearsal,
+            ),
+        ),
+        (
+            "studio-session.json".into(),
+            setlist(
+                "Studio session",
+                "Kranhaus Studio",
+                "12 Sep 2026",
+                1,
+                "2026-09-12T11:00:00Z",
+                studio,
             ),
         ),
         (
@@ -534,10 +685,154 @@ fn library(app: &mut App) {
                 "Various",
                 "2 Aug 2026",
                 3,
-                &["Velvet Drive", "Glass Wall"],
+                "2026-08-02T10:00:00Z",
+                summer,
+            ),
+        ),
+        (
+            "acoustic-night.json".into(),
+            setlist(
+                "Acoustic night",
+                "Café Wendel",
+                "18 Jul 2026",
+                1,
+                "2026-07-18T20:00:00Z",
+                acoustic,
             ),
         ),
     ];
+    // Every tone a setlist plays is held, so no slot reads as missing.
+    for (_, setlist) in &app.lib_setlists {
+        for slot in &setlist.slots {
+            if slot.is_empty() {
+                continue;
+            }
+            let meta = app
+                .lib_entries
+                .iter()
+                .find(|entry| entry.hash == slot.hash)
+                .map(|entry| entry.meta.clone())
+                .unwrap_or_default();
+            app.library_lookup
+                .setlist_tones
+                .insert(slot.hash.clone(), crate::SetlistTone { held: true, meta });
+        }
+    }
+}
+
+/// The HX Stomp's backups as the design shows them: the automatic copy,
+/// kept current after 01B was saved; the copy set aside as the pedal
+/// connected; the one set aside before Album release show was written, which
+/// differs from the pedal in six slots and is chosen; a copy saved to a
+/// file; and older ones set aside as the pedal connected. All in memory:
+/// nothing is read from disk or written to it.
+fn backups_history(app: &mut App) {
+    use crate::backups::{BackupCopy, Held, Origin, Why};
+
+    let manifest = app
+        .automatic_backup
+        .clone()
+        .expect("the HX Stomp fixture is backed up");
+    let automatic = session::automatic_dir().expect("the scratch backups have a home");
+    let history = automatic
+        .parent()
+        .expect("the automatic backup has a folder")
+        .join("history");
+    let at = |days: i64, hour: i8, minute: i8| -> u64 {
+        let time = jiff::Zoned::now()
+            .with()
+            .hour(hour)
+            .minute(minute)
+            .second(0)
+            .subsec_nanosecond(0)
+            .build()
+            .expect("a time of day")
+            .checked_sub(jiff::Span::new().days(days))
+            .expect("a day in the past");
+        u64::try_from(time.timestamp().as_second()).expect("after 1970")
+    };
+    let now = Held {
+        names: vec![app.presets.clone()],
+        hashes: app
+            .mirror
+            .iter()
+            .map(|(slot, hash)| ((0, *slot as usize), hash.clone()))
+            .collect(),
+    };
+    let album = app
+        .lib_setlists
+        .iter()
+        .find(|(_, setlist)| setlist.name == "Album release show")
+        .map(|(_, setlist)| setlist.clone())
+        .expect("the fixture's setlists include Album release show");
+    let before = Held {
+        names: vec![(0..app.presets.len())
+            .map(|slot| {
+                album
+                    .slots
+                    .get(slot)
+                    .map(|held| held.name.clone())
+                    .unwrap_or_default()
+            })
+            .collect()],
+        hashes: album
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, held)| !held.is_empty())
+            .map(|(slot, held)| ((0, slot), held.hash.clone()))
+            .collect(),
+    };
+    let copy = |path: std::path::PathBuf, origin: Origin, when: u64| BackupCopy {
+        path,
+        origin,
+        when,
+        manifest: hx_usb::backup::Manifest {
+            captured: when,
+            ..manifest.clone()
+        },
+        complete: true,
+    };
+    let set_aside = |why: Why, when: u64| {
+        copy(
+            history.join(format!("automatic {}.hxbundle", session::stamp_of(when))),
+            Origin::SetAside(Some(why)),
+            when,
+        )
+    };
+    let chosen = set_aside(
+        Why::Setlist {
+            name: "Album release show".to_owned(),
+        },
+        at(3, 18, 2),
+    );
+    let copies = vec![
+        copy(
+            automatic.clone(),
+            Origin::Current { saved: Some(1) },
+            at(0, 14, 2),
+        ),
+        set_aside(Why::Connected, at(0, 13, 58)),
+        chosen.clone(),
+        set_aside(Why::Connected, at(4, 21, 11)),
+        copy(
+            automatic.with_file_name("hx-stomp-before-tour.hxbundle"),
+            Origin::File,
+            at(9, 10, 2),
+        ),
+        set_aside(Why::Connected, at(16, 19, 40)),
+        set_aside(Why::Connected, at(23, 11, 5)),
+    ];
+    for copy in &copies {
+        let held = if copy.path == chosen.path {
+            before.clone()
+        } else {
+            now.clone()
+        };
+        app.backup_held.insert(copy.path.clone(), held);
+    }
+    app.backup_chosen = Some(chosen.path);
+    app.backup_shelf = Some(copies);
 }
 
 /// 01B Plexi Crunch on an HX Stomp: a wah under EXP 1, a drive on FS1, the
@@ -626,13 +921,19 @@ fn hx_stomp(app: &mut App) {
     for (index, name) in app.presets.clone().iter().enumerate() {
         if let Some(entry) = app.lib_entries.iter().find(|entry| &entry.name == name) {
             let hash = if name == "Tape Echo Clean" {
-                "an earlier version".to_owned()
+                crate::library::store(
+                    name,
+                    b"TonePush screenshot preset: Tape Echo Clean as edited on the pedal",
+                    "hxpreset",
+                )
+                .expect("the scratch library takes a synthetic preset")
             } else {
                 entry.hash.clone()
             };
             app.mirror.insert(index as i64, hash);
         }
     }
+    setlists(app);
     let captured = two_minutes_past_two()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());

@@ -163,3 +163,77 @@ the knobs and the ASSIGNMENTS table share the page.
   which no mockup draws.
 - On a small window the browser's shelves move from its head to above the
   models, and the deck says one thing at a time.
+
+## Stage 4: the Library and Pedal pages
+
+Library, Tones: one row per tone with where it is (the pedal's mark, the
+computer's, TonePush's), its chain as a strip of category colours, song and
+artist, character, rating and the day it was kept; PRO tones say so. Which
+columns show is a menu beside the search (and the header's right-click
+menu), and the tags are a filter menu beside it. The inspector holds the
+tone's name, its chain as wells, where it is with Send to a slot, its song and
+tone details, rating, tags, notes, versions, Publish and Export.
+
+Library, Setlists: a card per setlist saying first how it stands against the
+pedal ("Matches the pedal", "6 slots differ", "For StompStation PRO"), and the
+chosen one's page: its name, venue and date edited in place, its version,
+Capture the pedal as the next version, Put on the pedal, and its menu. The
+banner says what differs in a sentence and narrows the banks to those slots;
+the banks show replaced slots in amber with the compare mark, and the slots
+the setlist would empty dashed and named. A slot sends its own preset back on
+a double-click or from its menu.
+
+Putting a setlist on the pedal (06) counts what the write changes, read from
+the pedal's backup: the presets replaced and the slots emptied or filled by
+slot, and those that already match.
+
+Pedal, Backups (08): how the pedal is protected, then every copy of it on this
+computer, newest first: the automatic backup kept current ("Refreshed after
+saving 01B"), the copies set aside before it was refreshed ("Pedal
+connected", "Before a setlist: Before Album release show was written",
+"Before presets were sent", "Before a restore"), and the backups saved to a
+file. The chosen copy is compared with the pedal now, preset by preset
+("Ambient Swell edited since", "Sparkle Verb was Night Verb"), and can be
+put back whole or shown in its folder. The Settings tab is redrawn in the same
+cards, with the two states of a switch side by side, choices in a menu and the
+tempo on a slider beside a field to type it.
+
+Scenes: `hx-library`, `hx-setlists` (new: Album release show against the
+pedal), `setlist-confirm`, `hx-pedal` (the backups, the copy before Album
+release show chosen), `hx-pedal-settings`, and `pro-pedal`, whose banner now
+spans its column as the design's banners do. Their `before/` is
+`before/hx-edit` and the stage 2 windows.
+
+- Putting a setlist on the pedal still writes every slot, as TonePush does
+  today: writing only the slots that differ is one of the design's open
+  questions. The dialog says so, counts the slots that match as "written again
+  as they are", and its button says "Write 126 slots". Its footer asks to keep
+  the pedal connected rather than estimating a time TonePush does not know.
+- "Keep the pedal as it is now as a setlist first" works: the pedal is read
+  into the library as the next version of the setlist named after it (its
+  description says which setlist it came before), without asking for a name,
+  and nothing is written until that copy is saved. A capture that could not
+  keep every preset stops the write.
+- Restoring single presets, and "Restore these 6 presets…", are not built:
+  that is the other open question. The comparison lists every preset that
+  differs, and Restore the whole pedal… writes the copy back after a
+  confirmation that counts what it writes. Restoring from a file now asks the
+  same question first (it used to start at once), and a backup from another
+  kind of pedal is refused before anything is asked.
+- The Checked column says "Complete" (every preset, impulse response and the
+  settings the copy names are in it), not "Verified": an HX backup has no
+  checksums to verify against, unlike the PRO's.
+- Why a copy was set aside is written inside it from now on; copies taken
+  before this say "An earlier copy". The worker names the setlist when a whole
+  setlist is written, and the slots when presets are sent on their own.
+- Backups saved to a file appear in the history from now on: TonePush keeps
+  the last twenty in its settings file, and leaves out any that have moved.
+- The mockup lists Summer tour (for a StompStation PRO) while the library is
+  scoped to the HX Stomp; TonePush keeps another family's setlists out of a
+  pedal's scope, as it does today, and shows them with "For StompStation PRO"
+  under All pedals.
+- The tags rail and the Favorites filter are a filter menu beside the search,
+  and the columns are a menu; at the smallest size the table scrolls sideways
+  rather than dropping columns, and the columns are chosen from the header.
+- No mockup draws the Settings tab, the impulse responses, favourite blocks,
+  the global EQ or the activity log; they use the stage 2 components.

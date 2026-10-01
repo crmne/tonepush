@@ -8,7 +8,7 @@ use egui::{CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 use crate::shell;
 use crate::theme::{self, Icon, Mood, Tier};
-use crate::{session, table, App, Cmd, Connection, LibraryView, RichText};
+use crate::{session, App, Cmd, Connection, LibraryView, RichText};
 
 /// The tabs of an HX pedal's page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -45,7 +45,7 @@ impl PedalTab {
 }
 
 /// A small menu button: the choice, and a chevron.
-fn choice_button(ui: &mut Ui, label: &str) -> egui::Response {
+pub(crate) fn choice_button(ui: &mut Ui, label: &str) -> egui::Response {
     theme::Button::new(label)
         .small()
         .trailing(Icon::ChevronDown)
@@ -65,6 +65,28 @@ fn list_row(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
             .max_rect(rect.shrink2(Vec2::new(12.0, 0.0)))
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
         add,
+    );
+}
+
+/// A setting: its name at the left, its control at the right, 44 points,
+/// with a hairline under it unless it is the last. `control` is laid out
+/// right to left.
+fn setting_row(ui: &mut Ui, name: &str, line: bool, control: impl FnOnce(&mut Ui)) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::hover());
+    if line {
+        ui.painter().hline(
+            rect.x_range(),
+            rect.bottom() - 0.5,
+            Stroke::new(1.0, theme::line_soft()),
+        );
+    }
+    let label = shell::galley(ui, name, theme::regular(theme::BODY), theme::text());
+    shell::paint_line(ui, label, rect.left() + 14.0, rect.center().y);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(Vec2::new(14.0, 0.0)))
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        control,
     );
 }
 
@@ -111,7 +133,7 @@ impl App {
             .resizable(false)
             .frame(egui::Frame::new().fill(theme::bg()))
             .show(root, |ui| self.library_head(ui, tier));
-        self.library_body(root);
+        self.library_body(root, tier);
     }
 
     /// "Library", which of its three views, the search, which pedals it is
@@ -154,8 +176,16 @@ impl App {
                             shell::spin(ui, spot.center(), 5.5);
                         }
                     }
+                    // At the smallest size the table's own header menu
+                    // chooses the columns, and the search is narrower.
+                    if showing != LibraryView::Setlists && tier != Tier::S {
+                        self.columns_button(ui);
+                    }
                     self.scope_button(ui);
-                    let width = tier.pick(170.0, 200.0, 240.0);
+                    if showing != LibraryView::Setlists {
+                        self.filter_button(ui);
+                    }
+                    let width = tier.pick(140.0, 200.0, 240.0);
                     let tones = self.scoped_tone_count();
                     let (query, hint) = match showing {
                         LibraryView::Tones => {
@@ -331,79 +361,13 @@ impl App {
         }
     }
 
-    /// Tones and Cloud are a browse rail, rows and an inspector; setlists are
-    /// a rail of setlists and the slots of the one chosen.
-    fn library_body(&mut self, root: &mut Ui) {
-        match self.lib_showing {
-            // Local and public Tones are the same screen shape. Keep that
-            // geometry in one place; only the contents know who owns the
-            // data.
-            view @ (LibraryView::Tones | LibraryView::Cloud) => {
-                let cloud = view == LibraryView::Cloud;
-                egui::Panel::left("tone-tags")
-                    .resizable(false)
-                    .default_size(150.0)
-                    .show(root, |ui| {
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .id_salt("tone-tags-scroll")
-                            .show(ui, |ui| {
-                                if cloud {
-                                    self.cloud_tags_rail(ui);
-                                } else {
-                                    self.library_tags_rail(ui);
-                                }
-                            });
-                    });
-                egui::Panel::right("tone-inspector")
-                    .resizable(true)
-                    .default_size(320.0)
-                    .show(root, |ui| {
-                        // Scrolled, not grown: the inspector's fields must not
-                        // decide the page's height.
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .id_salt("tone-inspector-scroll")
-                            .show(ui, |ui| {
-                                if cloud {
-                                    self.cloud_inspector(ui);
-                                } else {
-                                    self.library_inspector(ui);
-                                }
-                            });
-                    });
-                egui::CentralPanel::default().show(root, |ui| {
-                    if cloud {
-                        self.cloud_table(ui);
-                    } else {
-                        self.library_table(ui);
-                    }
-                });
-            }
-            // Setlists on the left, what is in the chosen one on the right,
-            // drawn by the same table the tones use.
-            LibraryView::Setlists => {
-                egui::Panel::left("lib-setlists")
-                    .resizable(true)
-                    // A floor taken from the table it holds, not guessed.
-                    .min_size(table::width_wanted(&crate::setlist_rail_columns()))
-                    .max_size(560.0)
-                    .default_size(340.0)
-                    // Not wrapped in a scroll area: the table does its own
-                    // scrolling.
-                    .show(root, |ui| self.setlist_rail(ui));
-                egui::CentralPanel::default().show(root, |ui| self.setlist_slots(ui));
-            }
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Pedal
 
     /// The HX's page: its name, firmware and libraries in the head, and a tab
     /// each for backups, impulse responses, favourite blocks, the global EQ,
     /// settings and the activity log.
-    pub(crate) fn pedal_page(&mut self, root: &mut Ui) {
+    pub(crate) fn pedal_page(&mut self, root: &mut Ui, tier: Tier) {
         let online = matches!(self.connection, Connection::Online);
         egui::Panel::top("pedal-head")
             .exact_size(if online {
@@ -463,6 +427,9 @@ impl App {
                     }
                 });
             });
+        if online && self.pedal_tab == PedalTab::Backups {
+            self.backup_inspector_panel(root, tier);
+        }
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -485,13 +452,11 @@ impl App {
                     .show(ui, |ui| {
                         ui.set_max_width(ui.available_width().min(980.0));
                         match self.pedal_tab {
-                            PedalTab::Backups => self.pedal_backups(ui),
+                            PedalTab::Backups => self.backups_tab(ui),
                             PedalTab::Irs => self.pedal_irs(ui),
                             PedalTab::Favourites => self.pedal_favourites(ui),
                             PedalTab::Eq => self.pedal_eq(ui),
-                            PedalTab::Settings => {
-                                self.settings_list(ui, |group| group != "Global EQ")
-                            }
+                            PedalTab::Settings => self.pedal_settings(ui),
                             PedalTab::Activity => self.pedal_activity(ui),
                         }
                     });
@@ -547,92 +512,6 @@ impl App {
         );
         if look {
             self.look_for_pedal();
-        }
-    }
-
-    /// Backups: how the pedal is protected, and a whole-pedal backup or
-    /// restore through a file.
-    ///
-    /// These act on the whole pedal, settings and impulse responses included,
-    /// which is why they live on its page rather than on a preset.
-    fn pedal_backups(&mut self, ui: &mut Ui) {
-        let device = self.device.clone();
-        let live = matches!(self.connection, Connection::Online);
-        let (mood, icon, title, body) = match self.backup_of_this_pedal() {
-            Some(manifest) => {
-                let slots: usize = manifest.setlist_presets().map(<[String]>::len).sum();
-                let presets = if manifest.setlists.len() > 1 {
-                    format!("{slots} presets in {} setlists", manifest.setlists.len())
-                } else {
-                    format!("{slots} presets")
-                };
-                let time =
-                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(manifest.captured);
-                (
-                    Mood::Ok,
-                    Icon::ShieldCheck,
-                    format!("Everything on this {device} is backed up"),
-                    format!(
-                        "TonePush reads the whole pedal when it connects and keeps that copy \
-                         current after every save: {presets}, {} impulse responses and {} \
-                         settings. {}.",
-                        manifest.irs.len(),
-                        manifest.globals,
-                        shell::when_words("Read", time)
-                    ),
-                )
-            }
-            None => (
-                Mood::Info,
-                Icon::Shield,
-                "Not backed up yet".to_owned(),
-                "TonePush reads the whole pedal as soon as it connects, and keeps that copy \
-                 current after every save."
-                    .to_owned(),
-            ),
-        };
-        let mut backup = false;
-        let mut restore = false;
-        theme::banner(ui, mood, icon, &title, &body, |ui| {
-            backup = theme::Button::new("Back up to a file…")
-                .small()
-                .icon(Icon::Download)
-                .enabled(live)
-                .show(ui)
-                .on_hover_text("Save every preset, setting and impulse response to a folder")
-                .clicked();
-            restore = theme::Button::new("Restore from a file…")
-                .small()
-                .icon(Icon::History)
-                .enabled(live)
-                .show(ui)
-                .on_hover_text("Replace the pedal with a complete backup")
-                .clicked();
-        });
-        if backup {
-            if let Some(dir) = rfd::FileDialog::new()
-                .set_title("Where to put the backup")
-                .set_file_name(format!("{}.hxbundle", crate::sanitise(&self.device)))
-                .save_file()
-            {
-                self.note("backing up the pedal".to_owned());
-                self.send(Cmd::BackUp(dir));
-            }
-        }
-        if restore {
-            if let Some(dir) = rfd::FileDialog::new()
-                .set_title("Choose a backup to restore")
-                .pick_folder()
-            {
-                match hx_usb::backup::open(&dir) {
-                    Ok(manifest) => {
-                        let kept = manifest.presets.iter().filter(|n| !n.is_empty()).count();
-                        self.note(format!("restoring {kept} presets from {}", dir.display()));
-                        self.send(Cmd::RestoreAll(dir));
-                    }
-                    Err(e) => self.problem(format!("That is not a backup: {e}")),
-                }
-            }
         }
     }
 
@@ -906,6 +785,109 @@ impl App {
                 ui.add_space(10.0);
                 self.eq_controls(ui);
             });
+    }
+
+    /// The pedal's own settings, a card for each group: a switch's two
+    /// states side by side, a choice in a menu, a number on a slider beside
+    /// a field to type it. The global EQ has its own tab.
+    ///
+    /// The namespace is 154 numbered objects with no names anywhere in HX
+    /// Edit's data. The ones here were identified by watching HX Edit write
+    /// them, one control at a time - see `hx_proto::settings`. The rest are
+    /// reachable only from the pedal's own menu, so they are not shown rather
+    /// than shown as numbers nobody can act on.
+    fn pedal_settings(&mut self, ui: &mut Ui) {
+        use hx_proto::settings::{self, Kind, SETTINGS};
+
+        if self.settings.is_empty() {
+            ui.horizontal(|ui| {
+                let (spot, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                shell::spin(ui, spot.center(), 5.5);
+                theme::label(
+                    ui,
+                    "Reading the pedal's settings",
+                    theme::regular(12.5),
+                    theme::muted(),
+                );
+            });
+            return;
+        }
+        let mut write: Option<(i64, f32)> = None;
+        let groups: Vec<&str> = settings::groups()
+            .into_iter()
+            .filter(|group| *group != "Global EQ")
+            .collect();
+        for (index, group) in groups.into_iter().enumerate() {
+            let rows: Vec<_> = SETTINGS
+                .iter()
+                .filter(|setting| setting.group == group)
+                .filter_map(|setting| Some((setting, *self.settings.get(&setting.id)?)))
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            if index > 0 {
+                ui.add_space(16.0);
+            }
+            section_head(ui, group, "", |_| {});
+            theme::card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                let last = rows.len() - 1;
+                for (row, (setting, current)) in rows.into_iter().enumerate() {
+                    setting_row(ui, setting.name, row < last, |ui| match &setting.kind {
+                        Kind::Switch(off, on) => {
+                            let lit = usize::from(current >= 0.5);
+                            let segments = [theme::Segment::new(off), theme::Segment::new(on)];
+                            let picked = theme::segmented(
+                                ui,
+                                &format!("setting-{}", setting.id),
+                                &segments,
+                                Some(lit),
+                                false,
+                            );
+                            if let Some(chosen) = picked.clicked.filter(|chosen| *chosen != lit) {
+                                write = Some((setting.id, chosen as f32));
+                            }
+                        }
+                        Kind::Choice(options) => {
+                            let index = (current.round().max(0.0) as usize).min(options.len() - 1);
+                            let button = choice_button(ui, options[index]);
+                            egui::Popup::menu(&button).gap(4.0).show(|ui| {
+                                theme::menu_width(ui, 200.0);
+                                for (option, label) in options.iter().enumerate() {
+                                    let mark = (option == index).then_some(Icon::Check);
+                                    if theme::menu_item(ui, mark, label, None).clicked() {
+                                        write = Some((setting.id, option as f32));
+                                    }
+                                }
+                            });
+                        }
+                        Kind::Number { min, max, unit } => {
+                            let mut value = current;
+                            let typed = ui.add(
+                                egui::DragValue::new(&mut value)
+                                    .range(*min..=*max)
+                                    .suffix(*unit)
+                                    .speed(0.5)
+                                    .max_decimals(1),
+                            );
+                            ui.add_space(12.0);
+                            let slid = theme::slider(ui, &mut value, *min..=*max, 1.0, 200.0);
+                            if typed.changed() || slid.changed() {
+                                write = Some((setting.id, value));
+                            }
+                        }
+                    });
+                }
+            });
+        }
+        if let Some((id, value)) = write {
+            // Show it at once: the device is the truth, but waiting a round
+            // trip to redraw makes a control feel like it did not take.
+            self.settings.insert(id, value);
+            self.send(Cmd::WriteSetting { id, value });
+        }
     }
 
     /// What the worker has been doing, newest last: a diagnostic, kept out

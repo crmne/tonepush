@@ -265,6 +265,8 @@ pub(crate) struct Panel {
     preset_hashes: BTreeMap<usize, String>,
     library_documents: Vec<(String, Vec<u8>, bool)>,
     captured_setlists: Vec<Vec<(String, Option<Vec<u8>>)>>,
+    /// The sidebar asked to keep the whole pedal as a setlist.
+    capture_asked: bool,
     audition_events: Vec<Option<i64>>,
     preview: Option<(String, Snapshot)>,
     confirmation: Option<Confirmation>,
@@ -314,6 +316,7 @@ impl Panel {
             preset_hashes: BTreeMap::new(),
             library_documents: Vec::new(),
             captured_setlists: Vec::new(),
+            capture_asked: false,
             audition_events: Vec::new(),
             preview: None,
             confirmation: None,
@@ -534,6 +537,11 @@ impl Panel {
         std::mem::take(&mut self.captured_setlists)
     }
 
+    /// Whether the sidebar asked to keep the whole pedal, once.
+    pub(crate) fn take_capture_asked(&mut self) -> bool {
+        std::mem::take(&mut self.capture_asked)
+    }
+
     pub(crate) fn reconnect(&self) {
         let _ = self.tx.send(Cmd::Connect);
     }
@@ -595,6 +603,33 @@ impl Panel {
         snapshot.active_preset = Some(name.clone());
         self.preview = Some((name, snapshot));
         Ok(())
+    }
+
+    /// What the PRO holds, slot by slot: the hash of each preset read off
+    /// it, and every slot's name, empty for an empty slot.
+    pub(crate) fn pedal_slots(&self) -> Option<(BTreeMap<i64, String>, Vec<String>)> {
+        let names = self
+            .snapshot
+            .as_ref()?
+            .libraries
+            .iter()
+            .find(|state| state.library == Library::Presets)?
+            .info
+            .names
+            .iter()
+            .map(|name| name.clone().unwrap_or_default())
+            .collect();
+        let hashes = self
+            .preset_hashes
+            .iter()
+            .map(|(slot, hash)| (*slot as i64, hash.clone()))
+            .collect();
+        Some((hashes, names))
+    }
+
+    /// Read every preset on the PRO into the library as a setlist.
+    pub(crate) fn capture_setlist(&self) {
+        let _ = self.tx.send(Cmd::CaptureSetlist);
     }
 
     pub(crate) fn tone_sync(&self, hash: &str, name: &str) -> theme::Sync {
@@ -2122,6 +2157,25 @@ fn group_category_id(group: &str) -> Option<u32> {
         "ir" => Some(14),
         _ => None,
     }
+}
+
+/// A native PRO preset's chain as the strip of category colours the library
+/// draws: its blocks in the pedal's fixed order.
+pub(crate) fn preset_minis(bytes: &[u8]) -> Vec<crate::shell::Mini> {
+    preset_blocks(bytes)
+        .iter()
+        .map(|block| crate::shell::Mini::Block {
+            colour: block
+                .get("category")
+                .and_then(Value::as_u64)
+                .and_then(|id| theme::category_name(id as u32))
+                .map_or_else(theme::muted, theme::category_colour),
+            on: block
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        })
+        .collect()
 }
 
 /// A short library-table reading of a native PRO preset.

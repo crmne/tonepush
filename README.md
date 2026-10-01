@@ -38,6 +38,11 @@ operation against the hardware:
   settings while keeping its name, reorder, clear, and undo. The preset carries
   a directory of byte offsets into itself, so these were impossible until that
   table was decoded and could be recomputed.
+- **Backups with a history.** The whole pedal is read on every connect and
+  kept current after every save, and the copy it replaces is set aside first,
+  with why: the pedal connecting, a setlist or presets being written, a
+  restore. The Pedal page compares any copy with the pedal now and puts one
+  back whole.
 - **Snapshots, setlists, tempo.** Switch, rename, and edit them.
 - **Device settings.** The global namespace HX Edit's preferences write to,
   readable and writable by id (`tonepush setting`, `set-setting`).
@@ -213,8 +218,9 @@ That gives a loop worth naming:
 3. **Build a setlist.** Get the pedal holding the presets you want, in the order
    you want, then click the computer icon at the top of the preset list. That records
    every slot the connected pedal provides and what is in it.
-4. **Play it back.** One button puts a setlist onto the pedal again, or you can
-   send a single preset out of one into the slot it came from.
+4. **Play it back.** One button puts a setlist onto the pedal again, after
+   saying slot by slot what it replaces, or you can send a single preset out of
+   one into the slot it came from.
 
 Changing a setlist later means putting it back on the pedal, editing there,
 keeping the changed tones to the library, and capturing a new setlist. A setlist

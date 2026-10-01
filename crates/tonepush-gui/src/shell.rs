@@ -1055,10 +1055,13 @@ pub(crate) enum Mini {
 
 /// A preset's chain as a strip of category colours.
 pub(crate) fn mini_chain(ui: &mut Ui, chain: &[Mini]) -> Response {
-    const SQUARE: f32 = 14.0;
-    const WIRE: f32 = 7.0;
+    mini_chain_sized(ui, chain, 14.0, 7.0)
+}
+
+/// The same strip at another size: `square` points a block, `wire` between.
+pub(crate) fn mini_chain_sized(ui: &mut Ui, chain: &[Mini], square: f32, wire: f32) -> Response {
     const LANE_GAP: f32 = 3.0;
-    let width = chain.len() as f32 * SQUARE + chain.len().saturating_sub(1) as f32 * WIRE;
+    let width = chain.len() as f32 * square + chain.len().saturating_sub(1) as f32 * wire;
     let tallest = chain
         .iter()
         .map(|item| match item {
@@ -1067,15 +1070,15 @@ pub(crate) fn mini_chain(ui: &mut Ui, chain: &[Mini]) -> Response {
         })
         .max()
         .unwrap_or(1) as f32;
-    let height = tallest * SQUARE + (tallest - 1.0) * LANE_GAP;
+    let height = tallest * square + (tallest - 1.0) * LANE_GAP;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     if !ui.is_rect_visible(rect) {
         return response;
     }
     let painter = ui.painter();
     let mid = rect.center().y;
-    let square = |x: f32, y: f32, colour: Color32, on: bool| {
-        let r = Rect::from_min_size(Pos2::new(x, y - SQUARE / 2.0), Vec2::splat(SQUARE));
+    let block = |x: f32, y: f32, colour: Color32, on: bool| {
+        let r = Rect::from_min_size(Pos2::new(x, y - square / 2.0), Vec2::splat(square));
         if on {
             painter.rect(
                 r,
@@ -1098,23 +1101,73 @@ pub(crate) fn mini_chain(ui: &mut Ui, chain: &[Mini]) -> Response {
     let mut x = rect.left();
     for (index, item) in chain.iter().enumerate() {
         if index > 0 {
-            painter.hline((x - WIRE)..=x, mid, Stroke::new(2.0, theme::wire()));
+            painter.hline((x - wire)..=x, mid, Stroke::new(2.0, theme::wire()));
         }
         match item {
-            Mini::Block { colour, on } => square(x, mid, *colour, *on),
+            Mini::Block { colour, on } => block(x, mid, *colour, *on),
             Mini::Stack(lanes) => {
                 let count = lanes.len() as f32;
-                let total = count * SQUARE + (count - 1.0) * LANE_GAP;
-                let mut y = mid - total / 2.0 + SQUARE / 2.0;
+                let total = count * square + (count - 1.0) * LANE_GAP;
+                let mut y = mid - total / 2.0 + square / 2.0;
                 for (colour, on) in lanes {
-                    square(x, y, *colour, *on);
-                    y += SQUARE + LANE_GAP;
+                    block(x, y, *colour, *on);
+                    y += square + LANE_GAP;
                 }
             }
         }
-        x += SQUARE + WIRE;
+        x += square + wire;
     }
     response
+}
+
+/// A chain as a strip of category colours, in the order the signal meets
+/// the blocks, a parallel stretch stacked. `colour` says what a block is drawn
+/// in, or `None` to leave it out (the endpoints and junctions).
+pub(crate) fn minis(
+    chain: &[crate::session::Block],
+    layout: &hx_proto::preset::Layout,
+    colour: impl Fn(&crate::session::Block) -> Option<Color32>,
+) -> Vec<Mini> {
+    let block = |slot: usize| -> Option<(Color32, bool)> {
+        let block = chain.iter().find(|b| b.position == slot as i64)?;
+        colour(block).map(|colour| (colour, block.enabled))
+    };
+    let mut strip = Vec::new();
+    for path in &layout.paths {
+        for slot in &path.head {
+            if let Some((colour, on)) = block(*slot) {
+                strip.push(Mini::Block { colour, on });
+            }
+        }
+        let longest = path
+            .lanes
+            .iter()
+            .map(|lane| lane.blocks.len())
+            .max()
+            .unwrap_or(0);
+        for column in 0..longest {
+            let lanes: Vec<(Color32, bool)> = path
+                .lanes
+                .iter()
+                .filter_map(|lane| lane.blocks.get(column))
+                .filter_map(|slot| block(*slot))
+                .collect();
+            match lanes.len() {
+                0 => {}
+                1 => strip.push(Mini::Block {
+                    colour: lanes[0].0,
+                    on: lanes[0].1,
+                }),
+                _ => strip.push(Mini::Stack(lanes)),
+            }
+        }
+        for slot in &path.tail {
+            if let Some((colour, on)) = block(*slot) {
+                strip.push(Mini::Block { colour, on });
+            }
+        }
+    }
+    strip
 }
 
 /// What the mini deck shows of the loaded preset.
@@ -1347,7 +1400,7 @@ pub(crate) fn sentence_case(text: &str) -> String {
 
 impl App {
     /// How many slots one bank holds on the connected HX.
-    fn presets_per_bank(&self) -> usize {
+    pub(crate) fn presets_per_bank(&self) -> usize {
         hx_proto::PROFILES
             .iter()
             .find(|profile| profile.name == self.device.trim())
@@ -1598,7 +1651,7 @@ impl App {
             self.show_favorites_only = !self.show_favorites_only;
         }
         if asked.capture {
-            self.send(Cmd::CaptureSetlist);
+            self.capture_pedal(None);
         }
         self.hx_preset_list(ui);
     }
@@ -2130,47 +2183,9 @@ impl App {
 
     /// The loaded HX preset's chain as category colours, for the mini deck.
     pub(crate) fn hx_mini_chain(&self) -> Vec<Mini> {
-        let block = |slot: usize| -> Option<(Color32, bool)> {
-            let block = self.chain.iter().find(|b| b.position == slot as i64)?;
-            self.is_effect(block)
-                .then(|| (self.block_colour(block), block.enabled))
-        };
-        let mut chain = Vec::new();
-        for path in &self.layout.paths {
-            for slot in &path.head {
-                if let Some((colour, on)) = block(*slot) {
-                    chain.push(Mini::Block { colour, on });
-                }
-            }
-            let longest = path
-                .lanes
-                .iter()
-                .map(|lane| lane.blocks.len())
-                .max()
-                .unwrap_or(0);
-            for column in 0..longest {
-                let lanes: Vec<(Color32, bool)> = path
-                    .lanes
-                    .iter()
-                    .filter_map(|lane| lane.blocks.get(column))
-                    .filter_map(|slot| block(*slot))
-                    .collect();
-                match lanes.len() {
-                    0 => {}
-                    1 => chain.push(Mini::Block {
-                        colour: lanes[0].0,
-                        on: lanes[0].1,
-                    }),
-                    _ => chain.push(Mini::Stack(lanes)),
-                }
-            }
-            for slot in &path.tail {
-                if let Some((colour, on)) = block(*slot) {
-                    chain.push(Mini::Block { colour, on });
-                }
-            }
-        }
-        chain
+        minis(&self.chain, &self.layout, |block| {
+            self.is_effect(block).then(|| self.block_colour(block))
+        })
     }
 
     /// The 52-point deck over the Library and Pedal pages.

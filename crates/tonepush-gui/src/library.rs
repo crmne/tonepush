@@ -1637,7 +1637,7 @@ fn loose_tones(dir: &Path) -> Vec<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The library is found through one process-wide environment variable, so
@@ -1645,14 +1645,16 @@ mod tests {
     /// other's. They take turns; the guard is held for the whole test.
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    struct Scratch {
+    /// A library of its own for one test, found through the environment
+    /// while the test holds it; tests elsewhere in the crate use it too.
+    pub(crate) struct Scratch {
         dir: PathBuf,
         // Held, not read: dropping it is what lets the next test run.
         _guard: std::sync::MutexGuard<'static, ()>,
     }
 
     impl Scratch {
-        fn new(name: &str) -> Scratch {
+        pub(crate) fn new(name: &str) -> Scratch {
             // A poisoned lock means some earlier test panicked. That test has
             // already failed; there is no reason for this one to as well.
             let guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());

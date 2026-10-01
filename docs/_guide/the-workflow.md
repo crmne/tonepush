@@ -30,13 +30,17 @@ Tones in your library are ordinary files in an ordinary folder. You can back the
 
 ### 3. Build a setlist
 
-Get the pedal holding the presets you want, in the order you want them, then click the computer icon at the top of the preset list (**Keep every preset on the pedal, in order, as a setlist**). That records every slot and what is in it; name it, and it opens on the Library page.
+Get the pedal holding the presets you want, in the order you want them, then click the computer icon at the top of the preset list (**Keep every preset on the pedal, in order, as a setlist**), or **Keep the whole pedal as a setlist** under Library, Setlists. That records every slot and what is in it; name it, and it opens on the Library page.
 
-Give it the name of the gig, the venue, the date. You will want them later.
+Give it the name of the gig, the venue, the date. You will want them later; click any of them on the setlist's page to change it.
 
 ### 4. Play it back
 
-**Put this setlist on the pedal** writes the whole thing back. If you only need one preset out of one, each slot has its own **Send**, which puts that preset back in the slot it came from.
+Library, Setlists shows each setlist against what is on the pedal now: its card says whether it matches the pedal or how many slots differ, and its page lays the slots out bank by bank, marking the ones that hold another preset and naming the ones it would empty. The switch beside the count narrows the banks to the slots that differ.
+
+**Put on HX Stomp…** (named after your pedal) writes the whole thing back. It asks first, and says what the write changes: the presets it replaces, the slots it empties and fills, and how many already match. It writes every slot, in order, so tick **Keep the pedal as it is now as a setlist first** if you want what is on it now as a setlist too; nothing is written until that copy is in your library. On an HX pedal the pedal as it was is also kept in its backups (see below).
+
+If you only need one preset out of one, double-click its slot, or right-click it and choose **Send this preset to its slot**.
 
 ## Changing a setlist
 
@@ -45,6 +49,12 @@ Put it back on the pedal, edit there, keep the changed tones to your library, an
 A setlist is never edited in place. That looks like a limitation and is not: a setlist is a record of a rig that worked on a particular night, and a record you can edit is not a record. Renaming a tone next month should not reach backwards and change what you played in March.
 
 This is also why deleting a tone from your library never breaks a setlist. If a setlist still plays it, the tone is kept for that setlist even after it leaves your library.
+
+## Backups
+
+Every time an HX pedal connects, TonePush reads all of it, presets, impulse responses and settings, and keeps that copy current after every save. Before it reads the pedal again, it sets the copy it had aside: when the pedal connects, before a setlist or presets are written to it, and before a restore. The last ten are kept.
+
+**Pedal, Backups** lists them, newest first, with when and why each was taken, beside the backups you saved with **Back up to a file…** (TonePush remembers where the last twenty went, in its settings file). Choose one to compare it with the pedal now, preset by preset ("Ambient Swell edited since", "Sparkle Verb was Night Verb"). **Restore the whole pedal…** writes it back, presets, impulse responses and settings, after saying what it writes; the pedal as it was stays in the backups. **Show in folder** opens the copy itself. The StompStation PRO keeps its own verified backups; see the [StompStation PRO guide](/stompstation-pro/).
 
 ## Publishing a Song and Tone
 
@@ -64,7 +74,7 @@ Song search results are musical ideas, not files that can be installed. Open a S
 |---|---|---|
 | Tones | `~/.local/share/tonepush/library` | One file per tone, the pedal's own document |
 | Setlists | `library/setlists` | Small JSON files naming the tones they play |
-| Device backups | `~/.local/share/tonepush/backups` | Whole-pedal HX backups and verified PRO rollback bundles |
+| Device backups | `~/.local/share/tonepush/backups` | Whole-pedal HX backups (the copy kept current, and the earlier ones in `history`, each with a `tonepush-why.json` noting why it was set aside) and verified PRO rollback bundles |
 
 On macOS these sit under `~/Library/Application Support`; on Windows, under your profile.
 

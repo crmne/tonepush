@@ -5,6 +5,7 @@
 //! worker owns it outright: the protocol is a strictly ordered stream, and two
 //! callers would interleave transfers and desynchronise it.
 
+use crate::backups::Why;
 use std::sync::{
     mpsc::{self, Receiver, Sender},
     Arc, OnceLock,
@@ -282,6 +283,12 @@ pub enum Cmd {
     /// Write a setlist back onto the pedal: for each slot, the name and the
     /// document, or nothing to empty it. Every one of these is a flash write.
     PushSetlist(Vec<SlotWrite>),
+    /// [`Cmd::PushSetlist`] for a whole setlist from the library, by name, so
+    /// the copy of the pedal set aside before it can say what replaced it.
+    WriteSetlist {
+        name: String,
+        slots: Vec<SlotWrite>,
+    },
 }
 
 /// One change to a footswitch's own settings.
@@ -1003,7 +1010,9 @@ impl Worker {
                     self.send(Evt::Activity(format!("{name} is now {value}")));
                 }
             }
-            Cmd::BackUp(dir) => self.back_up(&dir),
+            // Asked for as the pedal connects, or to a file of the person's
+            // choosing, where there is nothing to set aside.
+            Cmd::BackUp(dir) => self.back_up(&dir, &Why::Connected),
             Cmd::RestoreAll(dir) => self.restore_all(&dir),
             Cmd::SavePreset => {
                 self.save();
@@ -1018,7 +1027,8 @@ impl Worker {
                 self.paste(&blob);
             }
             Cmd::CaptureSetlist => self.capture_setlist(),
-            Cmd::PushSetlist(slots) => self.push_setlist(slots),
+            Cmd::PushSetlist(slots) => self.push_setlist(slots, None),
+            Cmd::WriteSetlist { name, slots } => self.push_setlist(slots, Some(name)),
             Cmd::ClearPreset(index) => {
                 let setlist = self.setlist;
                 if self.run_on_device(|d| d.clear_preset_at(setlist, index)) {
@@ -1884,7 +1894,16 @@ impl Worker {
     /// corrupted a setlist past a power cycle - so this goes through
     /// `write_preset_at` and `clear_preset_at`, which pace their own commits,
     /// one slot at a time and never in a hurry.
-    fn push_setlist(&mut self, slots: Vec<SlotWrite>) {
+    fn push_setlist(&mut self, slots: Vec<SlotWrite>, name: Option<String>) {
+        let why = match name {
+            Some(name) => Why::Setlist { name },
+            None => Why::Slots {
+                slots: slots
+                    .iter()
+                    .filter_map(|(index, _)| usize::try_from(*index).ok())
+                    .collect(),
+            },
+        };
         let setlist = self.setlist;
         let total = slots.len();
         let mut written = 0usize;
@@ -1930,16 +1949,17 @@ impl Worker {
         // whole costs a couple of seconds against the minutes of flash writes
         // that just happened, and the snapshot it rotates aside is the pedal as
         // it was before the setlist landed, which is worth having.
-        self.refresh_automatic();
+        self.refresh_automatic(&why);
     }
 
-    /// Bring the automatic backup back in step with the pedal, if there is one.
-    fn refresh_automatic(&mut self) {
+    /// Bring the automatic backup back in step with the pedal, if there is
+    /// one, setting the copy it replaces aside with why.
+    fn refresh_automatic(&mut self, why: &Why) {
         let Some(dir) = self.automatic.clone() else {
             return;
         };
         if hx_usb::backup::exists(&dir) {
-            self.back_up(&dir);
+            self.back_up(&dir, why);
         }
     }
 
@@ -1966,7 +1986,7 @@ impl Worker {
 
     /// Read the preset back from the device and show it.
     /// Read the whole pedal into a bundle directory.
-    fn back_up(&mut self, dir: &std::path::Path) {
+    fn back_up(&mut self, dir: &std::path::Path, why: &Why) {
         let stamp = now();
         // Put the copy that is there aside before overwriting it. Corruption is
         // noticed later than it happens, and a single bundle that every
@@ -1974,7 +1994,15 @@ impl Worker {
         // use at all when what you need is the pedal as it was on Tuesday.
         if Some(dir) == self.automatic.as_deref() {
             match hx_usb::backup::snapshot(dir, &datestamp(), KEEP_SNAPSHOTS) {
-                Ok(Some(_)) => {}
+                // Why it was set aside goes with it, for the Backups history;
+                // a copy without the note restores all the same.
+                Ok(Some(copy)) => {
+                    if let Err(e) = crate::backups::note_why(&copy, why) {
+                        self.send(Evt::Activity(format!(
+                            "could not note why a copy was kept: {e}"
+                        )));
+                    }
+                }
                 Ok(None) => {}
                 Err(e) => self.send(Evt::Activity(format!("could not keep a snapshot: {e}"))),
             }
@@ -2009,7 +2037,7 @@ impl Worker {
         });
         if done {
             self.send(Evt::Activity("restored from backup".into()));
-            self.refresh_automatic();
+            self.refresh_automatic(&Why::Restore);
             let setlist = self.setlist;
             if let Some(names) = self.try_on_device(|d| d.presets(setlist)) {
                 self.send(Evt::Presets(names));
@@ -2357,7 +2385,7 @@ fn datestamp() -> String {
 /// Days from the Unix epoch converted with the civil-from-days algorithm, which
 /// is exact and needs no calendar library for the one place this program has
 /// ever needed a date.
-fn stamp_of(secs: u64) -> String {
+pub(crate) fn stamp_of(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let time = secs % 86_400;
     let z = days + 719_468;
@@ -2835,6 +2863,77 @@ mod tests {
         worker.opened(session(pedal));
         let _ = events.try_iter().count();
         (worker, events)
+    }
+
+    /// Writing a setlist sets the automatic backup aside first, with the
+    /// setlist's name inside the copy, for the Backups history to say why it
+    /// exists.
+    #[test]
+    fn a_copy_set_aside_says_what_was_about_to_happen() {
+        let root = std::env::temp_dir().join(format!("tonepush-set-aside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let automatic = root.join("automatic.hxbundle");
+        std::fs::create_dir_all(&automatic).unwrap();
+        let manifest = hx_usb::backup::Manifest {
+            version: 1,
+            device: "HX Stomp".into(),
+            firmware: "3.80".into(),
+            captured: 0,
+            setlists: vec!["PRESETS".into()],
+            presets: vec![String::new(); 3],
+            more_setlists: Vec::new(),
+            irs: BTreeMap::new(),
+            globals: 0,
+        };
+        let write_manifest = || {
+            std::fs::write(
+                automatic.join("manifest.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+        };
+        write_manifest();
+        let why_of = |stamp_seconds: u64| {
+            let copy = root
+                .join("history")
+                .join(format!("automatic {}.hxbundle", stamp_of(stamp_seconds)));
+            serde_json::from_slice::<Why>(
+                &std::fs::read(copy.join(crate::backups::WHY_FILE)).unwrap(),
+            )
+            .unwrap()
+        };
+
+        let pedal = Pedal::new();
+        let (mut worker, _events) = worker(&pedal);
+        worker.automatic = Some(automatic.clone());
+        let before = now();
+        worker.handle(Cmd::WriteSetlist {
+            name: "Album release show".into(),
+            slots: Vec::new(),
+        });
+        let copies = crate::backups::copies(&automatic, &[]);
+        let set_aside: Vec<_> = copies
+            .iter()
+            .filter_map(|copy| match &copy.origin {
+                crate::backups::Origin::SetAside(why) => Some((copy.when, why.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(set_aside.len(), 1, "one copy set aside: {set_aside:?}");
+        assert!(set_aside[0].0 >= before);
+        assert_eq!(
+            set_aside[0].1,
+            Some(Why::Setlist {
+                name: "Album release show".into()
+            })
+        );
+        assert_eq!(
+            why_of(set_aside[0].0),
+            Why::Setlist {
+                name: "Album release show".into()
+            }
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

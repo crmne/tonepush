@@ -729,6 +729,32 @@ impl Category {
     }
 }
 
+/// A category's name by HX Edit's numbering, which TonePush's site and the
+/// StompStation PRO's tones use too.
+#[must_use]
+pub fn category_name(id: u32) -> Option<&'static str> {
+    Some(match id {
+        1 => "Distortion",
+        2 => "Dynamics",
+        3 => "EQ",
+        4 => "Modulation",
+        5 => "Delay",
+        6 => "Reverb",
+        7 => "Pitch/Synth",
+        8 => "Filter",
+        9 => "Wah",
+        10 => "Amp+Cab",
+        11 => "Amp",
+        12 => "Preamp",
+        13 => "Cab",
+        14 => "IR",
+        15 => "Volume/Pan",
+        16 => "Send/Return",
+        17 => "Looper",
+        _ => return None,
+    })
+}
+
 /// A category's colour by name, in the palette in use.
 #[must_use]
 pub fn category_colour(name: &str) -> Color32 {
