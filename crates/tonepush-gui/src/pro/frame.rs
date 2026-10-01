@@ -583,9 +583,17 @@ impl Panel {
     }
 
     /// Set the tempo, live: a tempo is part of the edit buffer.
+    ///
+    /// The field takes whatever parses and a tap can come out anywhere, so a
+    /// tempo outside the range the pedal advertised for the node (or no
+    /// number at all) is answered here instead of being sent. The reading
+    /// changes when the pedal says it has the value: shown at once, a refused
+    /// tempo stayed on screen as though it had been set.
     fn set_tempo(&mut self, path: NodePath, description: NodeDescription, bpm: f32) {
         let value = Value::from(f64::from(bpm));
-        if description.validate_value(&value).is_err() {
+        if !bpm.is_finite() || description.validate_value(&value).is_err() {
+            self.failed = true;
+            self.status = tempo_refusal(&description);
             return;
         }
         let before = self
@@ -593,8 +601,10 @@ impl Panel {
             .get(path.as_str())
             .cloned()
             .unwrap_or(Value::Null);
-        self.drafts.insert(path.to_string(), value.clone());
-        self.recompute_dirty();
+        if self.failed && self.status == tempo_refusal(&description) {
+            self.failed = false;
+            self.status.clear();
+        }
         let _ = self.tx.send(Cmd::SetNode {
             path,
             description: Box::new(description),
@@ -1202,6 +1212,17 @@ impl Panel {
     }
 }
 
+/// What to say about a tempo the pedal's tempo node does not take, in the
+/// words the HX's deck uses, with the range the pedal itself advertised.
+fn tempo_refusal(description: &NodeDescription) -> String {
+    match (description.min, description.max) {
+        (Some(min), Some(max)) => format!("tempo must be between {min} and {max} BPM"),
+        (Some(min), None) => format!("tempo must be at least {min} BPM"),
+        (None, Some(max)) => format!("tempo must be at most {max} BPM"),
+        (None, None) => "tempo must be a number of BPM".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1292,6 +1313,51 @@ mod tests {
         panel.drain();
         assert_eq!(panel.read_only, None);
         assert!(!panel.online);
+    }
+
+    /// The PRO's tempo node says what it holds. Anything outside that, or no
+    /// number at all, is answered in the deck instead of being sent; a tempo
+    /// the node takes is sent, and the reading waits for the pedal to say it
+    /// has it.
+    #[test]
+    fn only_a_tempo_the_pro_takes_is_sent() {
+        let mut panel = Panel::new(egui::Context::default());
+        panel.show_demo();
+        let (tx, commands) = mpsc::channel();
+        panel.tx = tx;
+        let (path, description, bpm) = panel.tempo_node().expect("the demo has a tempo");
+        assert_eq!(bpm, 96.0);
+
+        for bpm in [20.0, 999.0, -1.0, f32::NAN, f32::INFINITY] {
+            panel.set_tempo(path.clone(), description.clone(), bpm);
+        }
+        assert!(commands.try_recv().is_err(), "nothing out of range is sent");
+        assert_eq!(panel.status, "tempo must be between 40 and 240 BPM");
+        assert!(panel.failed);
+
+        panel.set_tempo(path.clone(), description.clone(), 120.0);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Cmd::SetNode { value, persistent: false, .. }) if value == 120.0
+        ));
+        assert_eq!(
+            panel.tempo_node().map(|(_, _, bpm)| bpm),
+            Some(96.0),
+            "the reading waits for the pedal"
+        );
+        assert!(!panel.failed, "a tempo that is sent clears the refusal");
+
+        let mut open = description.clone();
+        open.min = None;
+        open.max = None;
+        panel.set_tempo(path.clone(), open.clone(), f32::NAN);
+        assert!(commands.try_recv().is_err(), "no number is never sent");
+        assert_eq!(panel.status, "tempo must be a number of BPM");
+        panel.set_tempo(path, open, 300.0);
+        assert!(
+            commands.try_recv().is_ok(),
+            "no range advertised, no range checked"
+        );
     }
 
     fn demo_snapshot() -> Snapshot {
