@@ -504,6 +504,10 @@ pub struct App {
     /// The device's favourite blocks, as (index, name).
     favourites: Vec<(i64, String)>,
     current_snapshot: usize,
+    /// Whether closing the window was put off because the worker was in the
+    /// middle of talking to the pedal. The window closes itself once it is
+    /// not.
+    closing: bool,
     /// A switch that would throw away the edit buffer's unsaved changes,
     /// waiting for an answer: a row, an arrow key, a menu action or a
     /// previewed tone's Load asked for it.
@@ -1127,6 +1131,7 @@ impl App {
             favourites: Vec::new(),
             current_snapshot: 0,
             confirm_clear: None,
+            closing: false,
             confirm_switch: None,
             renaming_header: None,
             updates: update::Updates::default(),
@@ -1403,6 +1408,10 @@ impl App {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.status = "Device thread stopped".into();
+                    // Nothing is talking to the pedal any more, so nothing
+                    // should keep the window from closing.
+                    self.busy_since = None;
+                    self.working = None;
                     break;
                 }
             }
@@ -1570,6 +1579,7 @@ impl eframe::App for App {
     /// calls this even when it does not paint.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.hold_close_while_busy(ctx);
         self.pro.drain();
         self.updates.poll(ctx);
         if let Some(problem) = self.updates.take_problem() {
@@ -1680,6 +1690,7 @@ impl eframe::App for App {
         self.preview_window(&ctx);
         // Over everything: the one step the app cannot work without.
         self.onboarding_modal(&ctx);
+        self.closing_window(&ctx);
         // The first frame is up: an update that relaunched into this version
         // has started, so its helper can stop standing ready to roll back.
         self.updates.acknowledge();
@@ -1694,6 +1705,40 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// Keep the window while the worker is talking to the pedal, and close
+    /// it as soon as the worker is done.
+    ///
+    /// Closing used to end the process 800 ms later whatever the worker was
+    /// doing, and a transfer cut off part way leaves the pedal refusing new
+    /// sessions until its power is pulled. A close asked for while the worker
+    /// is busy is put off, and the window says why. This runs in `logic`
+    /// because a window that is not being drawn can still be asked to close.
+    fn hold_close_while_busy(&mut self, ctx: &egui::Context) {
+        let busy = self.busy_since.is_some() || self.working.is_some();
+        if busy && ctx.input(|input| input.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.closing = true;
+        } else if self.closing && !busy {
+            self.closing = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// Say why the window has not closed yet.
+    fn closing_window(&mut self, ctx: &egui::Context) {
+        if !self.closing {
+            return;
+        }
+        theme::modal("Closing").show(ctx, |ui| {
+            ui.set_max_width(320.0);
+            ui.label("TonePush is finishing with the pedal and closes when it is done.");
+            if let Some((what, progress)) = self.working.clone() {
+                ui.add_space(6.0);
+                processor::operation_progress(ui, &what, progress);
+            }
+        });
+    }
+
     /// One row: the preset you are editing, and what you can do to it.
     ///
     /// This had grown to two rows holding two menus, a connection state and a
@@ -11832,6 +11877,59 @@ mod tests {
             })
             .collect();
         assert_eq!(sent, files.map(std::path::PathBuf::from));
+    }
+
+    /// One frame's logic, with or without a request to close the window,
+    /// and what it asked of the window.
+    fn closing_frame(
+        app: &mut App,
+        ctx: &egui::Context,
+        close: bool,
+    ) -> Vec<egui::ViewportCommand> {
+        let mut input = egui::RawInput::default();
+        if close {
+            input.viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    events: vec![egui::ViewportEvent::Close],
+                    ..Default::default()
+                },
+            );
+        }
+        let output = ctx.run_ui(input, |ui| app.hold_close_while_busy(ui.ctx()));
+        let asked = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|viewport| viewport.commands.clone())
+            .unwrap_or_default();
+        output.drop_without_applying_deltas();
+        asked
+    }
+
+    /// A close asked for while the worker is talking to the pedal waits for
+    /// it, and the window closes itself once the worker is done. With nothing
+    /// under way it goes straight through.
+    #[test]
+    fn closing_waits_for_the_pedal_to_be_done() {
+        let (mut app, events, _cmds) = app();
+        let ctx = egui::Context::default();
+        events.send(Evt::Busy(true)).unwrap();
+        app.drain_events();
+
+        let asked = closing_frame(&mut app, &ctx, true);
+        assert!(asked.contains(&egui::ViewportCommand::CancelClose));
+        assert!(app.closing);
+        assert!(
+            closing_frame(&mut app, &ctx, false).is_empty(),
+            "still waiting"
+        );
+
+        events.send(Evt::Busy(false)).unwrap();
+        app.drain_events();
+        let asked = closing_frame(&mut app, &ctx, false);
+        assert!(asked.contains(&egui::ViewportCommand::Close));
+        let asked = closing_frame(&mut app, &ctx, true);
+        assert!(!asked.contains(&egui::ViewportCommand::CancelClose));
     }
 
     #[test]

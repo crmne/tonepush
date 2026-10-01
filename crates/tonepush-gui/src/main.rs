@@ -62,12 +62,12 @@ fn main() -> eframe::Result<()> {
         .install();
     std::thread::spawn(fastframe_emoji::warm_up);
 
-    let (tx, rx, repaint) = tonepush_gui::spawn_repainting();
+    let (tx, rx, repaint, worker) = tonepush_gui::spawn_repainting();
     // Closing the window must let the device go cleanly. A process that just
     // disappears leaves the device mid-conversation, and it then refuses new
     // sessions until its power is pulled.
     let on_exit = tx.clone();
-    eframe::run_native(
+    let ran = eframe::run_native(
         "TonePush",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 640.0]),
@@ -84,11 +84,23 @@ fn main() -> eframe::Result<()> {
             app.launched(launch.receipt, launch.error, relaunch);
             Ok(Box::new(app))
         }),
-    )?;
+    );
 
-    // eframe has returned, so the window is gone; give the worker a moment to
-    // put the device down before the process exits.
-    let _ = on_exit.send(tonepush_gui::Cmd::Disconnect);
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    Ok(())
+    // The window is gone, but the worker may still have something of its
+    // own to finish: the edits sent last, an audition's sound to put back.
+    // It runs those, lets the pedal go and stops, and the process waits for
+    // that instead of a fixed 800 ms, which could end it part way through a
+    // transfer. The window stays open while the worker is busy, so this
+    // normally takes a second or two; the limit is for a pedal that has
+    // stopped answering, and the worker's own timeouts give up well inside
+    // it.
+    let _ = on_exit.send(tonepush_gui::Cmd::Quit);
+    let patience = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !worker.is_finished() && std::time::Instant::now() < patience {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if !worker.is_finished() {
+        eprintln!("the pedal was still busy after a minute; exiting anyway");
+    }
+    ran
 }

@@ -45,6 +45,10 @@ pub(crate) fn tempo_refusal() -> String {
 pub enum Cmd {
     Connect,
     Disconnect,
+    /// Let the pedal go and stop, once everything sent before this has run.
+    /// The last thing the window sends: the process waits for the worker to
+    /// finish rather than for a fixed moment.
+    Quit,
     /// Read the whole pedal into a bundle directory.
     BackUp(std::path::PathBuf),
     /// Write a bundle back onto the pedal.
@@ -463,11 +467,18 @@ impl Events {
 }
 
 pub fn spawn() -> (Sender<Cmd>, Receiver<Evt>) {
-    let (commands, events, _) = spawn_repainting();
+    let (commands, events, _, _) = spawn_repainting();
     (commands, events)
 }
 
-pub fn spawn_repainting() -> (Sender<Cmd>, Receiver<Evt>, RepaintSignal) {
+/// The worker, with the signal that wakes the UI for its events and its
+/// thread, so the process can wait for it to finish before it exits.
+pub fn spawn_repainting() -> (
+    Sender<Cmd>,
+    Receiver<Evt>,
+    RepaintSignal,
+    std::thread::JoinHandle<()>,
+) {
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (evt_tx, evt_rx) = mpsc::channel();
     let repaint = RepaintSignal::default();
@@ -475,8 +486,8 @@ pub fn spawn_repainting() -> (Sender<Cmd>, Receiver<Evt>, RepaintSignal) {
         tx: evt_tx,
         repaint: repaint.clone(),
     };
-    std::thread::spawn(move || Worker::new(cmd_rx, events, automatic_dir()).run());
-    (cmd_tx, evt_rx, repaint)
+    let thread = std::thread::spawn(move || Worker::new(cmd_rx, events, automatic_dir()).run());
+    (cmd_tx, evt_rx, repaint, thread)
 }
 
 struct Worker {
@@ -519,6 +530,8 @@ struct Worker {
     /// A block copied out of a document, verbatim: model, values, the cab
     /// riding along and all.
     copied_block: Option<hx_proto::msgpack::Value>,
+    /// Set by Quit: the loop stops once the command that set it has run.
+    quitting: bool,
 }
 
 /// Which preset the editor is showing, as the device named it.
@@ -547,6 +560,7 @@ impl Worker {
             events,
             automatic,
             copied_block: None,
+            quitting: false,
             device: None,
             setlist: 0,
             history: Vec::new(),
@@ -600,6 +614,9 @@ impl Worker {
                         self.handle(next);
                     }
                     self.send(Evt::Busy(false));
+                    if self.quitting {
+                        return;
+                    }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -635,6 +652,13 @@ impl Worker {
         match cmd {
             Cmd::Connect => self.connect(),
             Cmd::Disconnect => self.let_go(),
+            Cmd::Quit => {
+                // Everything sent before has run, and an audition was put
+                // back above. Dropping the session drains and acknowledges
+                // what the pedal still had to say.
+                self.let_go();
+                self.quitting = true;
+            }
             Cmd::SelectPreset(index) => {
                 self.select(index);
             }
@@ -3365,6 +3389,45 @@ mod tests {
         assert!(!pedal.lock().unwrap().opcodes().contains(&op::UPLOAD_IR));
         assert!(events.try_iter().any(|e| matches!(e, Evt::Failed(_))));
         let _ = std::fs::remove_file(file);
+    }
+
+    /// Quit is the last thing the window sends. The worker runs what was
+    /// queued before it, puts an audition's sound back, lets the pedal go
+    /// and stops, so the process can wait for it instead of cutting it off.
+    #[test]
+    fn quitting_finishes_the_queue_and_lets_the_pedal_go() {
+        let pedal = Pedal::new();
+        let (commands, cmds) = mpsc::channel();
+        let (tx, events) = mpsc::channel();
+        let mut worker = Worker::new(
+            cmds,
+            Events {
+                tx,
+                repaint: RepaintSignal::default(),
+            },
+            None,
+        );
+        worker.opened(session(&pedal));
+        commands
+            .send(Cmd::AuditionDocument {
+                key: 7,
+                name: "From the cloud".into(),
+                bytes: document(150.0),
+            })
+            .unwrap();
+        commands.send(Cmd::Quit).unwrap();
+
+        let thread = std::thread::spawn(move || worker.run());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(thread.is_finished(), "the worker stopped");
+        let buffer = hx_proto::Preset::parse(&pedal.lock().unwrap().buffer).unwrap();
+        assert_eq!(buffer.tempo(), Some(120.0), "the sound from before is back");
+        assert!(events.try_iter().any(|e| matches!(e, Evt::Disconnected)));
+        drop(commands);
     }
 
     /// The other side of that rule: a failure on the wire still ends the
