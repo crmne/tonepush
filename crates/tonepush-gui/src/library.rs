@@ -1268,16 +1268,22 @@ fn read_setlists(strict: bool) -> Option<Vec<(PathBuf, Setlist)>> {
     Some(found)
 }
 
+/// Where a setlist is kept: a setlist from before history under its slug,
+/// every other one under its series and revision.
+fn setlist_path(dir: &Path, setlist: &Setlist) -> PathBuf {
+    if setlist.version == 0 && setlist.series.is_empty() {
+        dir.join(format!("{}.json", slug(&setlist.name)))
+    } else {
+        versioned_setlist_path(dir, setlist)
+    }
+}
+
 /// Write a setlist out. An existing file for the same name is replaced, which
 /// is what saving one means; renaming makes a new file and leaves the old.
 pub fn save_setlist(setlist: &Setlist) -> Result<PathBuf, String> {
     let dir = setlists_dir().ok_or("no home directory to keep setlists in")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not create the library: {e}"))?;
-    let target = if setlist.version == 0 && setlist.series.is_empty() {
-        dir.join(format!("{}.json", slug(&setlist.name)))
-    } else {
-        versioned_setlist_path(&dir, setlist)
-    };
+    let target = setlist_path(&dir, setlist);
     let json = serde_json::to_vec_pretty(setlist).map_err(|e| e.to_string())?;
     atomic_write(&target, json).map_err(|e| format!("could not save the setlist: {e}"))?;
     Ok(target)
@@ -1334,11 +1340,32 @@ pub fn save_setlist_version(setlist: &Setlist) -> Result<(PathBuf, Setlist), Str
 /// Update the notes of one saved revision without creating history on every
 /// keystroke. The preset snapshot only changes through
 /// [`save_setlist_version`].
+///
+/// A setlist from before history moves to the versioned file name here. Its
+/// slug is not unique: "Gig #1" and "Gig 1" are both `gig-1.json`, so renaming
+/// one to the other's name would otherwise write over it.
 pub fn update_setlist(path: &Path, setlist: &Setlist) -> Result<(PathBuf, Setlist), String> {
     let mut saved = setlist.clone();
+    if saved.version == 0 && saved.series.is_empty() {
+        // The series a legacy setlist has always had is derived from the name
+        // it was saved under, which a rename is about to change.
+        let original = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Setlist>(&bytes).ok());
+        saved.series = setlist_series(original.as_ref().unwrap_or(setlist));
+        saved.version = 1;
+    }
     saved.modified_at = now();
     if saved.added_at.is_empty() {
         saved.added_at = saved.modified_at.clone();
+    }
+    let dir = setlists_dir().ok_or("no home directory to keep setlists in")?;
+    let target = setlist_path(&dir, &saved);
+    if target != path && target.exists() {
+        return Err(format!(
+            "another setlist is already kept as {}",
+            target.file_name().unwrap_or_default().to_string_lossy()
+        ));
     }
     let target = save_setlist(&saved)?;
     if target != path && path.exists() {
@@ -1896,6 +1923,43 @@ mod tests {
         assert_eq!(setlists().len(), 2);
         assert_eq!(setlists()[0].1.slots[0].hash, "aaa");
         assert_eq!(setlists()[1].1.slots[0].hash, "bbb");
+    }
+
+    /// "Gig #1" and "Gig 1" share the slug `gig-1`. Renaming a setlist from
+    /// before history to one of them must not write over the other.
+    #[test]
+    fn renaming_an_older_setlist_never_overwrites_another() {
+        let scratch = Scratch::new("setlist-legacy-rename");
+        let gig = Setlist {
+            name: "Gig 1".into(),
+            slots: vec![Slot::new("aaa", "Clean")],
+            ..Default::default()
+        };
+        let gig_path = save_setlist(&gig).unwrap();
+        let other = Setlist {
+            name: "Other".into(),
+            slots: vec![Slot::new("bbb", "Lead")],
+            ..Default::default()
+        };
+        let other_path = save_setlist(&other).unwrap();
+
+        let mut renamed = other.clone();
+        renamed.name = "Gig #1".into();
+        let (target, saved) = update_setlist(&other_path, &renamed).unwrap();
+
+        assert_ne!(target, gig_path);
+        assert!(!other_path.exists(), "the older file moved");
+        assert_eq!(saved.revision(), 1);
+        assert_eq!(saved.series, setlist_series(&other), "it keeps its series");
+        let kept: Setlist = serde_json::from_slice(&std::fs::read(&gig_path).unwrap()).unwrap();
+        assert_eq!(kept.name, "Gig 1");
+        assert_eq!(kept.slots[0].hash, "aaa");
+        let listed = setlists();
+        assert_eq!(listed.len(), 2);
+        assert!(listed
+            .iter()
+            .any(|(_, s)| s.name == "Gig #1" && s.plays("bbb")));
+        assert!(target.starts_with(scratch.dir.join("setlists")));
     }
 
     #[test]
