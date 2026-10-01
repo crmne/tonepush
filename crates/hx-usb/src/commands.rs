@@ -643,16 +643,18 @@ impl Session {
             hx_proto::msgmap! { rpc::key::DOCUMENT => Value::Bin(preset.encode(), 2) },
         )?;
 
-        // What the chain should look like once the document lands. Kinds and
-        // models rather than bytes, in case the device re-serialises.
-        let fingerprint =
-            |p: &Preset| -> Vec<_> { p.slots.iter().map(|s| (s.kind, s.model)).collect() };
-        let want = fingerprint(preset);
+        // What the document should read back as once it lands: everything a
+        // write can be for, not only which blocks are where. Comparing kinds
+        // and models alone passed at once for a tempo, a snapshot name, a
+        // copied snapshot, a restore, or a block copied over one of the same
+        // model, whether or not the device had applied anything.
+        let active = active_snapshot(preset);
+        let want = Landed::of(preset, active);
         let deadline = Instant::now() + Duration::from_secs(4);
         loop {
             match retry_device_refusal(self.read_preset()) {
                 Ok(Some(back)) => {
-                    if fingerprint(&back) == want {
+                    if Landed::of(&back, active) == want {
                         return Ok(());
                     }
                 }
@@ -1303,6 +1305,87 @@ mod tests {
     }
 }
 
+/// What a written document has to read back as for the write to count as
+/// landed.
+///
+/// Fields rather than bytes. A document read back after a restore is
+/// byte-identical on hardware, but some fields are the device's own to keep:
+/// the routing (a document write is ignored for it - see `set_routing`), a
+/// slot's engine class, and the active snapshot, which the device keeps in
+/// step with the preset. The recorded session shows that last one: a tempo
+/// write reads back with the active snapshot's tempo changed to match. So a
+/// write is judged on what it carries - every slot's model, cab, bypass and
+/// values, the tempo, every snapshot's name, and the other snapshots' tempo
+/// and bypass states - and not on what the device derives from it.
+#[derive(Debug, PartialEq)]
+struct Landed {
+    slots: Vec<LandedSlot>,
+    tempo: Option<u32>,
+    snapshots: Vec<(String, Option<SnapshotState>)>,
+}
+
+/// A snapshot's tempo (as bits) and bypass states: the part of it the
+/// device keeps for itself while it is the active one.
+type SnapshotState = (Option<u32>, Vec<Option<bool>>);
+
+/// One slot of [`Landed`]. Values compare by their bits, so a NaN that went
+/// out reads back as the same NaN rather than as a write that never landed.
+#[derive(Debug, PartialEq)]
+struct LandedSlot {
+    kind: hx_proto::preset::Kind,
+    model: Option<u32>,
+    paired: Option<u32>,
+    enabled: bool,
+    values: Vec<u32>,
+    paired_values: Vec<u32>,
+}
+
+impl Landed {
+    /// `active` is the snapshot whose tempo and bypass states the device
+    /// keeps for itself; taken from the document written, so both sides of
+    /// the comparison leave out the same one. `None` leaves out all of them.
+    fn of(preset: &Preset, active: Option<usize>) -> Landed {
+        let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect();
+        Landed {
+            slots: preset
+                .slots
+                .iter()
+                .map(|slot| LandedSlot {
+                    kind: slot.kind,
+                    model: slot.model,
+                    paired: slot.paired,
+                    enabled: slot.enabled,
+                    values: bits(&slot.values),
+                    paired_values: bits(&slot.paired_values),
+                })
+                .collect(),
+            tempo: preset.tempo().map(f32::to_bits),
+            snapshots: preset
+                .snapshot_details()
+                .into_iter()
+                .enumerate()
+                .map(|(index, s)| {
+                    let own = active
+                        .is_some_and(|active| active != index)
+                        .then(|| (s.tempo.map(f32::to_bits), s.enabled));
+                    (s.name, own)
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Which snapshot a document has active: key 6 of the snapshot section
+/// (key 10), as the pedal's own buffer reads after one is picked.
+fn active_snapshot(preset: &Preset) -> Option<usize> {
+    preset
+        .tone
+        .get(10)?
+        .get(6)?
+        .as_i64()
+        .and_then(|index| usize::try_from(index).ok())
+}
+
 fn decode_irs(result: Value) -> Result<Vec<(i64, String)>> {
     let entries = match result {
         Value::Array(entries) => entries,
@@ -1628,5 +1711,65 @@ mod pedal_tests {
             );
             assert_eq!(pedal.irs[&0], ("Cab".into(), sum_of(&SAMPLES)));
         }
+    }
+
+    /// A pedal that accepts a document and never applies it. The chain reads
+    /// back with the same blocks either way, which used to pass; the tempo
+    /// that was asked for is what has to be seen.
+    #[test]
+    fn a_tempo_the_pedal_never_applied_is_not_reported_as_written() {
+        let pedal = Pedal::new();
+        let mut session = fake::session(&pedal);
+        let before = session.read_preset().unwrap().tempo().unwrap();
+        let wanted = if before == 100.0 { 101.0 } else { 100.0 };
+        pedal.lock().unwrap().applies_writes = false;
+
+        let result = session.set_tempo(wanted);
+
+        assert!(
+            matches!(result, Err(Error::Protocol(ref why)) if why.contains("never showed it back")),
+            "{result:?}"
+        );
+    }
+
+    /// The same for a snapshot name: the blocks never change, so only the
+    /// name reading back proves the write.
+    #[test]
+    fn a_snapshot_name_lands_only_when_it_reads_back() {
+        let pedal = Pedal::new();
+        let mut session = fake::session(&pedal);
+        session
+            .rename_snapshot(0, "Verse")
+            .expect("an applied write lands");
+        assert_eq!(session.read_preset().unwrap().snapshots()[0], "Verse");
+
+        pedal.lock().unwrap().applies_writes = false;
+        assert!(session.rename_snapshot(0, "Chorus").is_err());
+    }
+
+    /// The device keeps the active snapshot's tempo in step with the
+    /// preset's (the recorded session shows it), so that one is not held
+    /// against a write; any other snapshot's is.
+    #[test]
+    fn only_the_active_snapshot_is_left_to_the_device() {
+        let written = Preset::parse(include_bytes!("../../hx-proto/tests/preset.bin")).unwrap();
+        let active = active_snapshot(&written).expect("the fixture names its active snapshot");
+        let other = (active + 1) % written.snapshot_details().len();
+        let want = Landed::of(&written, Some(active));
+
+        let snapshot_tempo = |index: usize, tempo: f32| {
+            let mut back = Preset::parse(&written.encode()).unwrap();
+            let snapshots = back.tone.get_mut(10).and_then(|s| s.get_mut(10)).unwrap();
+            let Value::Array(entries) = snapshots else {
+                panic!("snapshots are an array")
+            };
+            *entries[index].get_mut(5).unwrap() = Value::F32(tempo);
+            back
+        };
+        let kept = snapshot_tempo(active, 97.0);
+        assert_eq!(kept.snapshot_details()[active].tempo, Some(97.0));
+        assert_eq!(Landed::of(&kept, Some(active)), want);
+        let lost = snapshot_tempo(other, 97.0);
+        assert_ne!(Landed::of(&lost, Some(active)), want);
     }
 }
