@@ -16,6 +16,8 @@ mod eq;
 pub mod library;
 mod pro;
 mod processor;
+#[cfg(test)]
+mod screenshots;
 mod session;
 mod table;
 mod theme;
@@ -1619,6 +1621,21 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // The worker still drains its channel after the UI sender is dropped,
+        // so a normal window close gets the same exact restoration as Done.
+        self.end_audition();
+        self.pro.disconnect();
+    }
+}
+
+impl App {
+    /// One frame of the whole window. Apart from `eframe::App::ui` so the
+    /// design screenshots can draw the editor without a native window.
+    pub(crate) fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
 
         let pro_active = self.pro.claims_ui() && self.connection != Connection::Online;
@@ -1696,15 +1713,6 @@ impl eframe::App for App {
         self.updates.acknowledge();
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // The worker still drains its channel after the UI sender is dropped,
-        // so a normal window close gets the same exact restoration as Done.
-        self.end_audition();
-        self.pro.disconnect();
-    }
-}
-
-impl App {
     /// Keep the window while the worker is talking to the pedal, and close
     /// it as soon as the worker is done.
     ///

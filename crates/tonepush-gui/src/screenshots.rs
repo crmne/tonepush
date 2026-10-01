@@ -1,0 +1,633 @@
+//! The design screenshots: the whole window drawn offscreen, on the GPU, with
+//! invented content.
+//!
+//! Every scene is synthetic. Preset, tone, setlist, capture and artist names
+//! are made up; HX model and knob names come from HX Edit's catalog where it
+//! is installed. No pedal is opened: the app is built with channels that lead
+//! nowhere and the StompStation PRO panel does not look for hardware in test
+//! builds.
+//!
+//! Ignored by default. To render, point the data directories at scratch
+//! copies so nothing personal can appear (HX Edit's data without its
+//! `icons_models` and `icons_category` folders keeps Line 6's artwork out),
+//! send any request for the site nowhere, and run it on its own:
+//!
+//! ```sh
+//! TONEPUSH_SCREENSHOTS=out \
+//! TONEPUSH_LIBRARY=scratch/library TONEPUSH_BACKUPS=scratch/backups \
+//! TONEPUSH_CONFIG=scratch/config.json HX_RESOURCES_DEST=scratch/hx-resources \
+//! TONEPUSH_SITE=http://127.0.0.1:9 \
+//! gpu-lock cargo test -p tonepush-gui --lib screenshots -- --ignored --test-threads=1
+//! ```
+//!
+//! `TONEPUSH_SCREENSHOT_SCENES` (comma separated names) and
+//! `TONEPUSH_SCREENSHOT_SIZES` (`1280x760,2560x1440`) narrow the run. The
+//! renderer insists on a discrete GPU and says which one it used.
+
+use std::sync::mpsc;
+use std::sync::Arc;
+
+use egui_kittest::Harness;
+
+use crate::{session, App, Connection};
+
+/// The sizes the design was drawn at: the smallest supported window, the
+/// reference, and a large display at a scale of one.
+const SIZES: [(u32, u32); 3] = [(1024, 640), (1280, 760), (2560, 1440)];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scene {
+    /// An HX Stomp with 01B Plexi Crunch loaded and its amp selected.
+    HxEdit,
+    /// A StompStation PRO with 03B Velvet Drive loaded.
+    ProEdit,
+    /// Nothing plugged in.
+    NoDevice,
+}
+
+impl Scene {
+    const ALL: [Scene; 3] = [Scene::HxEdit, Scene::ProEdit, Scene::NoDevice];
+
+    fn name(self) -> &'static str {
+        match self {
+            Scene::HxEdit => "hx-edit",
+            Scene::ProEdit => "pro-edit",
+            Scene::NoDevice => "no-device",
+        }
+    }
+
+    fn stage(self, app: &mut App) {
+        // Nothing goes to TonePush's site from a screenshot.
+        app.cloud_search_due = None;
+        app.cloud_check = None;
+        library(app);
+        match self {
+            Scene::HxEdit => hx_stomp(app),
+            Scene::ProEdit => app.pro.show_demo(),
+            Scene::NoDevice => {
+                app.connection = Connection::Offline;
+                app.status =
+                    "No supported pedal found. Check USB and close any other pedal editor."
+                        .to_owned();
+            }
+        }
+    }
+}
+
+/// The app for one scene, built on the harness's own context the first time
+/// it draws, so fonts, icons and styles are installed where they are used.
+struct Demo {
+    scene: Scene,
+    app: Option<App>,
+}
+
+impl Demo {
+    fn frame(&mut self, ui: &mut egui::Ui) {
+        let Some(app) = self.app.as_mut() else {
+            // The fonts installed here are bound from the next frame, which
+            // is when drawing starts, exactly as eframe builds the app before
+            // its first frame.
+            egui_extras::install_image_loaders(ui.ctx());
+            let (to_device, _nowhere) = mpsc::channel();
+            let (_silent, from_device) = mpsc::channel();
+            let mut app = App::new(ui.ctx(), to_device, from_device);
+            self.scene.stage(&mut app);
+            self.app = Some(app);
+            return;
+        };
+        // The harness frames its ui with a margin; eframe hands the app the
+        // whole window, so draw into a ui that covers all of it.
+        let window = ui.ctx().content_rect();
+        let mut root = ui.new_child(egui::UiBuilder::new().max_rect(window));
+        root.set_clip_rect(window);
+        app.draw(&mut root);
+    }
+}
+
+/// A renderer on the machine's discrete GPU, refusing a software rasterizer.
+fn gpu_renderer() -> egui_kittest::wgpu::WgpuTestRenderer {
+    use egui_wgpu::wgpu;
+    let mut setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = wgpu::Backends::VULKAN;
+    setup.native_adapter_selector = Some(Arc::new(|adapters, _surface| {
+        adapters
+            .iter()
+            .find(|adapter| adapter.get_info().device_type == wgpu::DeviceType::DiscreteGpu)
+            .cloned()
+            .ok_or_else(|| "no discrete GPU to render the screenshots on".to_owned())
+    }));
+    let state = egui_kittest::wgpu::create_render_state(
+        egui_wgpu::WgpuSetup::CreateNew(setup),
+        egui_wgpu::RendererOptions::PREDICTABLE,
+    );
+    let info = state.adapter.get_info();
+    assert_ne!(
+        info.device_type,
+        wgpu::DeviceType::Cpu,
+        "{} is a software rasterizer",
+        info.name
+    );
+    eprintln!("rendering on {} ({:?})", info.name, info.backend);
+    egui_kittest::wgpu::WgpuTestRenderer::from_render_state(state)
+}
+
+fn wanted<T: Copy>(variable: &str, all: &[T], parse: impl Fn(&str) -> Option<T>) -> Vec<T> {
+    match std::env::var(variable) {
+        Ok(list) if !list.trim().is_empty() => list
+            .split(',')
+            .filter_map(|item| parse(item.trim()))
+            .collect(),
+        _ => all.to_vec(),
+    }
+}
+
+#[test]
+#[ignore = "renders PNGs on the GPU; see the module documentation"]
+fn screenshots() {
+    let Some(out) = std::env::var_os("TONEPUSH_SCREENSHOTS").map(std::path::PathBuf::from) else {
+        panic!("set TONEPUSH_SCREENSHOTS to the directory the PNGs go in");
+    };
+    for variable in ["TONEPUSH_LIBRARY", "TONEPUSH_BACKUPS", "TONEPUSH_CONFIG"] {
+        assert!(
+            std::env::var_os(variable).is_some(),
+            "set {variable} to a scratch location, so no personal data is drawn"
+        );
+    }
+    std::fs::create_dir_all(&out).expect("the output directory");
+    let scenes = wanted("TONEPUSH_SCREENSHOT_SCENES", &Scene::ALL, |name| {
+        Scene::ALL.into_iter().find(|scene| scene.name() == name)
+    });
+    let sizes = wanted("TONEPUSH_SCREENSHOT_SIZES", &SIZES, |size| {
+        let (width, height) = size.split_once('x')?;
+        Some((width.parse().ok()?, height.parse().ok()?))
+    });
+    for scene in scenes {
+        for &(width, height) in &sizes {
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(width as f32, height as f32))
+                .with_pixels_per_point(1.0)
+                .renderer(gpu_renderer())
+                .build_ui_state(
+                    |ui, demo: &mut Demo| demo.frame(ui),
+                    Demo { scene, app: None },
+                );
+            // Fonts and styles installed on the first frame apply from the
+            // next; a few more let images load and layouts settle.
+            harness.run_steps(8);
+            let image = harness.render().expect("the frame renders");
+            let path = out.join(format!("{}-{width}x{height}-dark.png", scene.name()));
+            image.save(&path).expect("the PNG is written");
+            eprintln!("wrote {}", path.display());
+        }
+    }
+}
+
+/// A library of invented tones and setlists. Each tone is a few bytes stored
+/// in the scratch library the run points at, so it has a hash and a pedal
+/// family like a real one; the rows the table draws are held in memory.
+fn library(app: &mut App) {
+    // Name | pedal | song | artist | character | rating | day kept in
+    // September | version | the one-line reading of its chain.
+    const TONES: [&str; 17] = [
+        "Plexi Crunch|hx|Original||drive|4|12|2|Full rig",
+        "Glass Clean|hx|Harbour Lights|The Night Signals|clean|4|10|1|Full rig",
+        "Brown Lead|hx|Static Bloom|June Arcade|hi-gain|4|11|3|Full rig",
+        "Ambient Swell|hx|Original||clean|3|10|1|Effects only",
+        "Velvet Drive|pro|Low Tide|Marlow Kent|drive|5|28|4|Full rig",
+        "Edge of Breakup|hx|Original||drive|4|14|1|Full rig",
+        "Doom Fuzz|hx|Iron Valley|Slow Comet|fuzz|3|15|1|Full rig",
+        "Worship Pad|hx|Original||clean|5|16|2|Effects only",
+        "Glass Wall|pro|Original||clean|4|29|1|Full rig",
+        "Slapback Twang|hx|Dust Road|The Night Signals|clean|0|17|1|Full rig",
+        "Funk Rhythm|hx|Original||clean|3|18|1|Full rig",
+        "Tape Echo Clean|hx|Paper Boats|June Arcade|clean|4|19|2|Amp and cab",
+        "Shimmer Lead|pro|Low Tide|Marlow Kent|hi-gain|4|29|2|Full rig",
+        "Surf Spring|hx|Original||clean|3|20|1|Amp and cab",
+        "Octave Fuzz|hx|Original||fuzz|2|21|1|Amp and cab",
+        "Dream Pop|hx|Glasshouse|Slow Comet|clean|4|23|1|Full rig",
+        "Garage Grit|hx|Original||drive|3|24|1|Amp and cab",
+    ];
+    let field = |tone: &'static str, index: usize| tone.split('|').nth(index).unwrap_or_default();
+    let hash = |name: &str| {
+        let pedal = TONES
+            .iter()
+            .find(|tone| field(tone, 0) == name)
+            .map_or("hx", |tone| field(tone, 1));
+        let kind = if pedal == "pro" {
+            "vxpreset"
+        } else {
+            "hxpreset"
+        };
+        let bytes = format!("TonePush screenshot tone: {name}");
+        crate::library::store(name, bytes.as_bytes(), kind)
+            .expect("the scratch library takes a synthetic tone")
+    };
+    app.lib_entries = TONES
+        .iter()
+        .map(|tone| {
+            let number = |index: usize| field(tone, index).parse::<u32>().unwrap_or(0);
+            let (name, rating, version) = (field(tone, 0), number(5) as u8, number(7));
+            let kept = format!("2026-09-{:02}T18:02:00Z", number(6));
+            crate::LibEntry {
+                hash: hash(name),
+                series: hash(name),
+                name: name.to_owned(),
+                line: field(tone, 8).to_owned(),
+                meta: crate::library::Meta {
+                    name: name.to_owned(),
+                    song: field(tone, 2).to_owned(),
+                    artist: field(tone, 3).to_owned(),
+                    character: field(tone, 4).to_owned(),
+                    rating,
+                    part: "Rhythm".to_owned(),
+                    tags: if field(tone, 1) == "pro" {
+                        vec!["stereo".into(), "nam".into()]
+                    } else {
+                        vec!["stage".into()]
+                    },
+                    added_at: kept.clone(),
+                    modified_at: kept.clone(),
+                    ..Default::default()
+                },
+                added_at: kept.clone(),
+                modified_at: kept,
+                downloads: None,
+                rating: (rating > 0).then_some(f32::from(rating)),
+                version,
+                versions: version,
+            }
+        })
+        .collect();
+    app.library_lookup.reindex(&app.lib_entries);
+
+    let slot = |name: &str| crate::library::Slot {
+        hash: hash(name),
+        name: name.to_owned(),
+        file: String::new(),
+    };
+    let setlist = |name: &str, venue: &str, date: &str, version: u32, tones: &[&str]| {
+        crate::library::Setlist {
+            series: hash(name),
+            version,
+            added_at: "2026-09-01T12:00:00Z".to_owned(),
+            modified_at: "2026-10-04T18:02:00Z".to_owned(),
+            name: name.to_owned(),
+            description: String::new(),
+            venue: venue.to_owned(),
+            date: date.to_owned(),
+            slots: tones.iter().map(|tone| slot(tone)).collect(),
+        }
+    };
+    app.lib_setlists = vec![
+        (
+            "album-release-show.json".into(),
+            setlist(
+                "Album release show",
+                "Lido Rooftop, Berlin",
+                "4 Oct 2026",
+                2,
+                &[
+                    "Glass Clean",
+                    "Plexi Crunch",
+                    "Brown Lead",
+                    "Edge of Breakup",
+                    "Ambient Swell",
+                ],
+            ),
+        ),
+        (
+            "rehearsal.json".into(),
+            setlist(
+                "Rehearsal",
+                "Room 3",
+                "28 Sep 2026",
+                1,
+                &["Glass Clean", "Plexi Crunch"],
+            ),
+        ),
+        (
+            "summer-tour.json".into(),
+            setlist(
+                "Summer tour",
+                "Various",
+                "2 Aug 2026",
+                3,
+                &["Velvet Drive", "Glass Wall"],
+            ),
+        ),
+    ];
+}
+
+/// 01B Plexi Crunch on an HX Stomp: a wah under EXP 1, a drive on FS1, the
+/// amp selected, a Y split into two cabs, a tape delay the Solo snapshot turns
+/// on, and a reverb on FS3. Models are found by name in HX Edit's catalog.
+fn hx_stomp(app: &mut App) {
+    use hx_proto::preset::{Assignment, Kind, Lane, Layout, Path, Target};
+    use hx_proto::rpc::Source;
+
+    let names = [
+        "Glass Clean",
+        "Plexi Crunch",
+        "Brown Lead",
+        "Edge of Breakup",
+        "Ambient Swell",
+        "Slapback Twang",
+        "Doom Fuzz",
+        "Worship Pad",
+        "Funk Rhythm",
+        "Velvet Lead",
+        "Tape Echo Clean",
+        "Octave Fuzz",
+        "Shimmer Pad",
+        "Chime Clean",
+        "Smooth Overdrive",
+        "Surf Spring",
+        "Tremolo Clean",
+        "Desert Rock",
+        "Jazz Box",
+        "Bass DI",
+        "Acoustic Sim",
+        "Wall of Fuzz",
+        "Clean Comp",
+        "Big Room Lead",
+        "Vibe Rhythm",
+        "Dotted Eighths",
+        "Crunch Stack",
+        "Soft Swell",
+        "Garage Grit",
+        "Lead Boost",
+        "Tight Rhythm",
+        "Sparkle Verb",
+        "Rotary Clean",
+        "Twang Machine",
+        "Cave Drone",
+        "Blues Edge",
+        "Dream Pop",
+        "Grunge Crunch",
+        "Octave Lead",
+        "Reverse Swell",
+        "Practice Clean",
+        "Studio Rhythm",
+    ];
+    app.connection = Connection::Online;
+    app.status.clear();
+    app.device = "HX Stomp".to_owned();
+    app.firmware = "3.80".to_owned();
+    app.preset_count = 126;
+    app.presets = (0..126)
+        .map(|index| {
+            names
+                .get(index)
+                .map_or("New Preset", |name| name)
+                .to_owned()
+        })
+        .collect();
+    for slot in [0, 1, 9, 12] {
+        if !app.config.is_favorite(0, slot) {
+            app.config
+                .favorites
+                .push(crate::config::Favorite { setlist: 0, slot });
+        }
+    }
+    app.preset_index = 1;
+    app.preset_name = "Plexi Crunch".to_owned();
+    app.tempo = Some(104.0);
+    app.snapshots = vec!["Verse".into(), "Chorus".into(), "Solo".into()];
+    app.current_snapshot = 1;
+    app.dirty = true;
+    app.undo_depth = 3;
+
+    let Some(catalog) = app.catalog.as_ref() else {
+        // Without HX Edit's data there are no model names to show.
+        return;
+    };
+    // By name within a category: the catalog has an amp and a preamp both
+    // called US Double Nrm.
+    let in_category = |name: &str, category: &str| {
+        catalog
+            .models()
+            .find(|model| {
+                model.name == name
+                    && catalog
+                        .category_of(&model.id)
+                        .and_then(|id| catalog.category(id))
+                        .is_some_and(|found| found.name == category)
+            })
+            .and_then(|model| crate::number_of(catalog, &model.id))
+            .unwrap_or(0)
+    };
+    let number = |name: &str| {
+        let category = match name {
+            "Teardrop 310" => "Wah",
+            "Minotaur" => "Distortion",
+            "US Double Nrm" => "Amp",
+            "2x12 Silver Bell" | "1x12 Field Coil" => "Cab",
+            "Transistor Tape" => "Delay",
+            "Plateaux" => "Reverb",
+            _ => "",
+        };
+        let found = in_category(name, category);
+        if found != 0 {
+            return found;
+        }
+        catalog
+            .models()
+            .find(|model| model.name == name)
+            .and_then(|model| crate::number_of(catalog, &model.id))
+            .unwrap_or(0)
+    };
+    let defaults = |model: u32| -> Vec<f32> {
+        catalog
+            .model_number(model)
+            .map(|model| {
+                catalog
+                    .ordered_params(model)
+                    .iter()
+                    .map(|p| p.default)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // The amp's knobs as the design shows them, as fractions of each range.
+    let amp = number("US Double Nrm");
+    let amp_values: Vec<f32> = catalog
+        .model_number(amp)
+        .map(|model| {
+            let fractions = [
+                0.45, 0.55, 0.6, 0.65, 0.4, 0.75, 1.0, 0.5, 0.5, 0.5, 0.6, 0.5,
+            ];
+            catalog
+                .ordered_params(model)
+                .iter()
+                .enumerate()
+                .map(|(index, param)| {
+                    fractions
+                        .get(index)
+                        .map_or(param.default, |f| param.min + f * (param.max - param.min))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let block =
+        |position: i64, kind: Kind, model: u32, enabled: bool, values: Vec<f32>| session::Block {
+            position,
+            routing: matches!(kind, Kind::Input | Kind::Output).then_some(0),
+            kind,
+            model,
+            enabled,
+            values,
+            paired: None,
+            paired_values: Vec::new(),
+        };
+    let wah = number("Teardrop 310");
+    let drive = number("Minotaur");
+    let cab = number("2x12 Silver Bell");
+    let second_cab = number("1x12 Field Coil");
+    let delay = number("Transistor Tape");
+    let reverb = number("Plateaux");
+    let split = number("Split Y");
+    let join = number("Mixer");
+    app.chain = vec![
+        block(0, Kind::Input, 0, true, Vec::new()),
+        block(1, Kind::Block, wah, false, defaults(wah)),
+        block(2, Kind::Block, drive, true, defaults(drive)),
+        block(3, Kind::Block, amp, true, amp_values),
+        block(4, Kind::Block, cab, true, defaults(cab)),
+        block(5, Kind::Block, delay, false, defaults(delay)),
+        block(6, Kind::Block, reverb, true, defaults(reverb)),
+        block(9, Kind::Output, 0, true, Vec::new()),
+        block(10, Kind::Split, split, true, defaults(split)),
+        block(11, Kind::Block, second_cab, true, defaults(second_cab)),
+        block(19, Kind::Join, join, true, defaults(join)),
+    ];
+    app.layout = Layout {
+        paths: vec![Path {
+            input: Some(0),
+            output: Some(9),
+            split: Some(10),
+            join: Some(19),
+            head: vec![1, 2, 3],
+            lanes: vec![
+                Lane {
+                    branch: 0,
+                    blocks: vec![4],
+                    span: 4..5,
+                },
+                Lane {
+                    branch: 1,
+                    blocks: vec![11],
+                    span: 11..19,
+                },
+            ],
+            tail: vec![5, 6],
+        }],
+    };
+    app.selected = 3;
+    let param = |model: u32, name: &str| -> i64 {
+        catalog
+            .model_number(model)
+            .and_then(|model| {
+                catalog
+                    .ordered_params(model)
+                    .iter()
+                    .position(|param| param.name == name)
+            })
+            .unwrap_or(0) as i64
+    };
+    app.assignments = vec![
+        Assignment {
+            block: 1,
+            source: Source::Expression(1),
+            target: Target::Bypass,
+            min: 0.0,
+            max: 1.0,
+            cc: None,
+        },
+        Assignment {
+            block: 1,
+            source: Source::Expression(1),
+            target: Target::Param(param(wah, "Position")),
+            min: 0.0,
+            max: 1.0,
+            cc: None,
+        },
+        Assignment {
+            block: 3,
+            source: Source::Snapshots,
+            target: Target::Param(param(amp, "Drive")),
+            min: 0.0,
+            max: 10.0,
+            cc: None,
+        },
+        Assignment {
+            block: 3,
+            source: Source::Footswitch(2),
+            target: Target::Param(param(amp, "Ch Vol")),
+            min: 7.5,
+            max: 8.6,
+            cc: None,
+        },
+        Assignment {
+            block: 5,
+            source: Source::Snapshots,
+            target: Target::Param(param(delay, "Mix")),
+            min: 0.0,
+            max: 1.0,
+            cc: None,
+        },
+        Assignment {
+            block: 6,
+            source: Source::Snapshots,
+            target: Target::Param(param(reverb, "Mix")),
+            min: 0.0,
+            max: 1.0,
+            cc: None,
+        },
+        Assignment {
+            block: 6,
+            source: Source::MidiCc,
+            target: Target::Param(param(reverb, "Decay")),
+            min: 0.0,
+            max: 0.6,
+            cc: Some(4),
+        },
+    ];
+    let led = |name: &str| {
+        catalog
+            .menu(hx_catalog::FOOTSWITCH_LED)
+            .and_then(|colours| colours.iter().position(|colour| colour == name))
+            .map(|index| index as i64)
+    };
+    let carried = |block: i64, name: &str, colour: i64, enabled: bool| hx_usb::Carried {
+        block,
+        name: name.to_owned(),
+        colour: Some(colour),
+        enabled,
+    };
+    app.switches = vec![
+        hx_usb::Switch {
+            switch: 1,
+            momentary: false,
+            label: None,
+            colour: None,
+            carries: vec![carried(2, "Minotaur", 0xff8c10, true)],
+        },
+        hx_usb::Switch {
+            switch: 2,
+            momentary: false,
+            label: Some("LEAD".to_owned()),
+            colour: led("Green"),
+            carries: vec![
+                carried(5, "Transistor Tape", 0x00cc00, false),
+                carried(3, "US Double Nrm", 0xdd1111, true),
+            ],
+        },
+        hx_usb::Switch {
+            switch: 3,
+            momentary: false,
+            label: None,
+            colour: led("Turquoise"),
+            carries: vec![carried(6, "Plateaux", 0xff5c00, true)],
+        },
+    ];
+}

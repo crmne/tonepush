@@ -302,7 +302,12 @@ impl Panel {
             confirmation: None,
             working: None,
         };
-        let _ = panel.tx.send(Cmd::Connect);
+        // A test builds an App, and an App builds this panel: it must never
+        // reach for a StompStation PRO that happens to be plugged into the
+        // machine running the tests.
+        if !cfg!(test) {
+            let _ = panel.tx.send(Cmd::Connect);
+        }
         panel
     }
 
@@ -4136,6 +4141,401 @@ impl From<voidx_proto::CommandError> for WorkError {
 impl From<voidx_proto::PresetError> for WorkError {
     fn from(error: voidx_proto::PresetError) -> Self {
         Self::Preset(error)
+    }
+}
+
+/// Synthetic StompStation PRO content for the design screenshots: invented
+/// preset, capture and impulse response names on a firmware 1.5.12 schema
+/// shaped like the pedal's own. Nothing here talks to a pedal.
+#[cfg(test)]
+pub(crate) mod demo {
+    use super::*;
+
+    const PRESETS: [&str; 24] = [
+        "Clean Machine",
+        "Glass Wall",
+        "Crunch Room",
+        "Stereo Swirl",
+        "Lead Machine",
+        "Plexi Jump",
+        "Modern Chug",
+        "Velvet Drive",
+        "Shimmer Lead",
+        "Twin Clean",
+        "Brit Crunch",
+        "Fuzz Wall",
+        "Detuned Dream",
+        "Rotary Blues",
+        "Para Clean",
+        "Spring Surf",
+        "Slap Echo",
+        "Doom Room",
+        "Worship Swell",
+        "Funk Comp",
+        "Edge Lead",
+        "Bass Grit",
+        "Practice",
+        "Studio DI",
+    ];
+    const AMPS: [&str; 14] = [
+        "JCM800 2203 · Crunch",
+        "AC30 TB · Top Boost",
+        "Twin Reverb · Vibrato ch",
+        "Plexi 1959 · Jumped",
+        "Recto Modern · Ch3",
+        "Bassman 5F6A · Bright",
+        "5150 III · Blue",
+        "ODS-style · Drive",
+        "DC30 · Ch1",
+        "BE-100 · BE",
+        "Rockerverb · Dirty",
+        "Shiva · Ch2",
+        "Mark IIC+ · Lead",
+        "SLO-100 · OD",
+    ];
+    const DRIVES: [&str; 9] = [
+        "TS808 · Drive 9",
+        "Klon-style · Noon",
+        "Rat · Filter 3",
+        "Blues Driver · Full",
+        "Big Muff · Ram's Head",
+        "Fuzz Face · Ge",
+        "OCD · HP",
+        "SD-1 · Edge",
+        "Timmy · Bass cut",
+    ];
+    const IRS: [&str; 11] = [
+        "V30 · SM57 cap edge",
+        "Greenback · R121",
+        "Oxford Room L",
+        "Oxford Room R",
+        "Alnico Blue · 57 + 121",
+        "Jensen C10Q · SM57",
+        "Studio Wide L",
+        "Studio Wide R",
+        "Bass 8x10 · D112",
+        "Celestion G12M · 414",
+        "Acoustic body · DI blend",
+    ];
+
+    fn list(path: &str, count: usize, size: usize, names: &[&str]) -> BlobList {
+        BlobList {
+            path: NodePath::new(path).expect("a valid library path"),
+            description: None,
+            size,
+            count,
+            chunk_size: 128,
+            group: None,
+            gzip: false,
+            movable: true,
+            item_type: None,
+            names: (0..count)
+                .map(|index| names.get(index).map(|name| (*name).to_owned()))
+                .collect(),
+        }
+    }
+
+    fn node(path: &str, description: serde_json::Value) -> (NodePath, NodeDescription) {
+        (
+            NodePath::new(path).expect("a valid node path"),
+            serde_json::from_value(description).expect("a valid node description"),
+        )
+    }
+
+    fn float(
+        path: &str,
+        desc: &str,
+        value: f64,
+        min: f64,
+        max: f64,
+        unit: Option<&str>,
+    ) -> (NodePath, NodeDescription) {
+        let mut description = serde_json::json!({
+            "type": "float", "desc": desc, "value": value, "min": min, "max": max,
+            "def": (min + max) / 2.0, "step": (max - min) / 100.0,
+        });
+        if let Some(unit) = unit {
+            description["unit"] = unit.into();
+        }
+        node(path, description)
+    }
+
+    fn switch(group: &str, on: bool) -> (NodePath, NodeDescription) {
+        node(
+            &format!("root\\app\\{group}\\on_off"),
+            serde_json::json!({
+                "type": "enum", "desc": "On/Off", "value": if on { "ON" } else { "OFF" },
+                "options": ["OFF", "ON"],
+            }),
+        )
+    }
+
+    fn mode(group: &str, value: &str, options: &[&str]) -> (NodePath, NodeDescription) {
+        node(
+            &format!("root\\app\\{group}\\md"),
+            serde_json::json!({
+                "type": "enum", "desc": "Mode", "value": value, "options": options,
+            }),
+        )
+    }
+
+    fn model(group: &str, leaf: &str, value: &str, library: &str) -> (NodePath, NodeDescription) {
+        node(
+            &format!("root\\app\\{group}\\{leaf}"),
+            serde_json::json!({
+                "type": "plist", "desc": "Model", "value": value, "ref": library,
+            }),
+        )
+    }
+
+    /// 03B Velvet Drive, as a firmware 1.5.12 pedal would describe it.
+    fn snapshot() -> Snapshot {
+        let app = vec![
+            node(
+                "root\\app\\preset",
+                serde_json::json!({ "type": "item", "desc": "Preset", "value": "Velvet Drive" }),
+            ),
+            switch("gate", true),
+            float(
+                "root\\app\\gate\\thr",
+                "Threshold",
+                -52.0,
+                -96.0,
+                0.0,
+                Some("dB"),
+            ),
+            float(
+                "root\\app\\gate\\rel",
+                "Release",
+                120.0,
+                10.0,
+                1000.0,
+                Some("ms"),
+            ),
+            switch("pitch", false),
+            mode("pitch", "Octave", &["Octave", "Detune", "Whammy"]),
+            float("root\\app\\pitch\\mix", "Mix", 40.0, 0.0, 100.0, Some("%")),
+            switch("exp", false),
+            float(
+                "root\\app\\exp\\pos",
+                "Position",
+                0.0,
+                0.0,
+                100.0,
+                Some("%"),
+            ),
+            switch("comp", true),
+            mode("comp", "Studio", &["Dyn", "Studio"]),
+            float(
+                "root\\app\\comp\\thr",
+                "Threshold",
+                -24.0,
+                -60.0,
+                0.0,
+                Some("dB"),
+            ),
+            float("root\\app\\comp\\ratio", "Ratio", 4.0, 1.0, 20.0, None),
+            float(
+                "root\\app\\comp\\level",
+                "Level",
+                2.0,
+                -12.0,
+                12.0,
+                Some("dB"),
+            ),
+            switch("mod_pre", false),
+            mode("mod_pre", "Phaser", &["Chorus", "Phaser", "Flanger"]),
+            float(
+                "root\\app\\mod_pre\\rate",
+                "Rate",
+                30.0,
+                0.0,
+                100.0,
+                Some("%"),
+            ),
+            switch("drive", true),
+            model("drive", "model", DRIVES[0], "root\\nam_drive"),
+            float("root\\app\\drive\\gain", "Gain", 5.5, 0.0, 10.0, None),
+            float("root\\app\\drive\\level", "Level", 7.0, 0.0, 10.0, None),
+            switch("amp", true),
+            model("amp", "model", AMPS[0], "root\\nam_amp"),
+            float("root\\app\\amp\\gain", "Gain", 6.2, 0.0, 10.0, None),
+            float("root\\app\\amp\\bass", "Low", 4.8, 0.0, 10.0, None),
+            float("root\\app\\amp\\mid", "Mid", 6.0, 0.0, 10.0, None),
+            float("root\\app\\amp\\treble", "Treble", 5.5, 0.0, 10.0, None),
+            float(
+                "root\\app\\amp\\volume",
+                "Volume",
+                -1.5,
+                -24.0,
+                12.0,
+                Some("dB"),
+            ),
+            switch("ir", true),
+            model("ir", "ir", IRS[0], "root\\ir_list"),
+            float("root\\app\\ir\\mix", "Mix", 100.0, 0.0, 100.0, Some("%")),
+            float(
+                "root\\app\\ir\\lowcut",
+                "Low Cut",
+                80.0,
+                20.0,
+                500.0,
+                Some("Hz"),
+            ),
+            switch("eq", true),
+            float("root\\app\\eq\\low", "Low", 1.5, -12.0, 12.0, Some("dB")),
+            float("root\\app\\eq\\mid", "Mid", -2.0, -12.0, 12.0, Some("dB")),
+            float("root\\app\\eq\\high", "High", 1.0, -12.0, 12.0, Some("dB")),
+            switch("mod", true),
+            mode(
+                "mod",
+                "Chorus",
+                &["Chorus", "Flanger", "Phaser", "Tremolo", "Rotary"],
+            ),
+            float("root\\app\\mod\\rate", "Rate", 35.0, 0.0, 100.0, Some("%")),
+            float(
+                "root\\app\\mod\\depth",
+                "Depth",
+                55.0,
+                0.0,
+                100.0,
+                Some("%"),
+            ),
+            switch("delay", true),
+            mode("delay", "Tape", &["Digital", "Tape", "Analog", "Ping Pong"]),
+            float(
+                "root\\app\\delay\\time",
+                "Time",
+                410.0,
+                20.0,
+                2000.0,
+                Some("ms"),
+            ),
+            float(
+                "root\\app\\delay\\fb",
+                "Feedback",
+                32.0,
+                0.0,
+                100.0,
+                Some("%"),
+            ),
+            float("root\\app\\delay\\mix", "Mix", 28.0, 0.0, 100.0, Some("%")),
+            switch("reverb", true),
+            mode(
+                "reverb",
+                "Shimmer",
+                &["Room", "Hall", "Plate", "Spring", "Shimmer"],
+            ),
+            float(
+                "root\\app\\reverb\\decay",
+                "Decay",
+                4.2,
+                0.1,
+                20.0,
+                Some("s"),
+            ),
+            float("root\\app\\reverb\\mix", "Mix", 35.0, 0.0, 100.0, Some("%")),
+            float(
+                "root\\app\\output\\volume",
+                "Volume",
+                0.0,
+                -80.0,
+                10.0,
+                Some("dB"),
+            ),
+            float(
+                "root\\app\\output\\tempo_bpm",
+                "Tempo",
+                96.0,
+                40.0,
+                240.0,
+                Some("BPM"),
+            ),
+        ];
+        let settings = vec![
+            float(
+                "root\\settings\\input\\gain",
+                "Input gain",
+                0.0,
+                -12.0,
+                12.0,
+                Some("dB"),
+            ),
+            node(
+                "root\\settings\\input\\pickup",
+                serde_json::json!({
+                    "type": "enum", "desc": "Pickup", "value": "Humbucker",
+                    "options": ["Single coil", "Humbucker", "Active"],
+                }),
+            ),
+            float(
+                "root\\settings\\tuner\\ref",
+                "Reference",
+                440.0,
+                425.0,
+                455.0,
+                Some("Hz"),
+            ),
+            node(
+                "root\\settings\\misc\\bright",
+                serde_json::json!({
+                    "type": "enum", "desc": "Screen brightness", "value": "High",
+                    "options": ["Low", "Medium", "High"],
+                }),
+            ),
+        ];
+        Snapshot {
+            identity: Identity {
+                name: "StompStation PRO".into(),
+                version: "1.5.12".into(),
+                architecture: "CM4".into(),
+                license: "sspro".into(),
+            },
+            transport: "USB serial".into(),
+            active_preset: Some("Velvet Drive".into()),
+            libraries: vec![
+                LibraryState {
+                    library: Library::Presets,
+                    info: list("root\\presets", 60, 16_384, &PRESETS),
+                },
+                LibraryState {
+                    library: Library::Irs,
+                    info: list("root\\ir_list", 40, 98_304, &IRS),
+                },
+                LibraryState {
+                    library: Library::Amps,
+                    info: list("root\\nam_amp", 30, 262_144, &AMPS),
+                },
+                LibraryState {
+                    library: Library::Drives,
+                    info: list("root\\nam_drive", 30, 262_144, &DRIVES),
+                },
+            ],
+            app,
+            settings,
+        }
+    }
+
+    impl Panel {
+        /// Show the synthetic pedal as though it had just connected, guarded
+        /// by a backup and with two controls turned since the last save.
+        pub(crate) fn show_demo(&mut self) {
+            self.active = true;
+            self.online = true;
+            self.status.clear();
+            self.install_snapshot(snapshot(), true);
+            self.rollback = Some(PathBuf::from("stompstation-pro-demo.vxbundle"));
+            for (path, value) in [
+                ("root\\app\\amp\\gain", 6.2),
+                ("root\\app\\delay\\mix", 28.0),
+            ] {
+                self.saved_drafts
+                    .insert(path.into(), Value::from(value - 1.0));
+            }
+            self.recompute_dirty();
+            self.selected_group = "amp".into();
+            self.undo_depth = 2;
+        }
     }
 }
 
