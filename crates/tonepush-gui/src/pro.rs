@@ -212,6 +212,8 @@ enum Tab {
 
 struct Confirmation {
     question: String,
+    /// The confirming button's label, naming what it does.
+    action: &'static str,
     command: Cmd,
 }
 
@@ -727,6 +729,29 @@ impl Panel {
         }
     }
 
+    /// Load another preset, asking first when that would throw away edits:
+    /// the pedal rebuilds its live tree from the stored preset, and the
+    /// worker forgets the undo history with it.
+    fn select_preset(&mut self, index: usize) {
+        if !self.dirty {
+            let _ = self.tx.send(Cmd::SelectPreset(index));
+            return;
+        }
+        let name = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| preset_name(snapshot, index))
+            .unwrap_or_default();
+        self.confirmation = Some(Confirmation {
+            question: format!(
+                "This preset has changes that are not saved. Load {} {name} and lose them?",
+                index + 1
+            ),
+            action: "Discard and load",
+            command: Cmd::SelectPreset(index),
+        });
+    }
+
     /// Selecting the already active slot makes the pedal rebuild its live app
     /// tree from the stored preset. That is the protocol's native discard.
     fn discard_changes(&self, snapshot: &Snapshot) {
@@ -737,7 +762,7 @@ impl Panel {
         }
     }
 
-    pub(crate) fn shortcuts(&self, ctx: &egui::Context) {
+    pub(crate) fn shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.memory(|memory| memory.focused().is_some()) || ctx.any_popup_open() {
             return;
         }
@@ -777,7 +802,7 @@ impl Panel {
                 }
             });
             if let Some(index) = adjacent_occupied_preset(self.snapshot.as_ref(), direction) {
-                let _ = self.tx.send(Cmd::SelectPreset(index));
+                self.select_preset(index);
             }
         }
     }
@@ -1082,7 +1107,7 @@ impl Panel {
                         } else {
                             let row = ui.add_enabled_ui(name.is_some(), |ui| ui.selectable_label(selected, text)).inner;
                             if row.clicked() {
-                                let _ = self.tx.send(Cmd::SelectPreset(index));
+                                self.select_preset(index);
                             }
                             row.context_menu(|ui| {
                                 if ui
@@ -1137,6 +1162,7 @@ impl Panel {
                                         let import_name = file.file_stem().and_then(|stem| stem.to_str())
                                             .unwrap_or("Preset").to_owned();
                                         self.confirmation = Some(Confirmation {
+                                            action: "Write to pedal",
                                             question: format!("Replace slot {} with {import_name}?", index + 1),
                                             command: Cmd::Import { library: Library::Presets, index, name: import_name, file },
                                         });
@@ -1186,6 +1212,7 @@ impl Panel {
                                     .clicked()
                                 {
                                     self.confirmation = Some(Confirmation {
+                                        action: "Write to pedal",
                                         question: format!("Empty slot {} back to a blank preset?", index + 1),
                                         command: Cmd::Clear { library: Library::Presets, index },
                                     });
@@ -2063,6 +2090,7 @@ impl Panel {
         }
         if remove {
             self.confirmation = Some(Confirmation {
+                action: "Write to pedal",
                 question: format!(
                     "Remove {original} from {} slot {}?",
                     library.title(),
@@ -2236,6 +2264,7 @@ impl Panel {
                 .collect::<Vec<_>>()
                 .join(" and ");
             self.confirmation = Some(Confirmation {
+                action: "Write to pedal",
                 question: format!(
                     "Replace {occupied} occupied {} slot(s) at {slots}? The automatic backup remains available.",
                     library.title()
@@ -2263,6 +2292,7 @@ impl Panel {
         if actions.restore {
             if let Some(path) = rfd::FileDialog::new().pick_folder() {
                 self.confirmation = Some(Confirmation {
+                    action: "Write to pedal",
                     question: format!(
                         "Restore every library and safe setting from {}?",
                         path.display()
@@ -2296,9 +2326,10 @@ impl Panel {
             return;
         };
         let question = confirmation.question.clone();
+        let action = confirmation.action;
         let mut confirm = false;
         let mut cancel = false;
-        egui::Window::new("Confirm device write")
+        egui::Window::new("Confirm")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -2307,7 +2338,7 @@ impl Panel {
                 ui.label(question);
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    confirm = ui.button("Write to pedal").clicked();
+                    confirm = ui.button(action).clicked();
                     cancel = ui.button("Cancel").clicked();
                 });
             });
@@ -2382,6 +2413,17 @@ fn node_label(path: &NodePath, description: &NodeDescription) -> String {
             .unwrap_or(path.as_str())
             .to_owned()
     })
+}
+
+fn preset_name(snapshot: &Snapshot, index: usize) -> Option<String> {
+    snapshot
+        .libraries
+        .iter()
+        .find(|state| state.library == Library::Presets)?
+        .info
+        .names
+        .get(index)?
+        .clone()
 }
 
 fn active_preset_index(snapshot: &Snapshot) -> Option<usize> {
