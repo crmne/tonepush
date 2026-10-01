@@ -166,12 +166,29 @@ SUBSYSTEM==\"tty\", ATTRS{manufacturer}==\"SONULAB\", ATTRS{product}==\"StompSta
     say "installed $UDEV_RULE (replug the device to apply)"
 }
 
+# One argument of a desktop entry's Exec key, quoted the way the Desktop Entry
+# Specification asks: inside double quotes, with ", `, $ and \ escaped by a
+# backslash, % doubled, and then every backslash doubled again for the string
+# escape that is undone first. A path with a space then stays one argument.
+desktop_exec_arg() {
+    local arg="$1"
+    arg="${arg//\\/\\\\}"
+    arg="${arg//\"/\\\"}"
+    arg="${arg//\`/\\\`}"
+    arg="${arg//\$/\\\$}"
+    arg="${arg//%/%%}"
+    arg="${arg//\\/\\\\}"
+    printf '"%s"' "$arg"
+}
+
 make_desktop_entry() {
     local gui="$1"
     local icons="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+    local exec
     mkdir -p "$LINUX_APPS" "$icons"
     # The Exec path is written absolute: desktop launchers do not share the
     # shell's PATH, and a bare command name quietly fails there.
+    exec="$(desktop_exec_arg "$gui")"
     cat >"$LINUX_APPS/$APP_SLUG.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
@@ -179,7 +196,7 @@ Version=1.0
 Name=$APP_NAME
 GenericName=Guitar Processor Editor
 Comment=Editor for Line 6 HX and Sonulab StompStation PRO hardware
-Exec=$gui
+Exec=$exec
 Terminal=false
 Categories=AudioVideo;Audio;
 Keywords=Line 6;HX;Helix;Sonulab;StompStation;VoidX;stomp;pedal;guitar;preset;tone;
