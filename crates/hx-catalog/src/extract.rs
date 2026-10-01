@@ -101,7 +101,7 @@ pub fn from_installed() -> Result<usize, String> {
 /// macOS: mount the dmg natively. Newer installers hold a .pkg rather than
 /// the app itself, so both shapes are handled.
 fn from_dmg(dmg: &Path) -> Result<usize, String> {
-    let mount = tempdir("tonepush-dmg")?;
+    let mount = work_dir("dmg")?;
     let status = Command::new("hdiutil")
         .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
         .arg(&mount)
@@ -122,7 +122,8 @@ fn from_dmg(dmg: &Path) -> Result<usize, String> {
         let pkg = find_named(&mount, "HX Edit.pkg", 2)
             .or_else(|| find_named(&mount, "HXEdit.pkg", 2))
             .ok_or_else(|| "no HX Edit app or installer package inside the dmg".to_string())?;
-        let expanded = tempdir("tonepush-pkg")?.join("expanded");
+        let package = work_dir("pkg")?;
+        let expanded = package.join("expanded");
         let status = Command::new("pkgutil")
             .arg("--expand-full")
             .arg(&pkg)
@@ -136,7 +137,7 @@ fn from_dmg(dmg: &Path) -> Result<usize, String> {
             .and_then(|catalog| catalog.parent().map(Path::to_path_buf))
             .ok_or_else(|| "no HX Edit data inside the package".to_string())
             .and_then(|dir| copy_from(&dir));
-        let _ = std::fs::remove_dir_all(&expanded);
+        let _ = std::fs::remove_dir_all(&package);
         result
     })();
     let _ = Command::new("hdiutil")
@@ -163,7 +164,7 @@ fn from_archive(installer: &Path) -> Result<usize, String> {
             .to_string()
     })?;
 
-    let work = tempdir("tonepush-extract")?;
+    let work = work_dir("extract")?;
     let result = (|| {
         unpack(&sevenzip, installer, &work)?;
         for _ in 0..6 {
@@ -517,10 +518,40 @@ fn find_named(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
         .find_map(|dir| find_named(&dir, name, depth - 1))
 }
 
-fn tempdir(prefix: &str) -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not make a work directory: {e}"))?;
-    Ok(dir)
+/// A fresh scratch directory for unpacking an installer, beside where the
+/// resources are going.
+///
+/// Not under the system temp directory: an unpacked installer runs to
+/// hundreds of megabytes, and `/tmp` is often a small in-memory filesystem
+/// that fills up and takes every other program's scratch space with it.
+/// Beside the destination it is on the disk the resources land on anyway.
+fn work_dir(purpose: &str) -> Result<PathBuf, String> {
+    let dest = destination().ok_or_else(|| "no home directory to extract into".to_string())?;
+    work_dir_beside(&dest, purpose)
+}
+
+fn work_dir_beside(dest: &Path, purpose: &str) -> Result<PathBuf, String> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let parent = dest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("could not make a work directory: {error}"))?;
+    for _ in 0..100 {
+        let path = parent.join(format!(
+            ".{purpose}-{}-{}.work",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("could not make a work directory: {error}")),
+        }
+    }
+    Err("could not choose a unique work directory".into())
 }
 
 #[cfg(test)]
@@ -528,13 +559,22 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "tonepush-extract-test-{}-{name}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::tests::scratch(&format!("extract-{name}"))
+    }
+
+    #[test]
+    fn installers_unpack_beside_the_resources_not_in_the_system_temp_dir() {
+        let root = scratch("work-dir");
+        let dest = root.join("hx-resources");
+
+        let first = work_dir_beside(&dest, "extract").unwrap();
+        let second = work_dir_beside(&dest, "extract").unwrap();
+        assert_eq!(first.parent(), Some(root.as_path()));
+        assert!(first.is_dir() && second.is_dir());
+        assert_ne!(first, second, "two extractions never share a directory");
+        assert!(!first.starts_with(std::env::temp_dir()));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn valid_source(dir: &Path) {

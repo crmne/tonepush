@@ -611,6 +611,27 @@ fn default_resources() -> PathBuf {
 pub(crate) mod tests {
     use super::*;
 
+    /// An empty scratch directory for one test, inside the build's own target
+    /// directory rather than the system temp directory, which on some
+    /// machines is a small in-memory filesystem shared by everything.
+    ///
+    /// The test binary lives at `<target>/<profile>/deps/`, so `<target>/tmp`
+    /// is two levels up from it: the directory Cargo itself gives integration
+    /// tests as `CARGO_TARGET_TMPDIR`, which unit tests are not given.
+    pub(crate) fn scratch(name: &str) -> PathBuf {
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let target = exe
+            .ancestors()
+            .nth(3)
+            .expect("the test binary sits in <target>/<profile>/deps");
+        let dir = target
+            .join("tmp")
+            .join(format!("hx-catalog-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     /// The real installed catalog, or `None` where HX Edit is not present.
     ///
     /// Only a missing install is a reason to skip. A catalog that is present

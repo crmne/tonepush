@@ -129,11 +129,7 @@ mod tests {
     /// A scratch directory to play the two names out in. Nothing here reads
     /// `HOME`, so no test can reach the library on the machine running it.
     fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("tonepush-home-test-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::tests::scratch(&format!("home-{name}"))
     }
 
     /// Windows has no `HOME`. Forgetting that on one side of the extraction
