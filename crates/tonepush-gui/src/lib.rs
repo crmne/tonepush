@@ -6169,8 +6169,7 @@ impl App {
 
                         theme::section_break(ui);
 
-                        let free_ir =
-                            (0..128).find(|slot| !self.irs.iter().any(|(used, _)| used == slot));
+                        let free_ir = session::free_ir_slot(&self.irs);
                         let mut import_ir = false;
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("IMPULSE RESPONSES").small().color(theme::DIM));
@@ -6188,14 +6187,11 @@ impl App {
                             );
                         });
                         if import_ir {
-                            if let (Some(slot), Some(file)) = (
-                                free_ir,
-                                rfd::FileDialog::new()
-                                    .add_filter("WAV", &["wav"])
-                                    .pick_file(),
-                            ) {
-                                self.note(format!("loading IR into slot {}", slot + 1));
-                                self.send(Cmd::LoadIr { slot, file });
+                            if let Some(file) = rfd::FileDialog::new()
+                                .add_filter("WAV", &["wav"])
+                                .pick_file()
+                            {
+                                self.load_ir(file);
                             }
                         }
 
@@ -7246,20 +7242,19 @@ impl App {
                 self.extract_resources(path);
                 continue;
             }
-            let free =
-                (0..128).find(|s| !self.irs.iter().any(|(slot, n)| slot == s && !n.is_empty()));
-            match free {
-                Some(slot) => {
-                    self.note(format!(
-                        "loading {} into IR slot {}",
-                        path.display(),
-                        slot + 1
-                    ));
-                    self.send(Cmd::LoadIr { slot, file: path });
-                }
-                None => self.note("no free impulse response slot".into()),
-            }
+            self.load_ir(path);
         }
+    }
+
+    /// Send a WAV to the pedal's impulse responses. Which slot is the
+    /// worker's choice, made from the pedal's own list as the upload starts:
+    /// the list here can be a file or two behind, or not heard yet at all.
+    fn load_ir(&mut self, file: std::path::PathBuf) {
+        self.note(format!(
+            "loading {} into the first free impulse response slot",
+            file.display()
+        ));
+        self.send(Cmd::LoadIr(file));
     }
 
     /// Open a tone file aimed at one preset: the row whose menu asked.
@@ -11791,6 +11786,52 @@ mod tests {
         app.drain_events();
         app.paste_block(7);
         assert!(cmds.try_recv().is_err());
+    }
+
+    /// A file dropped on the window, as the windowing layer hands it over.
+    #[derive(Debug)]
+    struct Dropped(std::path::PathBuf);
+
+    impl egui::DroppedFile for Dropped {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+
+    /// Dropped together, each WAV goes to the worker on its own, to take
+    /// whichever slot the pedal has free by then. Picking the slot here gave
+    /// them all the same one, and with the list not yet heard, slot 1.
+    #[test]
+    fn wavs_dropped_together_each_go_on_their_own() {
+        let (mut app, _events, cmds) = app();
+        let _ = cmds.try_iter().count();
+        let files = ["/cabs/first.wav", "/cabs/second.wav"];
+        let input = egui::RawInput {
+            dropped_files: files
+                .iter()
+                .map(|file| std::sync::Arc::new(Dropped(file.into())) as egui::DroppedFileHandle)
+                .collect(),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        ctx.begin_pass(input);
+        app.dropped_files(&ctx);
+        let mut output = ctx.end_pass();
+        output.textures_delta.clear();
+
+        let sent: Vec<std::path::PathBuf> = cmds
+            .try_iter()
+            .filter_map(|cmd| match cmd {
+                Cmd::LoadIr(file) => Some(file),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, files.map(std::path::PathBuf::from));
     }
 
     #[test]

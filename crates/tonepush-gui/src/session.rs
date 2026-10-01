@@ -15,6 +15,14 @@ use std::time::{Duration, Instant};
 /// there - its name and its document - or nothing, to empty the slot.
 pub type SlotWrite = (i64, Option<(String, Vec<u8>)>);
 
+/// How many impulse responses the pedal stores.
+pub(crate) const IR_SLOTS: i64 = 128;
+
+/// The first impulse response slot a list of occupied ones leaves free.
+pub(crate) fn free_ir_slot(used: &[(i64, String)]) -> Option<i64> {
+    (0..IR_SLOTS).find(|slot| !used.iter().any(|(taken, _)| taken == slot))
+}
+
 /// The tempos a preset can hold, in BPM. hx-usb refuses anything else, so
 /// the editor checks against the same numbers before it asks.
 pub(crate) const TEMPO: std::ops::RangeInclusive<f32> = 40.0..=240.0;
@@ -107,10 +115,9 @@ pub enum Cmd {
         switch: u8,
         edit: SwitchEdit,
     },
-    LoadIr {
-        slot: i64,
-        file: std::path::PathBuf,
-    },
+    /// Load a WAV into the first impulse response slot the pedal reports
+    /// free when the upload starts.
+    LoadIr(std::path::PathBuf),
     ClearIr(i64),
     /// Read the device's favourite blocks.
     ListFavourites,
@@ -1086,23 +1093,7 @@ impl Worker {
                     self.send(Evt::Irs(slots));
                 }
             }
-            Cmd::LoadIr { slot, file } => {
-                let loaded = self.try_on_device(|d| {
-                    let wav = crate::wav::read(&file)?;
-                    let samples = hx_usb::ir::prepare(&wav.samples, wav.sample_rate)?;
-                    let name = file
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("impulse")
-                        .chars()
-                        .take(20)
-                        .collect::<String>();
-                    d.upload_ir(slot, &name, &samples)
-                });
-                if loaded.is_some() {
-                    self.handle(Cmd::ListIrs);
-                }
-            }
+            Cmd::LoadIr(file) => self.load_ir(&file),
             Cmd::ListFavourites => {
                 if let Some(list) = self.try_on_device(|d| d.favourites()) {
                     self.send(Evt::Favourites(list));
@@ -1371,6 +1362,44 @@ impl Worker {
     fn preset_bytes(&mut self) -> Option<Vec<u8>> {
         self.try_on_device(|device| device.read_preset())
             .map(|preset| preset.encode())
+    }
+
+    /// Load a WAV into the first slot the pedal reports free.
+    ///
+    /// The slot is chosen here, from the pedal's own list, as the upload
+    /// starts. Chosen by the editor from the list it had last heard, several
+    /// files dropped at once all went to one slot, each over the last, and a
+    /// list not heard yet sent a file to the first slot whatever it held.
+    fn load_ir(&mut self, file: &std::path::Path) {
+        // The file first: one that does not read never reaches the pedal.
+        let prepared = crate::wav::read(file)
+            .and_then(|wav| hx_usb::ir::prepare(&wav.samples, wav.sample_rate));
+        let samples = match prepared {
+            Ok(samples) => samples,
+            Err(e) => return self.send(Evt::Failed(e.to_string())),
+        };
+        let name = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("impulse")
+            .chars()
+            .take(20)
+            .collect::<String>();
+        let Some(used) = self.try_on_device(|d| d.irs()) else {
+            return;
+        };
+        let Some(slot) = free_ir_slot(&used) else {
+            self.send(Evt::Irs(used));
+            return self.send(Evt::Failed("every impulse response slot is in use".into()));
+        };
+        if self.run_on_device(|d| d.upload_ir(slot, &name, &samples)) {
+            self.send(Evt::Activity(format!(
+                "loaded {name} into impulse response slot {}",
+                slot + 1
+            )));
+        }
+        // Whatever happened, the list is the pedal's again.
+        self.handle(Cmd::ListIrs);
     }
 
     /// Commit the edit buffer to the loaded preset. Returns whether it did.
@@ -2350,6 +2379,8 @@ mod tests {
         refuse: BTreeMap<i64, i64>,
         /// Whether the cable is out: every transfer fails.
         unplugged: bool,
+        /// Impulse responses, as (slot, name).
+        irs: Vec<(i64, String)>,
         /// Every request that arrived, as (opcode, arguments).
         requests: Vec<(i64, Value)>,
         /// Transfers waiting for the host to read them.
@@ -2407,6 +2438,7 @@ mod tests {
                 stored,
                 refuse: BTreeMap::new(),
                 unplugged: false,
+                irs: Vec::new(),
                 requests: Vec::new(),
                 outbox: VecDeque::new(),
                 inbox: BTreeMap::new(),
@@ -2524,6 +2556,27 @@ mod tests {
                         })
                         .collect();
                     (0, Value::Array(names))
+                }
+                op::LIST_IRS if self.irs.is_empty() => (0, Value::Nil),
+                op::LIST_IRS => {
+                    let listed = self
+                        .irs
+                        .iter()
+                        .map(|(slot, name)| {
+                            hx_proto::msgmap! {
+                                key::IR_SLOT => Value::Int(*slot),
+                                key::NAME => Value::Str(name.clone()),
+                            }
+                        })
+                        .collect();
+                    (0, Value::Array(listed))
+                }
+                op::UPLOAD_IR => {
+                    let name = args.get(key::NAME).and_then(Value::as_str);
+                    let uploaded = (number(key::IR_SLOT), name.unwrap_or_default().to_owned());
+                    self.irs.retain(|(slot, _)| *slot != uploaded.0);
+                    self.irs.push(uploaded);
+                    (0, Value::Nil)
                 }
                 op::FETCH_OBJECT => {
                     let object = hx_proto::msgmap! {
@@ -3250,6 +3303,68 @@ mod tests {
 
         assert!(events.try_iter().any(|e| matches!(e, Evt::Failed(_))));
         assert_eq!(pedal.lock().unwrap().requests.len(), asked);
+    }
+
+    /// A short WAV on disk, named for the test that wrote it.
+    fn wav(name: &str) -> std::path::PathBuf {
+        let file = std::env::temp_dir().join(format!("tonepush-{}-{name}.wav", std::process::id()));
+        crate::wav::write(&file, &[1.0, 0.5, 0.25, 0.0], 48_000).unwrap();
+        file
+    }
+
+    /// Several files dropped at once each take a slot of their own, chosen
+    /// from the pedal's list as each upload starts, and an occupied slot is
+    /// never written over.
+    #[test]
+    fn impulse_responses_dropped_together_each_get_a_free_slot() {
+        let pedal = Pedal::new();
+        pedal.lock().unwrap().irs = vec![(0, "Already here".into())];
+        let (mut worker, events) = worker(&pedal);
+        let (first, second) = (wav("first-cab"), wav("second-cab"));
+
+        worker.handle(Cmd::LoadIr(first.clone()));
+        worker.handle(Cmd::LoadIr(second.clone()));
+
+        let mut irs = pedal.lock().unwrap().irs.clone();
+        irs.sort();
+        let names = |file: &std::path::Path| {
+            let stem = file.file_stem().unwrap().to_str().unwrap();
+            stem.chars().take(20).collect::<String>()
+        };
+        assert_eq!(
+            irs,
+            vec![
+                (0, "Already here".to_owned()),
+                (1, names(&first)),
+                (2, names(&second)),
+            ]
+        );
+        assert!(events
+            .try_iter()
+            .any(|e| matches!(e, Evt::Irs(list) if list.len() == 3)));
+        let _ = std::fs::remove_file(first);
+        let _ = std::fs::remove_file(second);
+    }
+
+    /// A file that is not a WAV is turned away before the pedal hears of
+    /// it, and a full pedal is told so rather than written over.
+    #[test]
+    fn an_impulse_response_that_cannot_go_anywhere_is_not_sent() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        let asked = pedal.lock().unwrap().requests.len();
+
+        worker.handle(Cmd::LoadIr("/nonexistent/cab.wav".into()));
+        assert_eq!(pedal.lock().unwrap().requests.len(), asked);
+        assert!(events.try_iter().any(|e| matches!(e, Evt::Failed(_))));
+        assert!(worker.device.is_some());
+
+        pedal.lock().unwrap().irs = (0..IR_SLOTS).map(|slot| (slot, "full".into())).collect();
+        let file = wav("one-too-many");
+        worker.handle(Cmd::LoadIr(file.clone()));
+        assert!(!pedal.lock().unwrap().opcodes().contains(&op::UPLOAD_IR));
+        assert!(events.try_iter().any(|e| matches!(e, Evt::Failed(_))));
+        let _ = std::fs::remove_file(file);
     }
 
     /// The other side of that rule: a failure on the wire still ends the
