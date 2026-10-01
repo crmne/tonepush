@@ -555,12 +555,34 @@ impl<L: Link> Device<L> {
                 .collect::<Vec<_>>()
         };
         let mut completed = Vec::new();
+        let mut names = before.names.clone();
         for &(first, second) in &pairs {
             if let Err(error) = self.swap_slots(list, first, second) {
+                // The swap can fail after the pedal applied it (a bad echo or
+                // read-back). Undo it too when the name table shows it took.
+                let mut swapped = names.clone();
+                swapped.swap(first, second);
+                if self
+                    .list_info(list.path.clone())
+                    .is_ok_and(|now| now.names == swapped && swapped != names)
+                {
+                    completed.push((first, second));
+                }
                 let rollback = completed
                     .iter()
                     .rev()
-                    .try_for_each(|&(first, second)| self.swap_slots(list, first, second));
+                    .try_for_each(|&(first, second)| self.swap_slots(list, first, second))
+                    .and_then(|()| {
+                        let now = self.list_info(list.path.clone())?;
+                        if now.names == before.names {
+                            Ok(())
+                        } else {
+                            Err(Error::InvalidResponse {
+                                subject: list.path.to_string(),
+                                detail: "name table differs from before the move".into(),
+                            })
+                        }
+                    });
                 return match rollback {
                     Ok(()) => Err(error),
                     Err(rollback) => Err(Error::WriteRefused(format!(
@@ -568,6 +590,7 @@ impl<L: Link> Device<L> {
                     ))),
                 };
             }
+            names.swap(first, second);
             completed.push((first, second));
         }
 
