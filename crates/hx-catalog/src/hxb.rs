@@ -247,6 +247,14 @@ fn inflate_exact(compressed: &[u8], limit: u64, what: &str) -> Result<Vec<u8>, E
         .take(limit.saturating_add(1))
         .read_to_end(&mut out)
         .map_err(|error| Error::Backup(format!("{what} would not inflate: {error}")))?;
+    // Reading stopped at the limit, so the rest of the stream was never
+    // consumed. Say that it is too big, not that what was left is trailing
+    // data.
+    if out.len() as u64 > limit {
+        return Err(Error::Backup(format!(
+            "{what} inflates to more than the {limit} bytes it should hold"
+        )));
+    }
     if decoder.total_in() != compressed.len() as u64 {
         return Err(Error::Backup(format!(
             "{what} has trailing data after its zlib stream"
@@ -626,6 +634,21 @@ mod tests {
     }
 
     #[test]
+    fn a_block_larger_than_its_table_says_is_reported_as_too_big() {
+        let (stored, raw_len) = deflate(&json!({ "tone": "clean", "gain": 4 }));
+        let block = Block {
+            tag: *b"TEST",
+            compressed: true,
+            raw_len: raw_len - 5,
+            stored,
+        };
+
+        let error = block.decompress().unwrap_err().to_string();
+        assert!(error.contains("more than"), "{error}");
+        assert!(!error.contains("trailing"), "{error}");
+    }
+
+    #[test]
     fn trailing_data_after_a_compressed_block_is_rejected() {
         let (mut stored, raw_len) = deflate(&json!({ "tone": "clean" }));
         stored.extend_from_slice(b"hidden trailing bytes");
@@ -712,11 +735,6 @@ pub fn read_setlist_file(bytes: &[u8]) -> Result<Backup, Error> {
         )));
     }
     let raw = inflate_exact(&compressed, limit, "the setlist file")?;
-    if raw.len() as u64 > limit {
-        return Err(Error::Backup(
-            "the setlist file expands beyond its safe declared size".into(),
-        ));
-    }
 
     if let Some(expected) = declared {
         if expected != raw.len() as u64 {
