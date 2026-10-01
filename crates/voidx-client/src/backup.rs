@@ -259,7 +259,8 @@ impl VerifiedBundle {
     }
 
     /// Prove this bundle describes the connected device's current logical
-    /// state by matching every name and both boundary chunks of occupied slots.
+    /// state by matching every name and the stored content of every occupied
+    /// slot (see [`stored_content_matches`]).
     /// Intended as the mandatory guard before an isolated mutation.
     pub fn verify_current_state<L: Link>(&self, device: &mut Device<L>) -> Result<Vec<BlobList>> {
         let lists = self.preflight(device)?;
@@ -278,7 +279,7 @@ impl VerifiedBundle {
                     current.path
                 )));
             }
-            verify_rollback_boundaries(device, current, self)?;
+            verify_rollback_contents(device, current, self)?;
         }
         verify_settings_current(self, device)?;
         Ok(lists)
@@ -561,7 +562,7 @@ fn prepare_settings_restore<L: Link>(
     Ok(plan)
 }
 
-fn verify_rollback_boundaries<L: Link>(
+fn verify_rollback_contents<L: Link>(
     device: &mut Device<L>,
     current: &BlobList,
     rollback: &VerifiedBundle,
@@ -573,10 +574,11 @@ fn verify_rollback_boundaries<L: Link>(
                 current.path
             ))
         })?;
-        if !boundary_chunks_match(device, current, index, saved)? {
+        if !stored_content_matches(device, current, index, saved)? {
             return Err(Error::Backup(format!(
-                "{} slot {index} no longer matches rollback at its boundary chunks",
-                current.path
+                "{} slot {} ({name}) no longer matches the rollback bundle; capture a fresh rollback",
+                current.path,
+                index + 1
             )));
         }
     }
@@ -595,7 +597,7 @@ pub fn capture<L: Link>(
 }
 
 /// Capture a complete bundle while reusing bytes from a verified bundle when
-/// its identity, list shape, slot name and boundary chunks still match.
+/// its identity, list shape, slot name and stored content still match.
 /// A fresh schema is always captured, so a settings-only change avoids
 /// retransferring every megabyte-sized NAM model.
 pub fn capture_reusing<L: Link>(
@@ -606,6 +608,7 @@ pub fn capture_reusing<L: Link>(
     mut progress: impl FnMut(Step),
 ) -> Result<Manifest> {
     recover_bundle(target)?;
+    refuse_foreign_target(target)?;
     let staging = StagingBundle::new(target)?;
     let reuse = reuse.filter(|bundle| bundle.manifest.identity == *device.identity());
 
@@ -648,7 +651,7 @@ pub fn capture_reusing<L: Link>(
                 .and_then(|_| reuse.and_then(|bundle| bundle.blob(path, index)))
                 .filter(|blob| blob.len() == info.size);
             let blob = if let Some(blob) = reusable {
-                if boundary_chunks_match(device, &info, index, blob)? {
+                if stored_content_matches(device, &info, index, blob)? {
                     progress(Step::Reused {
                         path: path.to_owned(),
                         index,
@@ -860,6 +863,15 @@ fn validate_manifest_shape(manifest: &Manifest) -> Result<()> {
             }
         }
     }
+    // Restore and arming walk every library; a bundle missing one could unlock
+    // writes it cannot roll back.
+    if paths.len() != LIBRARY_PATHS.len() || LIBRARY_PATHS.iter().any(|path| !paths.contains(*path))
+    {
+        return Err(Error::Backup(format!(
+            "a bundle must hold exactly the libraries {}",
+            LIBRARY_PATHS.join(", ")
+        )));
+    }
     Ok(())
 }
 
@@ -900,6 +912,68 @@ fn boundary_chunks_match<L: Link>(
         }
     }
     Ok(true)
+}
+
+/// Slots up to this size (presets, IRs) are compared byte for byte.
+const FULL_COMPARE_MAX_BYTES: usize = 64 * 1024;
+/// Chunks requested per round trip, matching full slot reads.
+const COMPARE_BATCH_CHUNKS: usize = 32;
+
+/// Whether the device's slot still holds exactly `blob`.
+///
+/// A slot can change without its name changing: saving a preset in place,
+/// or replacing a model under the same name. Small slots are therefore read
+/// back in full. A gzip slot (a NAM model) is a gzip stream padded with zeros,
+/// and the stream's trailer holds a CRC-32 of the whole uncompressed model, so
+/// its first chunk plus the chunks holding that trailer stand for every byte
+/// without moving a megabyte. Anything else is read back in full.
+fn stored_content_matches<L: Link>(
+    device: &mut Device<L>,
+    list: &BlobList,
+    index: usize,
+    blob: &[u8],
+) -> Result<bool> {
+    if blob.len() != list.size {
+        return Ok(false);
+    }
+    let chunks = list.chunks_per_slot();
+    let wanted = if list.size > FULL_COMPARE_MAX_BYTES && list.gzip {
+        gzip_fingerprint_chunks(blob, list.chunk_size, chunks)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| (1..=chunks).collect());
+    for batch in wanted.chunks(COMPARE_BATCH_CHUNKS) {
+        for (&chunk, bytes) in batch
+            .iter()
+            .zip(device.read_blob_chunks(&list.path, index, batch)?)
+        {
+            let start = (chunk - 1) * list.chunk_size;
+            let end = (start + list.chunk_size).min(blob.len());
+            if blob.get(start..end) != Some(bytes.as_slice()) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// The 1-based chunks that fingerprint a zero-padded gzip slot: the first
+/// chunk and every chunk overlapping the 8-byte trailer (CRC-32 and size).
+/// `None` when the saved bytes are not a single gzip stream followed by zero
+/// padding, in which case the caller compares in full.
+fn gzip_fingerprint_chunks(blob: &[u8], chunk_size: usize, chunks: usize) -> Option<Vec<usize>> {
+    let mut decoder = flate2::bufread::GzDecoder::new(blob);
+    std::io::copy(&mut decoder, &mut std::io::sink()).ok()?;
+    let end = blob.len() - decoder.into_inner().len();
+    if end < 8 || blob[end..].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    let mut wanted = vec![1];
+    wanted.extend((end - 8) / chunk_size + 1..=(end - 1) / chunk_size + 1);
+    wanted.dedup();
+    wanted.retain(|chunk| *chunk <= chunks);
+    Some(wanted)
 }
 
 fn read_and_verify(root: &Path, file: &FileRecord) -> Result<Vec<u8>> {
@@ -1048,7 +1122,7 @@ impl StagingBundle {
 
     fn commit(mut self, target: &Path) -> Result<()> {
         let previous = previous_bundle(target)?;
-        let had_previous = target.exists();
+        let had_previous = claim_target(target)?;
         if had_previous {
             std::fs::rename(target, &previous)
                 .map_err(|error| backup_io("putting the previous bundle aside", error))?;
@@ -1096,14 +1170,60 @@ fn previous_bundle(target: &Path) -> Result<PathBuf> {
     Ok(bundle_parent(target).join(name))
 }
 
+/// Whether `path` is a directory holding a bundle manifest. Only such
+/// directories are ever renamed aside, recovered or deleted.
+fn is_bundle(path: &Path) -> bool {
+    path.join("manifest.json").is_file()
+}
+
+/// Refuse a destination that exists and is neither a bundle nor an empty
+/// directory, so a backup aimed at an ordinary folder can never replace (and
+/// delete) its contents. Checked before a capture starts and again at commit.
+fn refuse_foreign_target(target: &Path) -> Result<()> {
+    if !target.exists() || is_bundle(target) {
+        return Ok(());
+    }
+    let empty = target.is_dir()
+        && std::fs::read_dir(target)
+            .map_err(|error| backup_io("inspecting the backup destination", error))?
+            .next()
+            .is_none();
+    if empty {
+        return Ok(());
+    }
+    Err(Error::Backup(format!(
+        "{} already exists and is not a backup bundle; choose a new name for the backup",
+        target.display()
+    )))
+}
+
+/// Make `target` ready to receive a bundle. Returns whether it holds a
+/// previous bundle that has to be put aside; an empty directory is removed.
+fn claim_target(target: &Path) -> Result<bool> {
+    refuse_foreign_target(target)?;
+    if !target.exists() {
+        return Ok(false);
+    }
+    if is_bundle(target) {
+        return Ok(true);
+    }
+    std::fs::remove_dir(target)
+        .map_err(|error| backup_io("replacing the empty backup destination", error))?;
+    Ok(false)
+}
+
 fn recover_bundle(target: &Path) -> Result<()> {
     let previous = previous_bundle(target)?;
-    match (target.exists(), previous.exists()) {
-        (false, true) => std::fs::rename(previous, target)
-            .map_err(|error| backup_io("recovering the previous bundle", error))?,
-        (true, true) => std::fs::remove_dir_all(previous)
-            .map_err(|error| backup_io("cleaning a previous bundle", error))?,
-        _ => {}
+    if !is_bundle(&previous) {
+        // Not ours: a `.previous` we left behind always holds a manifest.
+        return Ok(());
+    }
+    if !target.exists() {
+        std::fs::rename(previous, target)
+            .map_err(|error| backup_io("recovering the previous bundle", error))?;
+    } else if is_bundle(target) {
+        std::fs::remove_dir_all(previous)
+            .map_err(|error| backup_io("cleaning a previous bundle", error))?;
     }
     Ok(())
 }
@@ -1138,22 +1258,33 @@ mod tests {
                 license: "sspro".into(),
             },
             schema,
-            lists: vec![ListRecord {
-                path: "root\\presets".into(),
-                description: Some("Presets".into()),
-                size: 64,
-                count: 1,
-                chunk_size: 64,
-                group: None,
-                gzip: false,
-                movable: true,
-                item_type: Some("pst_pst".into()),
-                slots: vec![SlotRecord {
-                    index: 0,
-                    name: Some("Clean".into()),
-                    blob: Some(blob),
-                }],
-            }],
+            lists: LIBRARY_PATHS
+                .iter()
+                .map(|path| ListRecord {
+                    path: (*path).into(),
+                    description: None,
+                    size: 64,
+                    count: 1,
+                    chunk_size: 64,
+                    group: None,
+                    gzip: false,
+                    movable: true,
+                    item_type: None,
+                    slots: vec![SlotRecord {
+                        index: 0,
+                        name: None,
+                        blob: None,
+                    }],
+                })
+                .collect(),
+        };
+        let mut manifest = manifest;
+        manifest.lists[0].description = Some("Presets".into());
+        manifest.lists[0].item_type = Some("pst_pst".into());
+        manifest.lists[0].slots[0] = SlotRecord {
+            index: 0,
+            name: Some("Clean".into()),
+            blob: Some(blob),
         };
         atomic_write(dir.join("manifest.json"), &pretty_json(&manifest).unwrap()).unwrap();
         manifest
@@ -1186,5 +1317,161 @@ mod tests {
         atomic_write(dir.join("manifest.json"), &pretty_json(&manifest).unwrap()).unwrap();
         assert!(open_verified(&dir).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_bundle_missing_a_library_is_refused() {
+        let dir = scratch("missing-library");
+        let mut manifest = fixture(&dir);
+        manifest.lists.pop();
+        atomic_write(dir.join("manifest.json"), &pretty_json(&manifest).unwrap()).unwrap();
+        assert!(open_verified(&dir).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_backup_never_replaces_an_ordinary_folder() {
+        let dir = scratch("ordinary-folder");
+        std::fs::create_dir_all(dir.join("thesis")).unwrap();
+        std::fs::write(dir.join("thesis/chapter1.txt"), "keep me").unwrap();
+        assert!(refuse_foreign_target(&dir).is_err());
+        let staging = StagingBundle::new(&dir).unwrap();
+        assert!(staging.commit(&dir).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("thesis/chapter1.txt")).unwrap(),
+            "keep me"
+        );
+
+        let empty = scratch("empty-folder");
+        std::fs::create_dir_all(&empty).unwrap();
+        let staging = StagingBundle::new(&empty).unwrap();
+        std::fs::write(staging.path.join("manifest.json"), "{}").unwrap();
+        staging.commit(&empty).unwrap();
+        assert!(is_bundle(&empty));
+
+        let staging = StagingBundle::new(&empty).unwrap();
+        std::fs::write(staging.path.join("manifest.json"), "{}").unwrap();
+        staging.commit(&empty).unwrap();
+        assert!(!previous_bundle(&empty).unwrap().exists());
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(empty).unwrap();
+    }
+
+    #[test]
+    fn recovery_leaves_an_unrelated_previous_folder_alone() {
+        let dir = scratch("recovery");
+        let previous = previous_bundle(&dir).unwrap();
+        std::fs::create_dir_all(&previous).unwrap();
+        std::fs::write(previous.join("notes.txt"), "mine").unwrap();
+        recover_bundle(&dir).unwrap();
+        assert!(!dir.exists());
+        assert!(previous.join("notes.txt").is_file());
+
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "also mine").unwrap();
+        std::fs::write(previous.join("manifest.json"), "{}").unwrap();
+        recover_bundle(&dir).unwrap();
+        assert!(previous.join("manifest.json").is_file());
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(previous).unwrap();
+    }
+
+    struct Scripted {
+        input: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl std::io::Read for Scripted {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.input.read(buffer)
+        }
+    }
+
+    impl std::io::Write for Scripted {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Link for Scripted {
+        fn description(&self) -> &str {
+            "fixture"
+        }
+    }
+
+    fn scripted_device(chunks: &[(usize, &str)]) -> Device<Scripted> {
+        let mut frames = b"root\\sys\\_name:{\"value\":\"StompStation PRO\"}\0\
+            root\\sys\\_ver:{\"value\":\"1.5.12\"}\0\
+            root\\sys\\_arch:{\"value\":\"CM4\"}\0\
+            root\\sys\\_license:{\"value\":\"sspro\"}\0"
+            .to_vec();
+        let batch = chunks
+            .iter()
+            .map(|(chunk, hex)| {
+                format!("dread root\\presets:{{\"index\":0,\"chunk\":{chunk},\"value\":\"{hex}\"}}")
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        frames.extend_from_slice(batch.as_bytes());
+        frames.push(0);
+        Device::connect(Scripted {
+            input: std::io::Cursor::new(frames),
+        })
+        .unwrap()
+    }
+
+    fn preset_list(size: usize, chunk_size: usize) -> BlobList {
+        BlobList {
+            path: NodePath::new("root\\presets").unwrap(),
+            description: None,
+            size,
+            count: 1,
+            chunk_size,
+            group: None,
+            gzip: false,
+            movable: true,
+            item_type: Some("pst_pst".into()),
+            names: vec![Some("Clean".into())],
+        }
+    }
+
+    #[test]
+    fn a_preset_saved_in_place_no_longer_matches() {
+        // Same first and last chunk, as when a knob changes in the middle of a
+        // preset saved over itself: only a full comparison notices.
+        let list = preset_list(6, 2);
+        let mut device = scripted_device(&[(1, "0001"), (2, "0209"), (3, "0405")]);
+        assert!(!stored_content_matches(&mut device, &list, 0, &[0, 1, 2, 3, 4, 5]).unwrap());
+
+        let mut device = scripted_device(&[(1, "0001"), (2, "0203"), (3, "0405")]);
+        assert!(stored_content_matches(&mut device, &list, 0, &[0, 1, 2, 3, 4, 5]).unwrap());
+    }
+
+    #[test]
+    fn a_gzip_slot_is_fingerprinted_by_its_trailer() {
+        let mut content = br#"{"version":"0.5.4","architecture":"WaveNet"}"#.to_vec();
+        content.resize(4096, 0);
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&content).unwrap();
+        let mut blob = encoder.finish().unwrap();
+        let end = blob.len();
+        blob.resize(4096, 0);
+
+        let chunks = gzip_fingerprint_chunks(&blob, 8, 512).unwrap();
+        assert_eq!(chunks.first(), Some(&1));
+        for byte in end - 8..end {
+            assert!(
+                chunks.contains(&(byte / 8 + 1)),
+                "trailer byte {byte} is checked"
+            );
+        }
+        assert!(chunks.len() <= 3);
+
+        assert_eq!(gzip_fingerprint_chunks(&[1, 2, 3, 4], 2, 2), None);
+        blob[4095] = 1;
+        assert_eq!(gzip_fingerprint_chunks(&blob, 8, 512), None);
     }
 }

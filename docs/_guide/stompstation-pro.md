@@ -101,7 +101,10 @@ persistent change, it requires a complete verified backup matching the pedal's
 current state. On connection it automatically finds and arms the newest
 matching `.vxbundle`, so normal Save and library actions need no extra ceremony.
 If only settings changed, TonePush refreshes the schema while reusing library
-slots whose names and boundary chunks still verify. Full reads batch several
+slots whose names and contents still verify: presets and IRs are compared byte
+for byte, and NAM models by their first chunk and the gzip trailer, whose
+CRC-32 covers the whole model. A preset saved over itself under the same name
+is therefore noticed and read again. Full reads batch several
 strictly identified chunks per protocol frame. A pedal with no prior bundle
 still opens immediately for live editing; only Save and other flash operations
 wait for you to choose a complete backup.
@@ -117,8 +120,10 @@ complete backup**. A bundle contains:
 
 The completed directory is published atomically and with private filesystem
 permissions. Load it as the current rollback once; persistent actions become
-available only after identity, firmware, live names, boundary chunks, and safe
-settings agree. Restore preflights the source before its first write and keeps
+available only after identity, firmware, live names, slot contents, and safe
+settings agree. A backup goes into a new folder or replaces an earlier bundle;
+TonePush refuses a folder that already holds anything else rather than replace
+it. Restore preflights the source before its first write and keeps
 the original armed rollback available if the transport fails.
 
 ## Command line
