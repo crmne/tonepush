@@ -290,42 +290,7 @@ impl Session {
             rpc::op::LIST_IRS,
             hx_proto::msgmap! { rpc::key::ARGS => Value::Int(2) },
         )?;
-        let entries = match result {
-            Value::Array(entries) => entries,
-            // The captured device response for no occupied slots is nil rather
-            // than an empty array.
-            Value::Nil => return Ok(Vec::new()),
-            _ => {
-                return Err(Error::Protocol(
-                    "the device returned an invalid impulse response list".into(),
-                ))
-            }
-        };
-        let mut seen = BTreeSet::new();
-        entries
-            .into_iter()
-            .enumerate()
-            .map(|(position, entry)| {
-                let slot = entry
-                    .get(rpc::key::IR_SLOT)
-                    .and_then(Value::as_i64)
-                    .ok_or_else(|| {
-                        Error::Protocol(format!("IR list entry {position} has no slot"))
-                    })?;
-                let name = entry
-                    .get(rpc::key::NAME)
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        Error::Protocol(format!("IR list entry {position} has no name"))
-                    })?;
-                if slot < 0 || !seen.insert(slot) {
-                    return Err(Error::Protocol(format!(
-                        "IR list entry {position} has an invalid or duplicate slot {slot}"
-                    )));
-                }
-                Ok((slot, name.to_owned()))
-            })
-            .collect()
+        decode_irs(result)
     }
 
     /// Read an impulse response back off the device.
@@ -453,6 +418,17 @@ impl Session {
     /// will not service an IR upload without it. Cheap enough to do before any
     /// control-channel work.
     fn bootstrap(&mut self) -> Result<()> {
+        self.bootstrap_raw().map(drop)
+    }
+
+    /// [`bootstrap`](Self::bootstrap), keeping the IR list it reads on the
+    /// way: an upload needs to know what its slot holds before it starts,
+    /// and asking a second time would be traffic HX Edit does not send.
+    fn bootstrap_listing_irs(&mut self) -> Result<Vec<(i64, String)>> {
+        self.bootstrap_raw().and_then(decode_irs)
+    }
+
+    fn bootstrap_raw(&mut self) -> Result<Value> {
         let c = ChannelId::CONTROL;
         self.command(c, rpc::op::END, hx_proto::msgmap! {})?;
         self.request(c, rpc::op::LIST_SETLISTS, Value::Nil)?;
@@ -465,12 +441,13 @@ impl Session {
             },
         )?;
         self.request(c, rpc::op::READY, Value::Nil)?;
-        self.request(
+        let irs = self.request(
             c,
             rpc::op::LIST_IRS,
             hx_proto::msgmap! { rpc::key::ARGS => Value::Int(2) },
         )?;
-        self.command(c, rpc::op::BEGIN, hx_proto::msgmap! {})
+        self.command(c, rpc::op::BEGIN, hx_proto::msgmap! {})?;
+        Ok(irs)
     }
 
     /// Send an impulse response to a slot.
@@ -506,7 +483,37 @@ impl Session {
             }
         };
 
-        self.bootstrap()?;
+        let held = self.bootstrap_listing_irs()?;
+        let holds = |irs: &[(i64, String)], wanted: &str| {
+            irs.iter()
+                .any(|(s, n)| *s == slot && n.trim() == wanted.trim())
+        };
+
+        // Completion is read off the slot list, so the list has to be able to
+        // show it. A slot already holding this name - a re-upload, or a
+        // restore onto a pedal that still has its IRs - looks finished before
+        // the write has even started, and returning then stacks the next
+        // flash write onto this one, which is what wedges the device. Empty
+        // it first, the way `clear_ir` does, and wait until the list says it
+        // is empty; then the name appearing below is a change only this
+        // upload can make.
+        if holds(&held, name) {
+            self.command(
+                ChannelId::CONTROL,
+                rpc::op::CLEAR_IR,
+                hx_proto::msgmap! { rpc::key::IR_SLOT => Value::Int(slot) },
+            )?;
+            self.command(ChannelId::CONTROL, rpc::op::END, hx_proto::msgmap! {})?;
+            if !self.wait_for_irs(|irs| !irs.iter().any(|(s, _)| *s == slot))? {
+                return Err(Error::Protocol(format!(
+                    "slot {} did not empty before the impulse response was sent again",
+                    slot + 1
+                )));
+            }
+            // And back into the state an upload starts from.
+            self.bootstrap()?;
+        }
+
         let mut bytes = Vec::with_capacity(samples.len() * 4);
         for s in samples {
             bytes.extend_from_slice(&s.to_le_bytes());
@@ -538,22 +545,27 @@ impl Session {
         // signal that the write finished rather than merely being accepted, and
         // it is what the device's "transferring data" display is tracking -
         // returning before it appears is what used to leave the unit stuck.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if self
-                .irs()?
-                .iter()
-                .any(|(s, n)| *s == slot && n.trim() == name.trim())
-            {
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(400));
+        if self.wait_for_irs(|irs| holds(irs, name))? {
+            return Ok(());
         }
         Err(Error::Protocol(format!(
             "the device accepted the impulse response but slot {} still does not show {name:?}; \
              it may still be writing",
             slot + 1
         )))
+    }
+
+    /// Re-read the IR slot list until `done` is satisfied with it, for up to
+    /// 30 seconds. `false` is a list that never got there.
+    fn wait_for_irs(&mut self, done: impl Fn(&[(i64, String)]) -> bool) -> Result<bool> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if done(&self.irs()?) {
+                return Ok(true);
+            }
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        Ok(false)
     }
 
     /// Empty an impulse response slot.
@@ -1291,6 +1303,41 @@ mod tests {
     }
 }
 
+fn decode_irs(result: Value) -> Result<Vec<(i64, String)>> {
+    let entries = match result {
+        Value::Array(entries) => entries,
+        // The captured device response for no occupied slots is nil rather
+        // than an empty array.
+        Value::Nil => return Ok(Vec::new()),
+        _ => {
+            return Err(Error::Protocol(
+                "the device returned an invalid impulse response list".into(),
+            ))
+        }
+    };
+    let mut seen = BTreeSet::new();
+    entries
+        .into_iter()
+        .enumerate()
+        .map(|(position, entry)| {
+            let slot = entry
+                .get(rpc::key::IR_SLOT)
+                .and_then(Value::as_i64)
+                .ok_or_else(|| Error::Protocol(format!("IR list entry {position} has no slot")))?;
+            let name = entry
+                .get(rpc::key::NAME)
+                .and_then(Value::as_str)
+                .ok_or_else(|| Error::Protocol(format!("IR list entry {position} has no name")))?;
+            if slot < 0 || !seen.insert(slot) {
+                return Err(Error::Protocol(format!(
+                    "IR list entry {position} has an invalid or duplicate slot {slot}"
+                )));
+            }
+            Ok((slot, name.to_owned()))
+        })
+        .collect()
+}
+
 fn decode_ir_samples(bytes: &[u8]) -> Result<Vec<f32>> {
     if !bytes.len().is_multiple_of(4) {
         return Err(Error::Protocol(
@@ -1505,5 +1552,81 @@ mod validation_tests {
         }]);
         assert!(decode_favourites(missing_name).is_err());
         assert!(decode_favourites(Value::Bool(false)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod pedal_tests {
+    use super::*;
+    use crate::fake::{self, Pedal};
+
+    const SAMPLES: [f32; 4] = [0.5, -0.25, 0.125, 0.0];
+
+    fn sum_of(samples: &[f32]) -> u64 {
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        checksum(&bytes)
+    }
+
+    /// A slot that already holds an IR of the same name used to count as
+    /// done the moment the upload was accepted, before anything had been
+    /// written. It is emptied first now, and the upload waited for from there.
+    #[test]
+    fn re_uploading_over_a_same_named_ir_waits_for_the_new_samples() {
+        for held in [0xdead_beef, sum_of(&SAMPLES)] {
+            let pedal = Pedal::new();
+            let mut session = fake::session(&pedal);
+            {
+                let mut pedal = pedal.lock().unwrap();
+                pedal.irs.insert(3, ("Cab".into(), held));
+                pedal.ir_delay = 3;
+            }
+
+            session
+                .upload_ir(3, "Cab", &SAMPLES)
+                .expect("the upload lands");
+
+            let pedal = pedal.lock().unwrap();
+            let opcodes = pedal.opcodes();
+            let clear = opcodes.iter().position(|&o| o == rpc::op::CLEAR_IR);
+            let upload = opcodes.iter().position(|&o| o == rpc::op::UPLOAD_IR);
+            assert!(
+                matches!((clear, upload), (Some(c), Some(u)) if c < u),
+                "cleared before uploading: {opcodes:?}"
+            );
+            assert!(
+                pedal.writing_ir.is_none(),
+                "returned before the write landed"
+            );
+            assert_eq!(pedal.irs[&3], ("Cab".into(), sum_of(&SAMPLES)));
+        }
+    }
+
+    /// A slot that is empty, or holds another name, shows the upload by
+    /// changing, so it needs no clearing first.
+    #[test]
+    fn an_ir_upload_that_changes_the_slot_list_sends_no_clear() {
+        for before in [None, Some(("Room".to_owned(), 7))] {
+            let pedal = Pedal::new();
+            let mut session = fake::session(&pedal);
+            {
+                let mut pedal = pedal.lock().unwrap();
+                if let Some(ir) = before {
+                    pedal.irs.insert(0, ir);
+                }
+                pedal.ir_delay = 2;
+            }
+
+            session
+                .upload_ir(0, "Cab", &SAMPLES)
+                .expect("the upload lands");
+
+            let pedal = pedal.lock().unwrap();
+            assert!(!pedal.opcodes().contains(&rpc::op::CLEAR_IR));
+            assert!(
+                pedal.writing_ir.is_none(),
+                "returned before the write landed"
+            );
+            assert_eq!(pedal.irs[&0], ("Cab".into(), sum_of(&SAMPLES)));
+        }
     }
 }

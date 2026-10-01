@@ -17,6 +17,8 @@ use nusb::MaybeFuture;
 mod commands;
 pub use commands::{Assignment, Carried, Switch};
 pub mod backup;
+#[cfg(test)]
+mod fake;
 pub mod ir;
 pub mod replay;
 
