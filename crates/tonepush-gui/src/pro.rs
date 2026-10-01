@@ -3776,7 +3776,7 @@ impl Worker {
         let source = std::fs::read(file).map_err(|error| {
             WorkError::Other(format!("Could not read {}: {error}", file.display()))
         })?;
-        let mut list = self.list(Library::Irs)?;
+        let list = self.list(Library::Irs)?;
         let blobs = voidx_client::ir::Wav::parse(&source)?.device_blobs(list.size)?;
         if blobs.len() != 2 {
             return Err(WorkError::Other(
@@ -3784,8 +3784,11 @@ impl Worker {
             ));
         }
         let left_name = unique_slot_name(&list, left, &format!("{name} L"));
-        list.names[left] = Some(left_name.clone());
-        let right_name = unique_slot_name(&list, right, &format!("{name} R"));
+        // The right name must not collide with the left one about to be
+        // written, but the orphan checks need the names presets use today.
+        let mut planned = list.clone();
+        planned.names[left] = Some(left_name.clone());
+        let right_name = unique_slot_name(&planned, right, &format!("{name} R"));
         self.refuse_orphan(&list, left, Some(&left_name))?;
         self.refuse_orphan(&list, right, Some(&right_name))?;
         self.device()?
