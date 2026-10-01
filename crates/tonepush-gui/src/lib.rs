@@ -393,6 +393,11 @@ pub struct App {
     cloud_artifacts: std::collections::HashMap<i64, Vec<u8>>,
     /// The cloud Tone temporarily sounding through the pedal.
     auditioning: Option<i64>,
+    /// Whether the HX edit buffer an audition put aside had changes not
+    /// saved. While a cloud Tone sounds, `dirty` is the audition's, and a
+    /// switch to another preset ends the audition and throws those changes
+    /// away, so it asks about them too.
+    put_aside_dirty: bool,
     /// The setlists in the library, with the file each came from.
     lib_setlists: Vec<(std::path::PathBuf, library::Setlist)>,
     /// Whether the chosen setlist shows only the banks that differ from the
@@ -1121,6 +1126,7 @@ impl App {
             cloud_download: None,
             cloud_artifacts: Default::default(),
             auditioning: None,
+            put_aside_dirty: false,
             lib_setlists: Vec::new(),
             setlist_only_differing: false,
             capture_as: None,
@@ -1276,6 +1282,7 @@ impl App {
                         self.push_after_capture = None;
                     }
                     self.auditioning = None;
+                    self.put_aside_dirty = false;
                     self.browser = None;
                     self.trial_kept.set(false);
                     self.snapshot_details.clear();
@@ -1422,7 +1429,13 @@ impl App {
                     // dots can be brought in step with it now.
                     self.refresh_mirror();
                 }
-                Ok(Evt::Auditioning(key)) => self.auditioning = key,
+                Ok(Evt::Auditioning(key)) => {
+                    self.auditioning = key;
+                    if key.is_none() {
+                        self.put_aside_dirty = false;
+                    }
+                }
+                Ok(Evt::AuditionPutAside { dirty }) => self.put_aside_dirty = dirty,
                 Ok(Evt::Busy(on)) => {
                     self.busy_since = if on {
                         self.busy_since.or(Some(std::time::Instant::now()))
@@ -2149,11 +2162,18 @@ impl App {
             for cmd in self.commands_for(index, then) {
                 self.send(cmd);
             }
-        } else if self.dirty {
+        } else if self.unsaved() {
             self.confirm_switch = Some(PendingSwitch { index, then });
         } else {
             self.switch_to(PendingSwitch { index, then }, false);
         }
+    }
+
+    /// Whether going to another preset would throw changes away: the edit
+    /// buffer's, or those of the buffer a cloud audition put aside, which
+    /// the switch puts back only to replace.
+    fn unsaved(&self) -> bool {
+        self.dirty || (self.auditioning.is_some() && self.put_aside_dirty)
     }
 
     /// What to send to carry `then` out on `index`, once the pedal is there.
@@ -7397,6 +7417,50 @@ mod tests {
 
         assert!(app.confirm_switch.is_some());
         assert!(cmds.try_recv().is_err(), "nothing goes before the answer");
+    }
+
+    /// While a cloud Tone is auditioned, the edit buffer reads clean, but
+    /// the one it put aside may not: going to another preset ends the
+    /// audition and throws those changes away, so it asks about them.
+    #[test]
+    fn a_switch_during_an_audition_asks_about_the_changes_put_aside() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), true)).unwrap();
+        events.send(Evt::AuditionPutAside { dirty: true }).unwrap();
+        events.send(loaded(2, Some(0), false)).unwrap();
+        events.send(Evt::Auditioning(Some(7))).unwrap();
+        app.drain_events();
+        let _ = cmds.try_iter().count();
+        assert!(!app.dirty, "the audition reads clean");
+
+        app.request_preset(5);
+        assert!(app.confirm_switch.is_some());
+        assert!(cmds.try_recv().is_err(), "nothing goes before the answer");
+        app.answer_switch(SwitchAnswer::Cancel);
+
+        // Ended, the changes are back as the edit buffer's own; kept, they
+        // are part of the edit. Either way the flag goes with the audition.
+        events.send(Evt::Auditioning(None)).unwrap();
+        events.send(loaded(2, Some(0), false)).unwrap();
+        app.drain_events();
+        app.request_preset(5);
+        assert!(app.confirm_switch.is_none());
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::SelectPreset(5))));
+    }
+
+    /// An audition over a buffer with nothing unsaved switches at once.
+    #[test]
+    fn a_switch_during_an_audition_of_a_clean_preset_goes_at_once() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), false)).unwrap();
+        events.send(Evt::AuditionPutAside { dirty: false }).unwrap();
+        events.send(Evt::Auditioning(Some(7))).unwrap();
+        app.drain_events();
+        let _ = cmds.try_iter().count();
+
+        app.request_preset(5);
+        assert!(app.confirm_switch.is_none());
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::SelectPreset(5))));
     }
 
     /// A menu action that has to go to another preset asks before it throws

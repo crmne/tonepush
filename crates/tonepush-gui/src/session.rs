@@ -344,6 +344,14 @@ pub enum Evt {
     /// Which cloud Tone is temporarily in the edit buffer, or `None` once the
     /// original has been restored or the audition has been kept.
     Auditioning(Option<i64>),
+    /// An audition has put the edit buffer aside, and whether that buffer
+    /// had changes not saved. The audition's own buffer reports clean, so
+    /// without this a switch to another preset would not ask, and ending the
+    /// audition on the way would put the changes back only to throw them
+    /// away.
+    AuditionPutAside {
+        dirty: bool,
+    },
     /// What every footswitch is set to, in order.
     Switches(Vec<hx_usb::Switch>),
     /// A backup or restore is running, and how far along it is (0.0 to 1.0).
@@ -1588,6 +1596,7 @@ impl Worker {
         let Some(original) = self.preset_bytes() else {
             return false;
         };
+        self.send(Evt::AuditionPutAside { dirty: self.dirty });
         self.audition = Some(Audition {
             key: -1,
             original,
@@ -3582,6 +3591,42 @@ mod tests {
         let (name, blob) = copied.expect("the copy ran after the switch");
         assert_eq!(name, "Lead");
         assert_eq!(tempo(&blob), Some(90.0));
+    }
+
+    /// An audition says whether the buffer it puts aside had changes, since
+    /// its own reads clean; saving on the way to another preset saves those
+    /// changes, not the cloud Tone that was sounding.
+    #[test]
+    fn an_audition_says_what_it_put_aside_and_a_save_saves_that() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::SetTempo(100.0));
+        let _ = events.try_iter().count();
+
+        worker.handle(Cmd::AuditionDocument {
+            key: 7,
+            name: "From the cloud".into(),
+            bytes: document(150.0),
+        });
+        let said: Vec<Evt> = events.try_iter().collect();
+        assert!(said
+            .iter()
+            .any(|e| matches!(e, Evt::AuditionPutAside { dirty: true })));
+        assert!(!worker.dirty, "the audition itself reads clean");
+
+        worker.handle(Cmd::Switch {
+            index: 5,
+            save: true,
+            then: Vec::new(),
+        });
+        let tempo = |bytes: &[u8]| hx_proto::Preset::parse(bytes).unwrap().tempo();
+        let pedal = pedal.lock().unwrap();
+        assert_eq!(
+            tempo(&pedal.stored[&2].1),
+            Some(100.0),
+            "the edit the audition put aside was saved"
+        );
+        assert_eq!(pedal.loaded.1, 5);
     }
 
     /// A copied block is the block, not the slot it sat in: pasted after
