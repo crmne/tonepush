@@ -1,0 +1,34 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · StompStation PRO NAM amps</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script><script src="assets/pro.js"></script>
+<script>
+TP.setup();
+const { I, G } = TP;
+
+const toolbar = `<div class="row" style="gap:12px;padding:14px 20px 10px">
+  <div><span style="font-weight:600">14 of 30 slots</span> <span class="muted">· 3 not used by any preset</span></div><span class="grow"></span>
+  <div class="field" style="width:200px">${I('search')}<span>Search NAM amps</span></div>
+  <span class="btn sm">${I('upload')}Import .nam files…</span></div>`;
+const cols = [['Slot', 44], ['Name', 206], ['Captured gear', 186], ['WaveNet', 96], ['Used by', 112]];
+const th = `<div class="th">${cols.map(([t, w]) => `<span class="c" style="width:${w}px">${t}</span>`).join('')}</div>`;
+const rows = D.nams.map(n => `<div class="tr ${n.n === 2 ? 'sel' : ''}" style="height:34px">
+  <span class="c muted num" style="width:44px">${String(n.n).padStart(2, '0')}</span>
+  <span class="c nm" style="width:206px"><span class="row" style="gap:8px"><span style="color:var(--c-amp);display:flex">${G('amp', 's14')}</span><span class="ell">${n.name}</span></span></span>
+  <span class="c" style="width:186px">${n.gear}</span><span class="c muted" style="width:96px">${n.arch}</span>
+  <span class="c ${n.used ? '' : 'faint'}" style="width:112px">${n.used ? `${n.used} preset${n.used > 1 ? 's' : ''}` : 'none'}</span></div>`).join('')
+  + `<div class="tr" style="height:34px;color:var(--faint)"><span class="c num" style="width:44px">15</span><span class="c" style="width:400px;display:flex;gap:8px;align-items:center">${I('plus', 's14')}Empty · drop a .nam file here</span></div>`
+  + `<div class="tr" style="height:34px;color:var(--faint);border-bottom:none"><span class="c" style="width:44px"></span><span class="c" style="width:400px">Slots 16 to 30 are empty</span></div>`;
+
+const used = [['01B', 'Glass Wall', 'Model 1'], ['02A', 'Stereo Swirl', 'Model 2'], ['03B', 'Velvet Drive', 'Model 2'], ['05B', 'Rotary Blues', 'Model 1']];
+const insp = `<aside class="insp" style="width:340px">
+  <div class="ih"><div class="row" style="gap:10px"><span class="bwell cat-amp" style="width:36px;height:36px">${G('amp', 's20')}</span><div style="min-width:0"><div style="font-size:15px;font-weight:600" class="ell">AC30 TB · Top Boost</div><div class="pmeta" style="margin-top:1px">NAM amp · slot 2 · 1.9 MB</div></div></div></div>
+  <div class="is"><div class="lbl">From the model file</div><div class="kv2">
+    <span class="k">Gear</span><span class="v">Vox AC30 Top Boost</span><span class="k">Captured by</span><span class="v">J. Rivera</span>
+    <span class="k">Model</span><span class="v">WaveNet standard · 48 kHz</span><span class="k">Input level</span><span class="v num">12.2 dBu</span></div></div>
+  <div class="is"><div class="lbl">Used by 4 presets</div>${used.map(([s, n, m]) => `<div class="row" style="height:28px;gap:10px;font-size:12.5px"><span class="muted num" style="width:28px;font-weight:500">${s}</span><span class="grow ell">${n}</span><span class="muted">${m}</span></div>`).join('')}</div>
+  <div class="is"><div class="row" style="gap:8px"><span class="btn sm">${I('download')}Export .nam</span><span class="btn sm disabled">${I('text-cursor-input')}Rename</span><span class="btn sm disabled">${I('trash-2')}Remove</span></div>
+    <div class="row" style="gap:8px;margin-top:10px;font-size:12px;color:var(--muted);line-height:17px;align-items:flex-start">${I('info', 's14')}<span>Presets find this model by its name, so TonePush won't rename or remove it while 4 presets use it.</span></div></div>
+</aside>`;
+
+TP.mount(`<div class="win">${PRO.side()}<div class="main">${PRO.mini()}${PRO.head('amps')}<div class="libbody"><div class="grow" style="min-width:0;display:flex;flex-direction:column">${toolbar}<div class="card" style="margin:0 20px;overflow:hidden">${th}${rows}</div></div>${insp}</div></div></div>`);
+</script></body></html>

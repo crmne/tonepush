@@ -1,0 +1,65 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · Model browser</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script>
+<script>
+TP.setup();
+const { I, G } = TP;
+const presets = D.hxPresets().slice(0, 22);
+presets[1].sel = true; presets[1].dirty = true;
+const side = TP.sidebar({
+  device: { name: 'HX Stomp', status: 'Connected · 3.80', online: true }, nav: 'edit', listAside: '42 of 126', presets,
+  foot: `<span class="ok row">${I('shield-check', 's14')}</span><span class="grow ell">Backed up at 14:02</span><span class="iconbtn sm">${I('settings', 's14')}</span>`,
+});
+const deck = TP.deck({
+  slot: '01B', name: 'Plexi Crunch',
+  meta: `<span class="hot"><span class="dot"></span>4 changes not saved</span><span class="sep">·</span><span>In your library as v2</span>`,
+  snaps: [{ name: 'Verse' }, { name: 'Chorus', on: true }, { name: 'Solo' }], tempo: '104.0', undo: true, dirty: true,
+});
+const chain = D.hxChain();
+chain.items[1].b = { name: 'Teemah!', cat: 'dist', swap: true, tr: [{ fs: 'FS1', led: 'ltorange' }] };
+chain.items[2].b.sel = false;
+
+// Category rail: HX Edit's categories with their model counts.
+const rail = [
+  ['star', 'Favorites', 4, true], ['history', 'Recent', 6, true], '-',
+  ['dist', 'Distortion', 105], ['dyn', 'Dynamics', 32], ['eq', 'EQ', 16], ['mod', 'Modulation', 79], ['delay', 'Delay', 72],
+  ['reverb', 'Reverb', 38], ['pitch', 'Pitch/Synth', 38], ['filter', 'Filter', 19], ['wah', 'Wah', 22],
+  ['amp', 'Amp', 111], ['preamp', 'Preamp', 113], ['cab', 'Cab', 174],
+].map(r => r === '-' ? '<div class="rsep"></div>' : `<div class="rrow cat-${r[0]} ${r[1] === 'Distortion' ? 'on' : ''}"><span class="g">${r[3] ? I(r[0]) : G(r[0])}</span>${r[1]}<span class="n num">${r[2]}</span></div>`).join('');
+
+function card(m) {
+  const knobs = m.p.filter(p => p[2] === 'k');
+  const sws = m.p.filter(p => p[2] === 'sw');
+  const shown = knobs.slice(0, knobs.length > 6 ? 5 : 6);
+  const rows = shown.length > 3 && shown.length !== 4 ? [shown.slice(0, Math.ceil(shown.length / 2)), shown.slice(Math.ceil(shown.length / 2))] : [shown];
+  const face = rows.map(r => `<div class="kr">${r.map(k => TP.knobSvg(k[1], 22, null)).join('')}</div>`).join('')
+    + (sws.length ? `<div class="kr">${sws.slice(0, 3).map(s => `<span class="mini-sw ${s[1] > 0.5 ? 'on' : ''}"></span>`).join('')}</div>` : '')
+    + (knobs.length > shown.length ? `<span class="more num">+${knobs.length - shown.length}</span>` : '');
+  const cls = m.name === 'Minotaur' ? 'cur' : m.name === 'Teemah!' ? 'try' : m.name === 'Scream 808' ? 'hov' : '';
+  const badge = m.name === 'Minotaur' ? `<span class="badge chip">Was here</span>` : m.name === 'Teemah!' ? `<span class="badge chip accent">${I('volume-2', 's12')}On the pedal</span>` : '';
+  return `<div class="mcard cat-dist ${cls}"><div class="mface">${face}</div>${badge}<div class="mname">${m.name}</div><div class="mp">${m.p.map(p => p[0]).join(' · ')}</div></div>`;
+}
+
+const sheet = `<section class="sheet">
+  <div class="shead"><span class="bwell cat-dist">${G('dist')}</span>
+    <div><div class="st1">Swap Minotaur for</div><div class="st2">Edits are live: click a model to hear it on the pedal</div></div>
+    <div class="field focus" style="width:240px;margin-left:8px">${I('search')}<span class="caret"></span><span>Search 433 models</span></div>
+    <span class="grow"></span>
+    <div class="seg"><span class="s on">Mono <span class="n">44</span></span><span class="s">Stereo <span class="n">44</span></span><span class="s">Legacy <span class="n">17</span></span></div>
+    <span class="iconbtn on">${I('layout-grid')}</span><span class="iconbtn">${I('list')}</span><span class="vsep"></span><span class="iconbtn" title="Close (Esc)">${I('x')}</span></div>
+  <div class="sbody"><nav class="rail">${rail}</nav><div class="cards" id="cards"></div></div>
+  <div class="audition"><span class="chip accent">${I('volume-2', 's12')}Live</span><span><b>Teemah!</b> is playing on the pedal in Minotaur's place. Its knobs start at their defaults.</span><span class="grow"></span>
+    <span class="btn sm">Put Minotaur back<span class="kbd">Esc</span></span><span class="btn sm primary">Keep Teemah!<span class="kbd">Enter</span></span></div>
+</section>`;
+
+TP.later(() => {
+  TP.renderChain(document.getElementById('board'), Object.assign(chain, {
+    head: `<span><b>7</b> of 8 blocks</span><span>·</span><span>Trying models in Minotaur's place</span><span class="grow"></span>${TP.legend()}`, notch: false,
+  }));
+  const cards = document.getElementById('cards');
+  const cols = Math.max(3, Math.floor((cards.clientWidth - 32 + 12) / (156 + 12)));
+  cards.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+  cards.innerHTML = D.distMono.slice(0, cols * 3).map(card).join('');
+});
+TP.mount(`<div class="win">${side}<div class="main">${deck}<div class="board" id="board"></div>${sheet}</div></div>`);
+</script></body></html>

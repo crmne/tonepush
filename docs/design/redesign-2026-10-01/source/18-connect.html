@@ -1,0 +1,43 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · Connect a pedal</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script>
+<script>
+TP.setup();
+const { I, G, z } = TP;
+const size = TP.size();
+const side = TP.sidebar({
+  device: { name: 'No pedal', status: 'Looking on USB…', online: false },
+  nav: 'edit', listAside: '', presets: [],
+  foot: `${TP.logo(18)}<span class="grow ell" style="color:var(--muted)">TonePush 0.8.0</span><span class="iconbtn sm">${I('settings', 's14')}</span>`,
+});
+const sideEmpty = side.replace('<div class="plist"><div class="fade"></div></div>',
+  `<div class="plist" style="padding:6px 16px;color:var(--faint);font-size:12.5px;line-height:18px">The pedal's presets appear here, in its own banks, as soon as it connects.</div>`);
+
+const family = (art, name, models, note) => `<div class="card" style="flex:1;min-width:0;padding:18px 18px 16px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:10px">
+  ${art}<div><div style="font-size:14px;font-weight:600">${name}</div><div class="muted" style="font-size:12px;margin-top:2px">${models}</div></div>
+  <div class="row" style="gap:7px;font-size:12px;color:var(--text-soft)"><span style="color:var(--accent);display:flex">${I('loader-circle', 's14')}</span>${note}</div></div>`;
+
+const check = (st, t, d) => `<div class="row" style="gap:12px;align-items:flex-start;padding:9px 0;border-top:1px solid var(--line-soft)">
+  <span style="display:flex;margin-top:1px;color:${st === 'ok' ? 'var(--ok)' : st === 'info' ? 'var(--info)' : 'var(--muted)'}">${I(st === 'ok' ? 'circle-check' : st === 'info' ? 'info' : 'circle-dashed', 's16')}</span>
+  <div><div style="font-weight:500;color:var(--text)">${t}</div><div class="muted" style="font-size:12px;margin-top:1px">${d}</div></div></div>`;
+
+const compact = size === 's';
+const main = `<div class="main" style="overflow:hidden"><div style="flex:1;display:flex;justify-content:center;overflow:hidden;padding:${compact ? 26 : 44}px 32px 24px">
+  <div style="width:100%;max-width:720px;display:flex;flex-direction:column">
+    <div class="row" style="gap:10px;margin-bottom:${compact ? 14 : 22}px">${TP.logo(28)}${TP.wordmark(17)}</div>
+    <div style="font-size:${compact ? 26 : 30}px;font-weight:700;letter-spacing:-0.03em;line-height:1.1">Plug in your pedal</div>
+    <div style="font-size:14px;color:var(--text-soft);line-height:21px;margin-top:8px;max-width:600px">TonePush finds it on USB by itself. Edits play on the pedal as you make them, and nothing is written to its memory until you save.</div>
+    <div class="row" style="gap:14px;margin-top:${compact ? 16 : 22}px;align-items:stretch">
+      ${family(TP.hxArt(compact ? 150 : 180), 'Line 6 HX', 'HX Stomp, HX Stomp XL, HX Effects, Helix', 'Looking on USB')}
+      ${family(TP.proArt(compact ? 150 : 180), 'Sonulab StompStation PRO', 'Firmware 1.5 and 2.x', 'Looking on USB')}</div>
+    <div style="margin-top:${compact ? 12 : 18}px;font-size:13px">
+      ${check('ok', 'This computer can talk to USB pedals', 'The access rule for Line 6 and Sonulab pedals is installed.')}
+      ${check('info', 'Quit HX Edit and VoidX Control first', 'Only one editor can use a pedal at a time.')}
+      ${`<div class="row" style="gap:12px;align-items:flex-start;padding:10px 0 4px;border-top:1px solid var(--line-soft)"><span style="display:flex;margin-top:1px;color:var(--muted)">${I('circle-dashed', 's16')}</span>
+        <div class="grow"><div style="font-weight:500">Line 6 model names and pictures</div><div class="muted" style="font-size:12px;margin-top:1px">HX pedals need HX Edit's data once; TonePush copies it from HX Edit's installer. The StompStation PRO needs nothing.</div>
+        <div class="row" style="gap:8px;margin-top:9px"><span class="btn sm">${I('search')}Find the installer</span><span class="btn sm ghost">${I('external-link')}Download HX Edit</span></div></div></div>`}
+    </div>
+    <div class="row" style="gap:18px;margin-top:auto;padding-top:14px;font-size:12.5px;color:var(--muted)"><span class="row" style="gap:6px;color:var(--text-soft)">${I('library', 's14')}Your library has 248 tones<span style="color:var(--accent);font-weight:500;margin-left:4px">Open it</span></span><span class="grow"></span><span>Guide</span><span>What's new in 0.8</span></div>
+  </div></div></div>`;
+TP.mount(`<div class="win">${sideEmpty}${main}</div>`);
+</script></body></html>

@@ -1,0 +1,25 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · PRO firmware update, failed</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script><script src="assets/pro.js"></script>
+<script>
+TP.setup();
+const { I } = TP;
+const step = (n, t) => `<div class="row" style="gap:12px;align-items:flex-start;min-height:32px"><span class="step wait" style="margin-top:1px"><span class="b">${n}</span></span><span style="font-size:13.5px;line-height:20px">${t}</span></div>`;
+const body = `<div style="padding:20px 22px 20px;display:flex;gap:28px">
+  <div class="grow" style="min-width:0">
+    <div class="banner danger" style="padding:13px 15px;margin-bottom:16px"><span class="bi" style="width:32px;height:32px">${I('triangle-alert', 's16')}</span><div><div class="bt">The update stopped at 48%</div>
+      <div class="bd">The pedal stopped answering while TonePush was writing the firmware. Nothing on this computer was lost.</div></div></div>
+    <div class="caps" style="margin-bottom:8px">To finish the update</div>
+    ${step(1, 'Leave the USB cable where it is.')}
+    ${step(2, 'Switch the pedal off, wait ten seconds, then start it in Update Mode again: hold <b style="font-weight:600;color:var(--accent)">UPD</b> while the Sonulab logo shows.')}
+    ${step(3, 'Choose Try again. TonePush still has the firmware file and your backup.')}
+    <div style="font-size:12.5px;color:var(--muted);line-height:18px;margin-top:10px;max-width:480px">If the pedal does not start in Update Mode, contact Sonulab support and mention firmware 2.2.6. Your backup stays on this computer either way.</div>
+  </div>
+  <div style="width:300px;flex:none;display:flex;flex-direction:column;gap:10px">
+    <div style="border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--bg)"><div class="caps" style="margin-bottom:6px">Firmware file</div><div style="font-weight:500">s_pro_2_2_6.upd</div><div class="muted" style="font-size:12px">5.3 MB · checked before writing</div></div>
+    <div style="border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--bg)"><div class="caps" style="margin-bottom:6px">Your backup</div><div style="font-weight:500">StompStation PRO, today 14:31</div><div class="muted" style="font-size:12px">Checked · restores onto 1.5.12</div><span class="btn sm ghost" style="margin:8px 0 0 -8px">${I('folder-open')}Show in folder</span></div>
+  </div></div>`;
+const footer = `<span class="btn ghost sm">${I('copy')}Copy details for support</span><span class="btn ghost sm">${I('external-link')}Sonulab support</span><span class="grow"></span><span class="btn">Close</span><span class="btn primary">${I('rotate-ccw')}Try again</span>`;
+TP.mount(PRO.fwPage({ states: ['done', 'done', 'fail'], body, footer, sideStatus: 'Not answering', online: false,
+  foot: `<span class="ok row">${I('shield-check', 's14')}</span><span class="grow ell">Backed up at 14:31</span><span class="iconbtn sm">${I('settings', 's14')}</span>` }));
+</script></body></html>

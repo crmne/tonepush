@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · PRO firmware update, 3 writing</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script><script src="assets/pro.js"></script>
+<script>
+TP.setup();
+const { I } = TP;
+const body = `<div style="padding:24px 24px 22px">
+  <div class="row" style="gap:16px;align-items:flex-end"><div class="grow"><div style="font-size:19px;font-weight:600;letter-spacing:-0.01em">Writing firmware 2.2.6</div>
+    <div class="muted" style="margin-top:4px">3.3 of 5.3 MB written · about a minute left</div></div><div class="num" style="font-size:34px;font-weight:600;letter-spacing:-0.02em;line-height:38px">62%</div></div>
+  <div class="progress" style="height:8px;margin:14px 0 16px;border-radius:4px"><span class="f" style="width:62%;border-radius:4px"></span></div>
+  <div class="row" style="gap:28px;align-items:flex-start"><div class="grow">
+    <div class="checkrow done"><span class="ci">${I('check', 's14')}</span>Sent the firmware file<span class="r num">5.3 MB</span></div>
+    <div class="checkrow now"><span class="ci" style="color:var(--accent)">${I('loader-circle', 's14')}</span>Writing it to the pedal's memory<span class="r num">62%</span></div>
+    <div class="checkrow wait"><span class="ci">${I('circle', 's12')}</span>Checking what was written</div></div>
+    <div class="banner warn" style="width:380px;flex:none;padding:12px 14px"><span class="bi" style="width:30px;height:30px">${I('plug-zap', 's16')}</span><div><div class="bt" style="font-size:13.5px">Keep the pedal on and connected</div><div class="bd">Switching it off or pulling the cable now could leave it unable to start.</div></div></div></div></div>`;
+const footer = `<span class="note">This step can't be stopped safely. Everything else in TonePush keeps working.</span><span class="grow"></span><span class="btn ghost sm">${I('copy')}Copy details</span>`;
+TP.mount(PRO.fwPage({ states: ['done', 'done', 'now'], body, footer, sideStatus: 'Update Mode',
+  foot: `<span class="ok row">${I('shield-check', 's14')}</span><span class="grow ell">Backed up at 14:31</span><span class="iconbtn sm">${I('settings', 's14')}</span>` }));
+</script></body></html>

@@ -1,0 +1,97 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · StompStation PRO editor, firmware 2.x</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script>
+<script>
+TP.setup();
+const { I, G, z } = TP;
+const size = TP.size();
+// At the smallest size the sidebar is hidden (Ctrl B) so the 16-slot chain fits.
+const hideSide = size === 's';
+const unprot = new URLSearchParams(location.search).get('state') === 'unprotected';
+const presets = D.proPresets().slice(0, z(18, 22, 48));
+presets[7].sel = true; presets[7].dirty = true;
+const side = hideSide ? '' : TP.sidebar({
+  device: { name: 'StompStation PRO', status: 'Connected · 2.2.6', online: true }, nav: 'edit', listAside: '24 of 60', presets,
+  foot: unprot ? `<span class="row" style="color:var(--hot)">${I('shield-alert', 's14')}</span><span class="grow ell">Not protected yet</span><span class="iconbtn sm">${I('settings', 's14')}</span>`
+    : `<span class="ok row">${I('shield-check', 's14')}</span><span class="grow ell">Protected · backup 14:02</span><span class="iconbtn sm">${I('settings', 's14')}</span>`,
+});
+const deck = TP.deck({
+  sideToggle: hideSide, slot: '03B', name: 'Velvet Drive',
+  meta: unprot ? `<span class="hot"><span class="dot"></span>2 changes not saved</span><span class="sep">·</span><span class="hot">${I('shield-alert', 's12')}Saving waits for a backup of this pedal</span>`
+    : `<span class="hot"><span class="dot"></span>2 changes not saved</span><span class="sep">·</span><span class="ok">${I('shield-check', 's12')}Protected by the 14:02 backup</span>`,
+  tempo: '96.0', undo: true, dirty: true,
+  save: unprot ? `<span class="btn primary">${I('download')}Back up to unlock saving</span>` : undefined,
+});
+
+const lens = `<div class="seg lens"><span class="s on">Block</span><span class="s">Quick controls</span><span class="s">Controllers</span></div>`;
+const bhead = `<div class="bhd"><span class="bwell">${G('amp')}</span>
+  <div style="min-width:0"><div class="bname">Amp<span class="chip" style="height:20px;margin-left:4px">${I('lock', 's12')}Fixed in slot 8</span></div>
+  <div class="bmeta"><span class="c">NAM player</span><span>·</span><span>Dual amp</span><span>·</span><span>stereo out</span></div></div>
+  <span class="btn sm" style="margin-left:8px">${I('copy')}Copy settings</span><span class="iconbtn">${I('ellipsis')}</span>
+  ${lens}</div>`;
+
+const capture = (n, name, meta, pan, panv) => () => `<div class="capt"><div class="k">Model ${n}<span class="chip" style="height:17px;font-size:10px;padding:0 5px">${panv}</span></div>
+  <div class="nm">${name}</div><div class="mt2">${meta}</div>
+  <div class="bt"><span class="btn sm" style="height:24px">${I('library', 's13')}Change${I('chevron-down', 's12')}</span><span class="grow"></span>${TP.knobSvg(pan, 26, 0.5)}<span class="muted" style="font-size:11px">Pan</span></div></div>`;
+const capW = z(196, 214, 250);
+const cells = [
+  { t: 'fsw', on: true, led: 'var(--c-amp)', label: 'On/Off' }, { t: 'div' },
+  { t: 'html', w: capW, html: capture(1, 'JCM800 2203 · Crunch', 'NAM amp slot 1 · WaveNet', 0.3, 'L 40') },
+  { t: 'html', w: capW, html: capture(2, 'AC30 TB · Top Boost', 'NAM amp slot 2 · WaveNet', 0.7, 'R 40') }, { t: 'div' },
+  { label: 'Gain', val: '6.2', frac: 0.62, def: 0.5, chips: [{ text: 'F1' }] },
+  { label: 'Low', val: '4.8', frac: 0.48, def: 0.5 },
+  { label: 'Mid', val: '6.0', frac: 0.60, def: 0.5 },
+  { label: 'Treble', val: '5.5', frac: 0.55, def: 0.5 },
+  { label: 'Volume', val: '−1.5 dB', frac: 0.46, def: 0.5 },
+];
+
+const floor = TP.floor({
+  label: '',
+  items: [
+    { kind: 'knob', t1: 'F1 · Amp', t2: 'Gain 6.2', frac: 0.62 },
+    { kind: 'knob', t1: 'F2 · Delay', t2: 'Mix 28%', frac: 0.28 },
+    { kind: 'knob', t1: 'F3 · Drive', t2: 'Level 7.0', frac: 0.7 },
+    ...(size === 's' ? [] : [{ kind: 'knob', t1: 'F4 · Reverb', t2: 'Mix 35%', frac: 0.35 }]),
+    { kind: 'exp', t1: 'CTRL pedal', t2: 'Wah position', cat: 'wah' },
+  ],
+  right: size === 's' ? '' : `<span class="chip ghost">${I('footprints', 's12')}A B C recall bank 03</span>`,
+});
+
+let body;
+if (size === 'l') {
+  const qc = [['F1', 'Amp', 'Gain', '6.2', 0.62, 'amp'], ['F2', 'Delay', 'Mix', '28%', 0.28, 'delay'], ['F3', 'Drive', 'Level', '7.0', 0.7, 'dist'], ['F4', 'Reverb', 'Mix', '35%', 0.35, 'reverb']];
+  const quick = `<div class="fsboard" style="grid-template-columns:repeat(4,minmax(0,1fr))">${qc.map(([f, b, p, v, fr, c]) => `<div class="fscard cat-${c}" style="flex-direction:row;align-items:center;gap:14px">${TP.knobSvg(fr, 48, null)}<div><div class="t1">${f} · ${b}</div><div class="t2">${p} <span class="num">${v}</span></div></div></div>`).join('')}</div>`;
+  const ctl = [['Controller 1', 'MIDI CC 20', [['delay', 'Delay', 'Mix 10% → 45%'], ['reverb', 'Reverb', 'Mix 20% → 50%']]], ['Controller 2', 'CTRL pedal', [['wah', 'Wah', 'Position 0 → 100%']]], ['Controller 3', 'MIDI CC 21', []]];
+  const ctls = `<div class="alist">${ctl.map(([n, src, links]) => `<div class="ar" style="height:auto;min-height:44px;padding-top:8px;padding-bottom:8px;align-items:flex-start"><div style="width:150px"><b>${n}</b><div class="muted" style="font-size:11.5px">${src}</div></div><div class="col" style="gap:4px">${links.length ? links.map(([c, b, w]) => `<span class="row cat-${c}" style="gap:7px"><span style="color:var(--cat);display:flex">${G(c, 's14')}</span><b style="font-weight:500">${b}</b><span class="muted num">${w}</span></span>`).join('') : '<span class="faint">Not linked to anything</span>'}</div></div>`).join('')}</div>`;
+  body = `<div style="display:grid;grid-template-columns:minmax(0,1fr) 560px;gap:16px;padding:16px 20px;flex:1;min-height:0;align-content:start">
+    <div style="display:flex;flex-direction:column;gap:16px;min-width:0">
+      <div class="card" style="padding-bottom:16px">${bhead.replace(lens, '')}<div id="face"></div></div>
+      <div class="card"><div class="cardh"><span class="t">Quick controls</span><span class="muted" style="font-size:12px">the F1 to F4 knobs on the pedal's home screen, for this preset</span></div><div style="padding:14px">${quick}</div></div>
+      <div class="card"><div class="cardh"><span class="t">Controllers</span><span class="muted" style="font-size:12px">each moves up to three parameters</span></div>${ctls}</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div class="card"><div class="cardh">${I('shield-check', 's14')}<span class="t">Protected</span><span class="grow"></span><span class="btn sm">${I('download')}Back up now</span></div>
+        <div style="padding:14px 16px 16px;font-size:12.5px;color:var(--text-soft);line-height:19px">The backup from today at 14:02 matches this pedal on firmware 2.2.6, so saving, renaming and importing are on. If a write goes wrong, TonePush puts the pedal back from it.
+        <div class="kv2" style="margin-top:12px"><span class="k">Presets</span><span class="v">24 of 60 slots</span><span class="k">NAM amps</span><span class="v">14 of 30</span><span class="k">NAM drives</span><span class="v">9 of 30</span><span class="k">IRs</span><span class="v">11 of 40, 2 stereo pairs</span></div></div></div>
+      <div class="card"><div class="cardh">${I('library', 's14')}<span class="t">In your library</span><span class="muted" style="font-size:12px">Velvet Drive · v4</span><span class="grow"></span><span class="btn sm">${I('tp-computer')}Keep as v5</span></div>
+        <div style="padding:14px 16px 16px"><div class="kv2"><span class="k">Song</span><span class="v">Low Tide</span><span class="k">Artist</span><span class="v">Marlow Kent</span><span class="k">Part</span><span class="v">Lead</span><span class="k">Tags</span><span class="v"><span class="chip">stereo</span> <span class="chip">nam</span></span></div></div></div>
+    </div></div>`;
+} else {
+  body = `${bhead}<div class="pbody"><div id="face" style="flex:1"></div></div>`;
+}
+
+TP.later(() => {
+  TP.renderChain(document.getElementById('board'), Object.assign(D.proChain(), {
+    head: `<span><b>12</b> of 16 slots</span><span>·</span><span>4 fixed ${I('lock', 's12')}</span><span>·</span><span>Detune Chorus and Rotary run in parallel</span><span class="grow"></span>${TP.legend()}`,
+  }));
+  const pane = document.getElementById('pane');
+  const face = document.getElementById('face');
+  if (size === 'l') face.outerHTML = TP.face(cells, face.parentElement.clientWidth - 40, { sizes: [68], style: 'margin:0 20px;background:var(--bg);' });
+  else face.outerHTML = TP.face(cells, pane.clientWidth - 40, { height: pane.clientHeight - 64 - 8, sizes: size === 's' ? [52, 44] : [60, 52, 44], style: 'flex:1' });
+});
+const gate = !unprot ? '' : `<div class="row" style="gap:12px;padding:9px 20px;border-bottom:1px solid var(--line);background:var(--hot-soft);font-size:12.5px;color:var(--text-soft);flex:none">
+  <span style="color:var(--hot);display:flex">${I('shield-alert', 's16')}</span><span><b style="color:var(--text);font-weight:600">Edits play on the pedal now.</b> Saving, renaming and importing write its memory, so they wait until TonePush holds a checked backup of this pedal (about 40 seconds).</span>
+  <span class="grow"></span><span class="btn sm ghost">Use an existing backup…</span></div>`;
+TP.mount(`<div class="win">${side}<div class="main">${deck}${gate}<div class="board" id="board"></div>
+  <section class="pane cat-amp" id="pane">${body}</section>${size === 'l' ? '' : floor}</div></div>`);
+</script></body></html>

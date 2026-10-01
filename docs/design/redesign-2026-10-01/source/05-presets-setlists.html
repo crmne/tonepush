@@ -1,0 +1,81 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · Presets and setlists</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script>
+<script>
+TP.setup();
+const { I, G } = TP;
+const presets = D.hxPresets().slice(0, 22);
+presets[1].sel = true; presets[1].dirty = true;
+presets[7].hov = true; // 03B, right-clicked
+
+const menu = TP.menu({ x: 150, y: 362, w: 248, rows: [
+  { head: '03B Worship Pad', h: 'on the pedal' },
+  '-',
+  { icon: 'text-cursor-input', t: 'Rename', h: 'F2' },
+  { icon: 'copy', t: 'Copy', h: 'Ctrl C' },
+  { icon: 'clipboard-paste', t: 'Paste Plexi Crunch here', h: 'Ctrl V', cls: 'hov' },
+  '-',
+  { icon: 'tp-computer', t: 'Update in library', h: 'differs from v2' },
+  { icon: 'download', t: 'Save to file…' },
+  { icon: 'upload', t: 'Load from file…' },
+  '-',
+  { icon: 'trash-2', t: 'Empty this slot…', cls: 'danger' },
+] });
+
+const side0 = 0;
+const side = TP.sidebar({
+  device: { name: 'HX Stomp', status: 'Connected · 3.80', online: true }, nav: 'library', listAside: '42 of 126', presets, menu: new URLSearchParams(location.search).get('dialog') ? '' : menu,
+  foot: `<span class="ok row">${I('shield-check', 's14')}</span><span class="grow ell">Backed up at 14:02</span><span class="iconbtn sm">${I('settings', 's14')}</span>`,
+});
+presets[7].lib = 'differs';
+
+const mini = TP.minideck({ slot: '01B', name: 'Plexi Crunch', dirty: true, chain: ['wah!', 'dist', 'amp', ['cab', 'cab'], 'delay!', 'reverb'], snap: 'Chorus' });
+
+const head = `<div class="libhead"><span class="ph1">Library</span>
+  <div class="seg" style="margin-left:6px"><span class="s">Tones <span class="n">248</span></span><span class="s on">Setlists <span class="n">5</span></span><span class="s">${I('cloud', 's14')}Cloud</span></div>
+  <span class="grow"></span><div class="field" style="width:220px">${I('search')}<span>Search setlists</span></div>
+  <span class="btn sm">${I('tp-pedal')}HX Stomp${I('chevron-down', 's12')}</span></div>`;
+
+const stateChip = (s) => s.state === 'matches the pedal' ? `<span class="chip ok">${I('check', 's12')}Matches the pedal</span>`
+  : s.state === 'for another pedal' ? `<span class="chip">For StompStation PRO</span>` : `<span class="chip hot">${I('git-compare', 's12')}${s.state[0].toUpperCase() + s.state.slice(1)}</span>`;
+const list = `<div class="slist">${D.setlists.map((s, i) => `<div class="slrow ${i === 0 ? 'sel' : ''}"><div class="a"><span class="nm">${s.name}</span><span class="ct num">${s.count}</span></div>
+  <div class="m">${s.venue} · ${s.date}</div><div class="a" style="margin-top:3px">${stateChip(s)}<span class="faint" style="font-size:11.5px;margin-left:auto">${s.ver}</span></div></div>`).join('')}
+  <div class="slrow" style="margin-top:6px;border:1px dashed var(--line-strong);flex-direction:row;align-items:center;gap:10px;color:var(--text-soft);font-size:12.5px">${I('tp-computer', 's14')}<span>Keep the whole pedal as a setlist</span></div></div>`;
+
+// The setlist against the pedal, bank by bank.
+const diff = { 4: 'diff', 12: 'diff', 26: 'diff', 31: 'diff', 39: 'clear', 40: 'clear' };
+const names = D.hxPresets();
+const renamed = { 31: 'Night Verb' };
+let grid = '';
+for (let b = 0; b < 14; b++) {
+  grid += `<div class="bk num">${String(b + 1).padStart(2, '0')}</div>`;
+  for (let k = 0; k < 3; k++) {
+    const i = b * 3 + k, st = diff[i];
+    const nm = renamed[i] || names[i].name;
+    if (st === 'clear') grid += `<div class="bcell clear"><span class="s">${'ABC'[k]}</span><span class="n">Empty · clears ${nm}</span><span class="x">${I('git-compare', 's13')}</span></div>`;
+    else grid += `<div class="bcell ${st || 'same'}"><span class="s">${'ABC'[k]}</span><span class="n">${nm}</span>${st ? `<span class="x">${I('git-compare', 's13')}</span>` : ''}</div>`;
+  }
+}
+const detail = `<div class="sldetail">
+  <div class="row" style="gap:12px;align-items:flex-start"><div class="grow" style="min-width:0"><div style="font-size:20px;font-weight:600;letter-spacing:-0.015em">Album release show</div>
+    <div class="pmeta" style="margin-top:4px">Lido Rooftop, Berlin<span class="sep">·</span>4 Oct 2026<span class="sep">·</span>v2, captured at 18:02</div></div>
+    <span class="btn">${I('tp-computer')}Capture the pedal as v3</span><span class="btn primary">${I('arrow-down-to-line')}Put on HX Stomp…</span></div>
+  <div class="banner warn" style="margin:14px 0 12px;padding:10px 14px;align-items:center"><span class="bi" style="width:28px;height:28px">${I('git-compare', 's14')}</span>
+    <div class="grow"><span style="font-weight:600">6 slots differ from the pedal.</span> <span class="soft">Four hold other versions, two are empty in the setlist. The other 120 match.</span></div>
+    <div class="seg"><span class="s on">All 42</span><span class="s">6 that differ</span></div></div>
+  <div class="bankgrid">${grid}</div></div>`;
+
+const confirm = new URLSearchParams(location.search).get('dialog') === 'confirm';
+const dialog = !confirm ? '' : `<div class="scrim"></div><div class="dialog" style="left:calc(50% - 250px + 116px);top:110px;width:500px">
+  <div class="dh"><div class="dt">Put Album release show on the HX Stomp?</div>
+  <div class="dd">TonePush backs up the pedal first, then writes only the six slots that differ. Undo cannot reach the pedal's memory; that backup can.</div></div>
+  <div class="db"><div class="outc">
+    <div class="orow"><span class="ic">${I('refresh-cw', 's14')}</span><span class="n num">4</span><span>presets replaced: 02B, 05A, 09C, 11B</span></div>
+    <div class="orow"><span class="ic" style="color:var(--danger)">${I('trash-2', 's14')}</span><span class="n num">2</span><span>slots emptied: 14A Reverse Swell, 14B Practice Clean</span></div>
+    <div class="orow z"><span class="ic">${I('check', 's14')}</span><span class="n num">36</span><span>already match and are left alone</span></div>
+    <div class="orow z"><span class="ic">${I('circle-dashed', 's14')}</span><span class="n num">84</span><span>empty slots stay empty</span></div>
+  </div>
+  <div class="row" style="gap:10px;margin-top:14px;font-size:12.5px;color:var(--text-soft)"><span style="width:16px;height:16px;border-radius:4px;border:1.5px solid var(--line-strong);flex:none"></span>Keep the pedal as it is now as a setlist first</div></div>
+  <div class="df"><span class="note">About 20 seconds. The pedal stays playable.</span><span class="btn">Cancel</span><span class="btn danger">Write 6 slots</span></div></div>`;
+TP.mount(`<div class="win">${side}<div class="main">${mini}${head}<div class="libbody">${list}${detail}</div></div>${dialog}</div>`);
+</script></body></html>

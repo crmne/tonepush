@@ -1,0 +1,52 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · StompStation PRO impulse responses</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script><script src="assets/pro.js"></script>
+<script>
+TP.setup();
+const { I, G } = TP;
+
+const toolbar = `<div class="row" style="gap:12px;padding:14px 20px 10px">
+  <div><span style="font-weight:600">11 of 40 slots</span> <span class="muted">· two stereo pairs</span></div><span class="grow"></span>
+  <div class="field" style="width:200px">${I('search')}<span>Search IRs</span></div>
+  <span class="btn sm">${I('upload')}Import WAV files…</span></div>`;
+const cols = [['Slot', 52], ['Name', 230], ['Channels', 130], ['Length', 86], ['Used by', 90]];
+const th = `<div class="th">${cols.map(([t, w]) => `<span class="c" style="width:${w}px">${t}</span>`).join('')}</div>`;
+const rows = D.irs.map(r => {
+  const pair = r.pair, sel = r.n === 3 || r.n === 4;
+  const slot = pair === 'start' ? `<span class="row" style="gap:4px"><span class="num">${String(r.n).padStart(2, '0')}</span><span style="width:8px;height:18px;border:1.5px solid var(--c-ir);border-right:none;border-bottom:none;border-radius:4px 0 0 0;margin-top:14px"></span></span>`
+    : pair === 'end' ? `<span class="row" style="gap:4px"><span class="num">${String(r.n).padStart(2, '0')}</span><span style="width:8px;height:18px;border:1.5px solid var(--c-ir);border-right:none;border-top:none;border-radius:0 0 0 4px;margin-bottom:14px"></span></span>`
+    : `<span class="num">${String(r.n).padStart(2, '0')}</span>`;
+  const ch = pair ? `<span class="chip" style="height:19px;color:var(--c-ir)">${r.ch === 'L' ? 'Left' : 'Right'}</span><span class="muted" style="margin-left:6px">${pair === 'start' ? 'stereo pair' : ''}</span>` : `<span class="muted">Mono</span>`;
+  return `<div class="tr ${sel ? 'sel' : ''}" style="height:34px;${pair === 'start' ? 'border-bottom-color:transparent' : ''}">
+    <span class="c muted" style="width:52px">${slot}</span>
+    <span class="c nm" style="width:230px"><span class="row" style="gap:8px"><span style="color:var(--c-ir);display:flex">${G('ir', 's14')}</span><span class="ell">${pair === 'end' ? `<span class="muted" style="font-weight:400">${r.name}</span>` : r.name}</span></span></span>
+    <span class="c" style="width:130px">${ch}</span><span class="c muted num" style="width:86px">${r.len}</span>
+    <span class="c ${r.used ? '' : 'faint'}" style="width:90px">${pair === 'end' ? '' : r.used ? `${r.used} preset${r.used > 1 ? 's' : ''}` : 'none'}</span></div>`;
+}).join('');
+const drop = `<div style="margin:12px 20px 0;border:1.5px dashed var(--line-strong);border-radius:12px;padding:14px 16px;display:flex;align-items:center;gap:14px">
+  <span class="bwell cat-ir" style="width:36px;height:36px">${I('file-audio', 's18')}</span>
+  <div class="grow"><div style="font-weight:600;font-size:13px">Drop WAV files here</div><div class="muted" style="font-size:12px;margin-top:2px">48 kHz. A mono file takes one slot; a stereo file takes two free slots side by side, left then right.</div></div></div>`;
+
+// An impulse response, drawn as its decay: deterministic so renders match.
+function ir(seed, len, color) {
+  let x = seed, pts = [];
+  const rnd = () => (x = (x * 9301 + 49297) % 233280) / 233280;
+  const W = 296, H = 44;
+  for (let i = 0; i < 148; i++) {
+    const t = i / 147, env = Math.exp(-t * (6 / len));
+    const v = (i < 2 ? (i ? -0.7 : 1) : (rnd() * 2 - 1) * env * 0.85);
+    pts.push(`${(t * W).toFixed(1)},${(H / 2 - v * H / 2).toFixed(1)}`);
+  }
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><line x1="0" y1="${H / 2}" x2="${W}" y2="${H / 2}" stroke="var(--line)" stroke-width="1"/><polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="1.2" stroke-linejoin="round"/></svg>`;
+}
+const insp = `<aside class="insp" style="width:340px">
+  <div class="ih"><div class="row" style="gap:10px"><span class="bwell cat-ir" style="width:36px;height:36px">${G('ir', 's20')}</span><div style="min-width:0"><div style="font-size:15px;font-weight:600">Oxford Room</div><div class="pmeta" style="margin-top:1px">Stereo pair · slots 3 and 4 · 500 ms</div></div></div></div>
+  <div class="is"><div class="lbl">Left · slot 3</div>${ir(7, 1.2, 'var(--c-ir)')}<div class="lbl" style="margin-top:12px">Right · slot 4</div>${ir(23, 1.2, 'var(--c-ir)')}</div>
+  <div class="is"><div class="lbl">Used by 2 presets</div>
+    <div class="row" style="height:28px;gap:10px;font-size:12.5px"><span class="muted num" style="width:28px;font-weight:500">02A</span><span class="grow">Stereo Swirl</span><span class="muted">IR 1 + IR 2</span></div>
+    <div class="row" style="height:28px;gap:10px;font-size:12.5px"><span class="muted num" style="width:28px;font-weight:500">06A</span><span class="grow">Spring Surf</span><span class="muted">IR 1 + IR 2</span></div></div>
+  <div class="is"><div class="row" style="gap:8px;flex-wrap:wrap"><span class="btn sm">${I('download')}Export stereo WAV</span><span class="btn sm ghost">One side${I('chevron-down', 's12')}</span></div></div>
+</aside>`;
+
+TP.mount(`<div class="win">${PRO.side()}<div class="main">${PRO.mini()}${PRO.head('irs')}<div class="libbody"><div class="grow" style="min-width:0;display:flex;flex-direction:column">${toolbar}<div class="card" style="margin:0 20px;overflow:hidden">${th}${rows}</div>${drop}</div>${insp}</div></div></div>`);
+</script></body></html>

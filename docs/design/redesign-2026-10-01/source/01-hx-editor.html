@@ -1,0 +1,97 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · HX Stomp editor</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script>
+<script>
+TP.setup();
+const { I, G, z } = TP;
+const size = TP.size();
+const presets = D.hxPresets().slice(0, z(18, 22, 48));
+presets[1].sel = true; presets[1].dirty = true;
+
+const side = TP.sidebar({
+  device: { name: 'HX Stomp', status: 'Connected · 3.80', online: true },
+  nav: 'edit', listAside: '42 of 126', presets,
+  foot: `<span class="ok row">${I('shield-check', 's14')}</span><span class="grow ell">Backed up at 14:02</span><span class="iconbtn sm">${I('settings', 's14')}</span>`,
+});
+
+const deck = TP.deck({
+  slot: '01B', name: 'Plexi Crunch',
+  meta: `<span class="hot"><span class="dot"></span>3 changes not saved</span>${size === 's' ? '' : '<span class="sep">·</span><span>In your library as v2</span>'}`,
+  snaps: [{ name: 'Verse' }, { name: 'Chorus', on: true }, { name: 'Solo' }],
+  tempo: '104.0', undo: true, redo: false, dirty: true,
+});
+
+const lens = `<div class="seg lens"><span class="s on">Block</span><span class="s">Footswitches</span><span class="s">Snapshots</span></div>`;
+const bhead = `<div class="bhd"><span class="bwell">${G('amp')}</span>
+  <div style="min-width:0"><div class="bname">US Double Nrm<span class="chev">${I('chevron-down', 's14')}</span></div>
+  <div class="bmeta"><span class="c">Amp</span><span>·</span><span>Guitar</span><span>·</span><span>Mono</span></div></div>
+  <span class="btn sm" style="margin-left:8px">${I('layout-grid')}Change model</span>
+  <span class="iconbtn" title="Copy block">${I('copy')}</span><span class="iconbtn dis" title="Paste">${I('clipboard-paste')}</span><span class="iconbtn" title="Remove block">${I('trash-2')}</span>
+  ${lens}</div>`;
+
+const cells = [{ t: 'fsw', on: true, led: 'var(--c-amp)', label: 'On/Off' }, { t: 'div' }, ...D.amp];
+
+const ctl = `<div class="ctlrow">
+  <span class="it">${I('camera', 's14')}<b>Drive</b> follows snapshots<span class="vals num"><span class="v">4.5</span><span class="v on">4.5</span><span class="v">5.8</span></span></span>
+  <span class="it"><span class="led" style="--led:var(--led-green)"></span><b>FS2</b> raises Ch Vol from 7.5 to 8.6</span>
+  <span class="lnk">Edit footswitches${I('arrow-right', 's12')}</span></div>`;
+
+const floor = TP.floor({
+  label: size === 'l' ? 'Footswitches' : '',
+  items: [
+    { t1: 'FS1 · Toggles', t2: 'Minotaur', led: 'ltorange', on: true },
+    { t1: 'FS2 · Toggles', t2: size === 's' ? 'Lead' : 'Lead · 2 controls', led: 'green', on: false },
+    { t1: 'FS3 · Toggles', t2: 'Plateaux', led: 'turquoise', on: true },
+    { kind: 'exp', t1: 'EXP 1 · auto on', t2: size === 's' ? 'Teardrop' : 'Teardrop 310 Position', cat: 'wah' },
+    ...(size === 's' ? [] : [{ kind: 'empty', t1: 'EXP 2', t2: 'Nothing assigned' }]),
+  ],
+  right: size === 's' ? '' : `<span class="chip ghost">${I('cable', 's12')}${size === 'l' ? 'MIDI CC 4 · Plateaux Mix' : 'MIDI · 1 CC'}</span>`,
+});
+
+const controlsCard = (title) => `<div class="card" style="flex:1;min-width:0"><div class="cardh">${I('cable', 's14')}<span class="t">${title}</span></div><div class="alist">
+    <div class="ar">${TP.tag({ icon: 'camera', text: 'Snapshots' })}<b>Drive</b><span class="grow"></span><span class="vals num"><span class="v">4.5</span><span class="v on">4.5</span><span class="v">5.8</span></span></div>
+    <div class="ar">${TP.tag({ fs: 'FS2', led: 'green' })}<b>Ch Vol</b><span class="muted">7.5</span>${I('arrow-right', 's12')}<span class="num">8.6</span><span class="grow"></span><span class="muted">Toggles</span></div>
+    <div class="ar"><span class="muted row">${I('mouse-pointer-click', 's14')}</span><span class="muted ell">Right-click a knob to give it a control</span></div>
+  </div></div>`;
+
+let body;
+if (size === 'l') {
+  const toneCard = `<div class="card"><div class="cardh">${I('library', 's14')}<span class="t">In your library</span><span class="muted" style="font-size:12px">Plexi Crunch · v2</span><span class="grow"></span><span class="btn sm">${I('tp-computer')}Keep as v3</span></div>
+    <div style="padding:14px 16px 16px"><div class="kv2"><span class="k">Song</span><span class="v">Original</span><span class="k">Part</span><span class="v">Rhythm</span>
+    <span class="k">Guitar</span><span class="v">Les Paul · humbuckers</span><span class="k">Tags</span><span class="v"><span class="chip">stage</span> <span class="chip">crunch</span></span>
+    <span class="k">TonePush</span><span class="v"><span class="ok row" style="display:inline-flex;gap:6px">${I('cloud', 's14')}Published · 1,284 downloads</span></span></div></div></div>`;
+  body = `<div style="display:grid;grid-template-columns:minmax(0,1fr) 600px;gap:16px;padding:16px 20px;flex:1;min-height:0;align-content:start">
+    <div style="display:flex;flex-direction:column;gap:16px;min-width:0">
+      <div class="card" style="padding-bottom:16px">${bhead.replace(lens, '')}<div id="face"></div></div>
+      <div class="card"><div class="cardh"><span class="t">Footswitches</span><span class="muted" style="font-size:12px">HX Stomp · Stomp mode</span><span class="grow"></span><span class="chip ghost">${I('cable', 's12')}MIDI CC 4 · Plateaux Mix</span></div>
+        <div style="padding:14px">${TP.fsBoard(D.hxSwitches(), 5)}</div></div>
+      ${controlsCard('Controls on US Double Nrm')}
+    </div>
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div class="card"><div class="cardh">${I('camera', 's14')}<span class="t">Snapshots</span><span class="muted" style="font-size:12px">what changes when you switch</span><span class="grow"></span><span class="btn sm ghost">${I('copy')}Copy Chorus to…</span></div>
+        <div style="padding:6px 0 10px">${TP.snapMatrix(Object.assign(D.hxSnaps(), { colW: 104 }))}</div></div>
+      ${toneCard}
+    </div></div>`;
+} else if (size === 'm') {
+  body = `${bhead}<div class="pbody"><div id="face"></div>${controlsCard('Controls on this block')}</div>`;
+} else {
+  body = `${bhead}<div class="pbody"><div id="face" style="flex:1"></div></div>`;
+}
+
+TP.later(() => {
+  TP.renderChain(document.getElementById('board'), Object.assign(D.hxChain(), {
+    head: `<span><b>7</b> of 8 blocks</span><span>·</span><span>Path 1</span><span class="grow"></span>${TP.legend()}`,
+  }));
+  const pane = document.getElementById('pane');
+  const face = document.getElementById('face');
+  if (size === 'l') {
+    face.outerHTML = TP.face(cells, face.parentElement.clientWidth - 40, { sizes: [76], style: 'margin:0 20px;background:var(--bg);' });
+  } else if (size === 'm') {
+    face.outerHTML = TP.face(cells, pane.clientWidth - 40 - 16 - 330, { height: pane.clientHeight - 64 - 16, sizes: [68, 60, 52, 44] });
+  } else {
+    face.outerHTML = TP.face(cells, pane.clientWidth - 40, { height: pane.clientHeight - 64 - 12, sizes: [60, 52, 44], style: 'flex:1' });
+  }
+});
+TP.mount(`<div class="win">${side}<div class="main">${deck}<div class="board" id="board"></div>
+  <section class="pane cat-amp" id="pane">${body}</section>${size === 'l' ? '' : floor}</div></div>`);
+</script></body></html>

@@ -1,0 +1,57 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · Library, sending a tone to the pedal</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script>
+<script>
+TP.setup();
+const { I, G } = TP;
+// Sending: the pedal's list is the destination. It scrolls to the free slots.
+const all = D.hxPresets();
+const presets = all.slice(30, 54).map(p => Object.assign({}, p, { target: true, bank: p.i % 3 === 0 && p.i > 30, lib: null, fav: false }));
+presets.forEach(p => { if (!p.empty) p.hint = ''; });
+presets[12].drop = true; presets[12].hint = 'Put it here';   // 15A
+presets[11].hint = 'Replace';                                // 14C, under the pointer a moment ago
+const side = TP.sidebar({
+  device: { name: 'HX Stomp', status: 'Connected · 3.80', online: true }, nav: 'library', listAside: '84 free', presets,
+  picking: `<div class="row" style="gap:8px;align-items:flex-start">${I('arrow-down-to-line', 's14')}<div><b>Choose a slot for Slapback Twang.</b><div class="muted" style="margin-top:2px">Free slots are amber; a used one says what it replaces. Esc cancels.</div></div></div>`,
+  foot: `<span class="ok row">${I('shield-check', 's14')}</span><span class="grow ell">Backed up at 14:02</span><span class="iconbtn sm">${I('settings', 's14')}</span>`,
+});
+const mini = TP.minideck({ slot: '01B', name: 'Plexi Crunch', chain: ['wah!', 'dist', 'amp', ['cab', 'cab'], 'delay!', 'reverb'], snap: 'Chorus' });
+const head = `<div class="libhead"><span class="ph1">Library</span>
+  <div class="seg" style="margin-left:6px"><span class="s on">Tones <span class="n">248</span></span><span class="s">Setlists <span class="n">5</span></span><span class="s">${I('cloud', 's14')}Cloud</span></div>
+  <span class="grow"></span><div class="field" style="width:200px">${I('search')}<span>Search 248 tones</span></div>
+  <span class="btn sm">All pedals${I('chevron-down', 's12')}</span><span class="iconbtn">${I('columns-3' in ICONS ? 'columns-3' : 'list')}</span></div>`;
+
+const cols = [['', 50], ['Name', 150], ['Chain', 120], ['Song · Artist', 160], ['Character', 76], ['Rating', 84], ['Added', 64]];
+const th = `<div class="th">${cols.map(([t, w], i) => `<span class="c" style="width:${w}px">${t}${t === 'Name' ? ` ${I('arrow-up', 's12')}` : ''}</span>`).join('')}</div>`;
+const mini2 = (seq) => TP.miniChain(seq);
+const rows = D.tones.slice().sort((a, b) => a.name.localeCompare(b.name)).map(t => {
+  const pedal = t.dev === 'StompStation PRO' ? `<span title="for another pedal" style="opacity:.35">${I('tp-pedal', 's14')}</span>`
+    : t.sync === 'same' ? `<span class="on" title="on the pedal at ${t.pedal}">${I('tp-pedal', 's14')}</span>`
+    : t.sync === 'differs' ? `<span class="hot" title="differs from ${t.pedal}">${I('tp-pedal', 's14')}</span>` : `<span>${I('tp-pedal', 's14')}</span>`;
+  const cloud = t.rating >= 4 ? `<span class="on">${I('cloud', 's14')}</span>` : `<span>${I('cloud', 's14')}</span>`;
+  const sel = t.name === 'Slapback Twang';
+  return `<div class="tr ${sel ? 'sel' : ''}"><span class="c" style="width:50px"><span class="sync">${pedal}${cloud}</span></span>
+    <span class="c nm" style="width:150px">${t.name}${t.dev === 'StompStation PRO' ? ` <span class="faint" style="font-size:11px;font-weight:500">PRO</span>` : ''}</span>
+    <span class="c" style="width:120px">${mini2(t.chain)}</span>
+    <span class="c" style="width:160px">${t.artist ? `${t.song} <span class="muted">· ${t.artist}</span>` : `<span class="muted">${t.song}</span>`}</span>
+    <span class="c" style="width:76px">${t.char}</span>
+    <span class="c" style="width:84px"><span class="stars">${TP.stars(t.rating)}</span></span>
+    <span class="c muted num" style="width:64px">${t.added}</span></div>`;
+}).join('');
+
+const insp = `<aside class="insp">
+  <div class="ih"><div style="font-size:17px;font-weight:600;letter-spacing:-0.01em">Slapback Twang</div>
+    <div class="pmeta" style="margin-top:4px"><span class="devchip">${I('tp-pedal')}HX Stomp</span><span class="sep">·</span>v1<span class="sep">·</span>kept 17 Sep</div>
+    <div class="minitiles" style="margin-top:12px">${['dyn', 'amp', 'cab', 'delay', 'reverb'].map((c, i) => `${i ? '<span class="mtw"></span>' : ''}<span class="mt cat-${c}">${G(c)}</span>`).join('')}</div></div>
+  <div class="is"><div class="lbl">On the pedal</div>
+    <div class="row" style="gap:10px"><span class="muted" style="font-size:12.5px">Not on the HX Stomp yet</span></div>
+    <div class="row" style="gap:8px;margin-top:10px"><span class="btn sm" style="background:var(--accent-soft);border-color:var(--accent-line);color:var(--text)">${I('arrow-down-to-line')}Choosing a slot…</span><span class="btn sm ghost">Cancel</span></div></div>
+  <div class="is"><div class="lbl">Song and tone</div><div class="kv2">
+    <span class="k">Song</span><span class="v">Dust Road</span><span class="k">Artist</span><span class="v">The Night Signals</span>
+    <span class="k">Part</span><span class="v">Rhythm</span><span class="k">Guitar</span><span class="v">Telecaster · single-coil</span>
+    <span class="k">Tuning</span><span class="v">E standard</span><span class="k">Tags</span><span class="v"><span class="chip">clean</span> <span class="chip">twang</span></span></div></div>
+  <div class="is"><div class="row" style="gap:8px"><span class="btn sm">${I('cloud')}Publish</span><span class="btn sm ghost">${I('file-down')}Export for the web</span></div></div>
+</aside>`;
+
+TP.mount(`<div class="win">${side}<div class="main">${mini}${head}<div class="libbody"><div class="ttbl">${th}${rows}</div>${insp}</div></div></div>`);
+</script></body></html>

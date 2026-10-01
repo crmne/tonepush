@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · PRO firmware update, 4 restart</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script><script src="assets/pro.js"></script>
+<script>
+TP.setup();
+const { I } = TP;
+const ring = (left, total) => {
+  const r = 22, c = 2 * Math.PI * r, f = left / total;
+  return `<svg width="56" height="56" viewBox="0 0 56 56"><circle cx="28" cy="28" r="${r}" fill="none" stroke="var(--raised)" stroke-width="4"/>
+    <circle cx="28" cy="28" r="${r}" fill="none" stroke="var(--accent)" stroke-width="4" stroke-linecap="round" stroke-dasharray="${(c * f).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 28 28)"/>
+    <text x="28" y="33" text-anchor="middle" font-size="15" font-weight="600" fill="var(--text)" font-family="Inter">${left}</text></svg>`;
+};
+const body = `<div style="padding:22px 22px 20px;display:flex;gap:34px;align-items:center">
+  <div style="flex:none;padding:6px">${PRO.pedalArt({ upd: false, screenText: '' })}</div>
+  <div class="grow" style="min-width:0">
+    <div class="chip ok" style="height:22px;margin-bottom:10px">${I('circle-check', 's12')}Firmware written and checked</div>
+    <div style="font-size:22px;font-weight:600;letter-spacing:-0.015em;line-height:28px">Now switch the pedal off, wait ten seconds, and switch it on</div>
+    <div style="font-size:13px;color:var(--text-soft);line-height:19px;margin-top:6px">The new firmware starts the first time the pedal starts, which can take a little longer than usual.</div>
+    <div class="row" style="gap:16px;margin-top:16px;align-items:center">${ring(7, 10)}<div class="col" style="gap:2px">
+      <div class="checkrow done" style="height:24px"><span class="ci">${I('check', 's14')}</span>Switched off at 14:38</div>
+      <div class="checkrow now" style="height:24px"><span class="ci" style="color:var(--accent)">${I('timer', 's14')}</span>Wait 7 more seconds</div>
+      <div class="checkrow wait" style="height:24px"><span class="ci">${I('circle', 's12')}</span>Switch it on</div></div></div>
+    <div style="font-size:12px;color:var(--muted);line-height:17px;margin-top:14px;display:flex;gap:8px;align-items:flex-start">${I('info', 's14')}<span>TonePush reconnects by itself, checks that the pedal reports 2.2.6, and backs it up again: the 14:31 backup describes 1.5.12, so saving waits for the new one.</span></div>
+  </div></div>`;
+TP.mount(PRO.fwPage({ states: ['done', 'done', 'done', 'now'], body, footer: '', sideStatus: 'Switched off', online: false,
+  foot: `<span class="ok row">${I('shield-check', 's14')}</span><span class="grow ell">Backed up at 14:31</span><span class="iconbtn sm">${I('settings', 's14')}</span>` }));
+</script></body></html>

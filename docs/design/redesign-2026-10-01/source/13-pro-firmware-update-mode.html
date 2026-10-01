@@ -1,0 +1,33 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · PRO firmware update, 2 Update Mode</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script><script src="assets/pro.js"></script>
+<script>
+TP.setup();
+const { I } = TP;
+const found = new URLSearchParams(location.search).get('found') === '1';
+const step = (n, t, st) => `<div class="row" style="gap:12px;align-items:flex-start;min-height:34px"><span class="step ${st}" style="margin-top:1px"><span class="b">${st === 'done' ? I('check', 's12') : n}</span></span><span style="font-size:13.5px;line-height:20px;color:${st === 'wait' ? 'var(--text-soft)' : 'var(--text)'}">${t}</span></div>`;
+const status = found
+  ? `<div class="row" style="gap:10px;padding:11px 14px;border-radius:10px;background:var(--ok-soft);color:var(--ok);font-weight:500">${I('circle-check', 's16')}Found the StompStation PRO in Update Mode</div>`
+  : `<div class="row" style="gap:10px;padding:11px 14px;border-radius:10px;background:var(--raised);font-size:12.5px"><span style="color:var(--accent);display:flex">${I('loader-circle', 's16')}</span><div><div style="font-weight:600;color:var(--text)">Waiting for the pedal in Update Mode</div><div class="muted">It disconnected when you switched it off. That is expected.</div></div></div>`;
+const body = `<div style="padding:22px 22px 20px;display:flex;gap:34px;align-items:center">
+  <div style="flex:none;padding:6px">${PRO.pedalArt({ screenText: found ? 'Update Mode' : 'SONULAB' })}</div>
+  <div class="grow" style="min-width:0"><div style="font-size:19px;font-weight:600;letter-spacing:-0.01em">Start the pedal in Update Mode</div>
+    <div style="font-size:12.5px;color:var(--ok);margin:6px 0 14px;display:flex;gap:7px;align-items:center">${I('shield-check', 's14')}Backup checked: 60 presets, 14 NAM amps, 9 drives, 11 IRs and the settings</div>
+    ${step(1, 'Switch the pedal off and wait ten seconds.', 'done')}
+    ${step(2, 'Switch it on. While the Sonulab logo shows, press and hold <b style="font-weight:600;color:var(--accent)">UPD</b> on the back.', found ? 'done' : 'now')}
+    ${step(3, 'Let go when the screen says Update Mode.', found ? 'done' : 'wait')}
+    <div style="margin-top:14px">${status}</div></div></div>`;
+const footer = `<span class="note">TonePush moves on as soon as it sees Update Mode.</span><span class="grow"></span><span class="btn">Cancel update</span>`;
+const dialog = !found ? '' : `<div class="scrim"></div><div class="dialog" style="left:calc(50% - 260px + 116px);top:120px;width:520px">
+  <div class="dh"><div class="dt">Update the StompStation PRO to 2.2.6?</div>
+  <div class="dd">This replaces firmware 1.5.12. Your presets, NAM models and IRs are in the backup if anything goes missing.</div></div>
+  <div class="db"><div class="outc">
+    <div class="orow"><span class="ic">${I('package-check', 's14')}</span><span style="color:var(--text)">Firmware 2.2.6</span><span class="muted">5.3 MB, about 3 minutes</span></div>
+    <div class="orow"><span class="ic" style="color:var(--ok)">${I('shield-check', 's14')}</span><span style="color:var(--text)">Backup from 14:31</span><span class="muted">restores onto firmware 1.5.12</span></div>
+    <div class="orow"><span class="ic" style="color:var(--hot)">${I('plug', 's14')}</span><span style="color:var(--text)">Keep the pedal on and connected</span><span class="muted">until TonePush says so</span></div>
+  </div></div>
+  <div class="df"><span class="note">The pedal makes no sound while it updates.</span><span class="btn">Not now</span><span class="btn primary">Update to 2.2.6</span></div></div>`;
+TP.mount(PRO.fwPage({ states: ['done', found ? 'done' : 'now'], body, footer, dialog,
+  sideStatus: found ? 'Update Mode' : 'Switched off', online: found,
+  foot: `<span class="ok row">${I('shield-check', 's14')}</span><span class="grow ell">Backed up at 14:31</span><span class="iconbtn sm">${I('settings', 's14')}</span>` }));
+</script></body></html>

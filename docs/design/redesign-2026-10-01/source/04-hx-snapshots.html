@@ -1,0 +1,41 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · Snapshots</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script>
+<script>
+TP.setup();
+const { I, G } = TP;
+const presets = D.hxPresets().slice(0, 22);
+presets[1].sel = true; presets[1].dirty = true;
+const side = TP.sidebar({
+  device: { name: 'HX Stomp', status: 'Connected · 3.80', online: true }, nav: 'edit', listAside: '42 of 126', presets,
+  foot: `<span class="ok row">${I('shield-check', 's14')}</span><span class="grow ell">Backed up at 14:02</span><span class="iconbtn sm">${I('settings', 's14')}</span>`,
+});
+const deck = TP.deck({
+  slot: '01B', name: 'Plexi Crunch',
+  meta: `<span class="hot"><span class="dot"></span>3 changes not saved</span><span class="sep">·</span><span>In your library as v2</span>`,
+  snaps: [{ name: 'Verse' }, { name: 'Chorus', on: true }, { name: 'Solo' }], tempo: '104.0', undo: true, dirty: true,
+});
+const chain = D.hxChain();
+chain.items[2].b.sel = false;
+
+const sn = D.hxSnaps();
+const blocks = TP.snapMatrix({ snaps: sn.snaps, blocks: sn.blocks, colW: 84 });
+const vals = TP.snapMatrix({ snaps: sn.snaps, blocks: [], sectionBlocks: false, values: sn.values, valuesTitle: 'Values each snapshot sets', tempo: ['104.0', '104.0', '104.0'], colW: 68 });
+
+const pane = `<section class="pane"><div class="bhd" style="padding-bottom:12px"><div><div class="bname">Snapshots</div><div class="bmeta">Three versions of this preset. Switching keeps everything else as it is.</div></div>
+  <span class="grow"></span><span class="btn sm">${I('copy')}Copy Chorus to…</span><span class="btn sm">${I('text-cursor-input')}Rename</span>
+  <div class="seg lens" style="margin-left:6px"><span class="s">Block</span><span class="s">Footswitches</span><span class="s on">Snapshots</span></div></div>
+  <div class="pbody" style="gap:14px;padding-bottom:16px">
+    <div class="card grow" style="min-width:0;padding:4px 0 8px">${blocks}</div>
+    <div class="card" style="width:430px;flex:none;padding:4px 0 8px">${vals}
+      <div style="margin:10px 14px 0;padding-top:10px;border-top:1px solid var(--line);display:flex;gap:9px;font-size:12px;color:var(--muted);line-height:17px">${I('info', 's14')}<span>A knob marked ${TP.tag({ icon: 'camera' })} changes only the snapshot you are on. Right-click any knob to let snapshots set it.</span></div>
+    </div>
+  </div></section>`;
+
+TP.later(() => {
+  TP.renderChain(document.getElementById('board'), Object.assign(chain, {
+    head: `<span><b>Snapshot 2</b> · Chorus is on the pedal</span><span class="grow"></span>${TP.legend()}`, notch: false,
+  }));
+});
+TP.mount(`<div class="win">${side}<div class="main">${deck}<div class="board" id="board"></div>${pane}</div></div>`);
+</script></body></html>

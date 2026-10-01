@@ -1,0 +1,67 @@
+<!doctype html><html><head><meta charset="utf-8"><title>TonePush · Footswitches and controllers</title>
+<link rel="stylesheet" href="assets/app.css"></head><body>
+<script src="assets/icons.js"></script><script src="assets/data.js"></script><script src="assets/kit.js"></script>
+<script>
+TP.setup();
+const { I, G } = TP;
+const presets = D.hxPresets().slice(0, 22);
+presets[1].sel = true; presets[1].dirty = true;
+const side = TP.sidebar({
+  device: { name: 'HX Stomp', status: 'Connected · 3.80', online: true }, nav: 'edit', listAside: '42 of 126', presets,
+  foot: `<span class="ok row">${I('shield-check', 's14')}</span><span class="grow ell">Backed up at 14:02</span><span class="iconbtn sm">${I('settings', 's14')}</span>`,
+});
+const deck = TP.deck({
+  slot: '01B', name: 'Plexi Crunch',
+  meta: `<span class="hot"><span class="dot"></span>4 changes not saved</span><span class="sep">·</span><span>In your library as v2</span>`,
+  snaps: [{ name: 'Verse' }, { name: 'Chorus', on: true }, { name: 'Solo' }], tempo: '104.0', undo: true, dirty: true,
+});
+// FS2 is selected: the blocks it reaches light up in its colour.
+const chain = D.hxChain();
+chain.items[2].b.sel = false;
+chain.items[2].b.hl = true; chain.items[2].b.hlc = 'color-mix(in srgb, var(--led-green) 55%, transparent)';
+chain.items[4].b.hl = true; chain.items[4].b.hlc = 'color-mix(in srgb, var(--led-green) 55%, transparent)';
+
+const sw = D.hxSwitches();
+sw[1].sel = true;
+sw[0].t1 = 'FS1 · auto colour'; sw[1].t1 = 'FS2 · green'; sw[2].t1 = 'FS3 · turquoise'; sw[3].t1 = 'EXP 1 · heel to toe';
+sw[4].emptyText = 'Right-click a knob and choose EXP 2';
+const midi = { kind: 'midi', t1: 'MIDI · channel 1', t2: 'CC 4', carries: [{ cat: 'reverb', block: 'Plateaux', what: 'Mix', range: '0 → 60%' }], mode: 'CC' };
+const board = `<div class="swlist">${[...sw, midi].map(TP.swRow).join('')}</div>`;
+
+const leds = [['auto', 'Auto'], ['white'], ['red'], ['dkorange'], ['ltorange'], ['yellow'], ['green'], ['turquoise'], ['blue'], ['violet'], ['pink'], ['off']];
+const swatches = leds.map(([k]) => `<span class="swatch ${k === 'auto' ? 'auto' : ''} ${k === 'green' ? 'on' : ''}" style="--led:${TP.LED[k] || 'transparent'}" title="${k}"></span>`).join('');
+
+const range = (lo, hi, a, b) => `<div class="range cat-amp"><span class="tr0"></span><span class="tr1" style="left:${lo * 100}%;right:${(1 - hi) * 100}%"></span><span class="th" style="left:${lo * 100}%"></span><span class="th" style="left:${hi * 100}%"></span></div>`;
+const editor = `<div class="card" style="width:388px;flex:none;display:flex;flex-direction:column">
+  <div class="cardh"><span class="led" style="--led:var(--led-green);width:9px;height:9px"></span><span class="t">FS2</span><span class="muted" style="font-size:12px">what your foot does</span><span class="grow"></span><span class="iconbtn sm">${I('ellipsis', 's14')}</span></div>
+  <div style="padding:10px 16px 12px;display:flex;flex-direction:column;gap:6px">
+    <div class="formrow"><span class="k">Name</span><div class="field" style="height:28px"><span class="v">LEAD</span><span class="grow"></span><span class="faint" style="font-size:11.5px">on the pedal's screen</span></div></div>
+    <div class="formrow" style="align-items:start;padding-top:6px"><span class="k" style="padding-top:2px">Light</span><div class="swatches">${swatches}</div></div>
+    <div class="formrow"><span class="k">Press</span><div class="seg" style="width:fit-content"><span class="s on">Toggles</span><span class="s">Holds</span></div></div>
+    <div class="formrow" style="align-items:start"><span class="k" style="padding-top:8px">Carries</span><div style="display:flex;flex-direction:column;gap:8px">
+      <div class="row cat-delay" style="gap:8px;font-size:12.5px;height:26px"><span style="color:var(--cat);display:flex">${G('delay', 's14')}</span><b style="font-weight:600">Transistor Tape</b><span class="muted">turns on</span><span class="grow"></span><span class="iconbtn sm">${I('x', 's13')}</span></div>
+      <div class="col cat-amp" style="gap:2px"><div class="row" style="gap:8px;font-size:12.5px;height:24px"><span style="color:var(--cat);display:flex">${G('amp', 's14')}</span><b style="font-weight:600">US Double Nrm</b><span class="muted">Ch Vol</span><span class="grow"></span><span class="iconbtn sm">${I('x', 's13')}</span></div>
+        <div class="row" style="gap:14px;font-size:12px;padding-left:22px">${TP.knobSvg(0.75, 30, null)}<div><div class="num" style="font-weight:600">7.5</div><div class="muted" style="font-size:11px">switch off</div></div>${TP.knobSvg(0.86, 30, null)}<div><div class="num" style="font-weight:600">8.6</div><div class="muted" style="font-size:11px">switch on</div></div></div></div>
+      <span class="lnk" style="color:var(--accent);font-size:12.5px;font-weight:500;display:inline-flex;gap:6px;align-items:center">${I('plus', 's14')}Add: click a block or a knob</span>
+    </div></div>
+  </div></div>`;
+
+const pane = `<section class="pane"><div class="bhd" style="padding-bottom:12px"><div><div class="bname">Footswitches</div><div class="bmeta">HX Stomp · Stomp mode · FS4 and FS5 appear when external switches are connected</div></div>
+  <div class="seg lens"><span class="s">Block</span><span class="s on">Footswitches</span><span class="s">Snapshots</span></div></div>
+  <div class="pbody" style="gap:14px;padding-bottom:16px"><div class="grow" style="min-width:0">${board}</div>${editor}</div></section>`;
+
+const floor = TP.floor({ items: [
+  { t1: 'FS1 · Toggles', t2: 'Minotaur', led: 'ltorange', on: true },
+  { t1: 'FS2 · Toggles', t2: 'Lead · 2 controls', led: 'green', on: false, cls: 'sel' },
+  { t1: 'FS3 · Toggles', t2: 'Plateaux', led: 'turquoise', on: true },
+  { kind: 'exp', t1: 'EXP 1 · auto on', t2: 'Teardrop 310 Position', cat: 'wah' },
+  { kind: 'empty', t1: 'EXP 2', t2: 'Nothing assigned' },
+], right: `<span class="chip ghost">${I('cable', 's12')}MIDI · 1 CC</span>` });
+
+TP.later(() => {
+  TP.renderChain(document.getElementById('board'), Object.assign(chain, {
+    head: `<span><b>2</b> blocks on FS2</span><span class="grow"></span>${TP.legend()}`, notch: false,
+  }));
+});
+TP.mount(`<div class="win">${side}<div class="main">${deck}<div class="board" id="board"></div>${pane}</div></div>`);
+</script></body></html>
