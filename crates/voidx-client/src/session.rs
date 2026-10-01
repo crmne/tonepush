@@ -66,11 +66,16 @@ impl<L: Link> Session<L> {
                 let mut unsolicited = Vec::new();
                 for record in frame.into_records() {
                     let belongs = if browse {
-                        record.subject() == expected
+                        // A browse answers with node descriptions, which
+                        // always carry a type. Meters and front-panel changes
+                        // under the same branch carry only a value, and must
+                        // not be mistaken for the reply.
+                        (record.subject() == expected
                             || record
                                 .subject()
                                 .strip_prefix(&expected)
-                                .is_some_and(|tail| tail.starts_with('\\'))
+                                .is_some_and(|tail| tail.starts_with('\\')))
+                            && record.value().get("type").is_some()
                     } else {
                         record.subject() == expected
                     };
@@ -290,6 +295,22 @@ mod tests {
             .request(Command::Browse(NodePath::new("root\\app").unwrap()))
             .unwrap();
         assert_eq!(frame.records().len(), 2);
+    }
+
+    #[test]
+    fn a_browse_is_not_answered_by_a_meter_under_its_branch() {
+        let input = b"root\\sys\\_meters\\in0:{\"value\":-12}\0root\\app:{\"type\":\"item\"}\r\nroot\\app\\amp:{\"type\":\"item\"}\0";
+        let link = ScriptedLink {
+            input: Cursor::new(input.to_vec()),
+            output: vec![],
+        };
+        let mut session = Session::new(link, Duration::from_secs(1));
+        let frame = session
+            .request(Command::Browse(NodePath::new("root").unwrap()))
+            .unwrap();
+        assert_eq!(frame.records().len(), 2);
+        assert_eq!(frame.records()[0].subject(), "root\\app");
+        assert_eq!(session.drain_notifications().len(), 1);
     }
 
     #[test]
