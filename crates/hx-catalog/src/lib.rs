@@ -519,6 +519,9 @@ impl Catalog {
     /// becomes `0.5`, `"Limit"` on a switch becomes `1.0`. Displayed units in,
     /// native units out - so nothing above this line has to know about scales.
     pub fn parse(&self, param: &Param, text: &str) -> Option<f32> {
+        // Words are trimmed like numbers: " on" and "Limit " are what a
+        // person typed, not something else.
+        let text = text.trim();
         let entry = param.display.as_deref().and_then(|k| self.displays.get(k));
 
         if let Some(index) = entry.and_then(|d| d.label_index(text, self)) {
@@ -533,7 +536,6 @@ impl Catalog {
             return param.accepts(value).then_some(value);
         }
 
-        let text = text.trim();
         let number_end = text
             .char_indices()
             .find(|(_, c)| !matches!(c, '0'..='9' | '.' | '-' | '+' | 'e' | 'E'))
@@ -763,6 +765,44 @@ pub(crate) mod tests {
         assert_eq!(catalog.parse(&continuous, "5.0"), Some(0.5));
         assert_eq!(catalog.choices(&menu).unwrap(), ["Zero", "One"]);
         assert_eq!(catalog.parse(&menu, "One"), Some(1.0));
+    }
+
+    #[test]
+    fn labels_ignore_surrounding_space_and_only_name_their_own_indexes() {
+        let displays: HashMap<String, Display> =
+            serde_json::from_str(r#"{ "menu": { "format": ["Compress", "Limit"] } }"#).unwrap();
+        let catalog = Catalog {
+            models: HashMap::new(),
+            categories: Vec::new(),
+            displays,
+            symbols: Vec::new(),
+            resources: PathBuf::new(),
+        };
+        let menu = Param {
+            id: "Type".to_owned(),
+            name: "Type".to_owned(),
+            kind: Kind::Switch,
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            display: Some("menu".to_owned()),
+        };
+        let bare = Param {
+            display: None,
+            ..menu.clone()
+        };
+
+        assert_eq!(catalog.parse(&menu, "Limit "), Some(1.0));
+        assert_eq!(catalog.parse(&menu, "  compress"), Some(0.0));
+        assert_eq!(catalog.parse(&bare, " on"), Some(1.0));
+        assert_eq!(catalog.parse(&bare, "off\n"), Some(0.0));
+
+        // An index no label has is shown as a number, never as the first
+        // label: below the list and NaN as much as past its end.
+        assert_eq!(catalog.format(&menu, 1.0), "Limit");
+        assert_eq!(catalog.format(&menu, 2.0), "2");
+        assert_eq!(catalog.format(&menu, -1.0), "-1");
+        assert_eq!(catalog.format(&menu, f32::NAN), "NaN");
     }
 
     #[test]

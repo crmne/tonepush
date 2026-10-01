@@ -79,8 +79,12 @@ impl Display {
         let scaled = value * display.scale.unwrap_or(1.0) + display.offset.unwrap_or(0.0);
 
         match &display.format {
-            Some(Pattern::Labels(labels)) => labels
-                .get(scaled.round().max(0.0) as usize)
+            // Only an index a label has picks one. Clamping a negative or
+            // NaN value to zero would show the first label for a value that
+            // is not it.
+            Some(Pattern::Labels(labels)) => Some(scaled.round())
+                .filter(|index| *index >= 0.0)
+                .and_then(|index| labels.get(index as usize))
                 .cloned()
                 .unwrap_or_else(|| trim(scaled)),
             Some(Pattern::Ranges(ranges)) => ranges
