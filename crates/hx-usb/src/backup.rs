@@ -140,12 +140,21 @@ impl StagingBundle {
 
     fn commit(mut self, target: &Path) -> Result<()> {
         let previous = previous_bundle(target)?;
-        let had_previous = target.exists();
-        if had_previous {
+        // Only a backup, or an empty directory, is ever moved aside and then
+        // deleted. Anything else at the target is somebody's files: `back-up
+        // ~/Documents` must refuse, not replace the folder with a bundle.
+        let replacing = replaceable(target)?;
+        if replacing.is_some() && previous.exists() {
+            return Err(Error::Protocol(format!(
+                "{} is in the way of replacing the backup; move it somewhere else first",
+                previous.display()
+            )));
+        }
+        if replacing.is_some() {
             std::fs::rename(target, &previous).map_err(io("putting the old bundle aside"))?;
         }
         if let Err(error) = std::fs::rename(&self.path, target) {
-            let rollback = had_previous.then(|| std::fs::rename(&previous, target));
+            let rollback = replacing.map(|_| std::fs::rename(&previous, target));
             let detail = match rollback {
                 Some(Err(rollback)) => {
                     format!("; restoring the old bundle also failed: {rollback}")
@@ -159,11 +168,67 @@ impl StagingBundle {
         self.committed = true;
         // The new target is complete. Failure to reclaim the old directory is
         // harmless; recovery removes it on the next bundle operation.
-        if had_previous {
-            let _ = std::fs::remove_dir_all(previous);
+        match replacing {
+            Some(Existing::Bundle) => {
+                let _ = std::fs::remove_dir_all(previous);
+            }
+            // Not `remove_dir_all`: if anything appeared in it meanwhile, it
+            // stays where it is.
+            Some(Existing::Empty) => {
+                let _ = std::fs::remove_dir(previous);
+            }
+            None => {}
         }
         Ok(())
     }
+}
+
+/// What already sits where a bundle is about to be published.
+#[derive(Clone, Copy)]
+enum Existing {
+    Bundle,
+    Empty,
+}
+
+/// Whether a bundle may be published at `target`, and what it would replace.
+///
+/// `None` is a free path. A directory that is neither a bundle nor empty is
+/// refused, because replacing it would delete whatever it holds.
+fn replaceable(target: &Path) -> Result<Option<Existing>> {
+    match std::fs::metadata(target) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io("checking the backup directory")(error)),
+        Ok(meta) if !meta.is_dir() => Err(Error::Protocol(format!(
+            "{} is not a directory, so it cannot hold a backup",
+            target.display()
+        ))),
+        Ok(_) if is_bundle(target) => Ok(Some(Existing::Bundle)),
+        Ok(_) => {
+            let mut entries =
+                std::fs::read_dir(target).map_err(io("checking the backup directory"))?;
+            if entries.next().is_none() {
+                Ok(Some(Existing::Empty))
+            } else {
+                Err(Error::Protocol(format!(
+                    "{} already exists and is not a TonePush backup; \
+                     choose a new or empty directory, or an existing backup to replace",
+                    target.display()
+                )))
+            }
+        }
+    }
+}
+
+/// Whether a directory is a bundle: it has a manifest that reads as one.
+///
+/// Parsing it rather than only checking the name is deliberate. Plenty of
+/// unrelated folders hold a `manifest.json`, and this decides what may be
+/// deleted.
+fn is_bundle(dir: &Path) -> bool {
+    std::fs::read(dir.join("manifest.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+        .is_some()
 }
 
 impl Drop for StagingBundle {
@@ -193,14 +258,15 @@ fn previous_bundle(target: &Path) -> Result<PathBuf> {
 /// Finish or clean up a swap interrupted by abrupt process termination.
 fn recover_bundle(target: &Path) -> Result<()> {
     let previous = previous_bundle(target)?;
-    match (target.exists(), previous.exists()) {
-        (false, true) => {
-            std::fs::rename(previous, target).map_err(io("recovering the previous backup"))?;
-        }
-        (true, true) => {
-            std::fs::remove_dir_all(previous).map_err(io("cleaning up the previous backup"))?;
-        }
-        _ => {}
+    // A `.previous` sibling that is not a bundle was not left by a swap: it is
+    // someone's own directory that happens to share the name, and stays put.
+    if !is_bundle(&previous) {
+        return Ok(());
+    }
+    if target.exists() {
+        std::fs::remove_dir_all(previous).map_err(io("cleaning up the previous backup"))?;
+    } else {
+        std::fs::rename(previous, target).map_err(io("recovering the previous backup"))?;
     }
     Ok(())
 }
@@ -996,7 +1062,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tonepush-snap-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bundle.hxbundle/presets")).unwrap();
-        std::fs::write(dir.join("bundle.hxbundle/manifest.json"), b"{}").unwrap();
+        std::fs::write(
+            dir.join("bundle.hxbundle/manifest.json"),
+            serde_json::to_vec(&manifest()).unwrap(),
+        )
+        .unwrap();
         std::fs::write(dir.join("bundle.hxbundle/presets/000 One.hxpreset"), b"one").unwrap();
         dir
     }
@@ -1096,6 +1166,83 @@ mod tests {
             b"one"
         );
         assert!(!previous.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn staged(target: &Path) -> StagingBundle {
+        let staging = StagingBundle::new(target).unwrap();
+        std::fs::write(
+            staging.path.join("manifest.json"),
+            serde_json::to_vec(&manifest()).unwrap(),
+        )
+        .unwrap();
+        staging
+    }
+
+    /// `tonepush back-up ~/Documents` once replaced Documents with a bundle
+    /// and deleted what it held. A directory that is not a backup is refused.
+    #[test]
+    fn a_backup_never_replaces_a_directory_that_is_not_one() {
+        let root = scratch("not-a-bundle");
+        let documents = root.join("Documents");
+        std::fs::create_dir_all(&documents).unwrap();
+        std::fs::write(documents.join("thesis.txt"), b"years of work").unwrap();
+        // A manifest that is not ours does not make it a backup either.
+        std::fs::write(documents.join("manifest.json"), b"{\"name\": \"app\"}").unwrap();
+
+        let staging = staged(&documents);
+        let staging_path = staging.path.clone();
+        let error = staging.commit(&documents).unwrap_err().to_string();
+        assert!(error.contains("not a TonePush backup"), "{error}");
+        assert_eq!(
+            std::fs::read(documents.join("thesis.txt")).unwrap(),
+            b"years of work"
+        );
+        assert!(!previous_bundle(&documents).unwrap().exists());
+        assert!(!staging_path.exists(), "the staged copy is cleaned up");
+
+        // A plain file is refused too.
+        let file = root.join("notes.txt");
+        std::fs::write(&file, b"notes").unwrap();
+        assert!(staged(&file).commit(&file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"notes");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_backup_may_fill_an_empty_directory() {
+        let root = scratch("empty-target");
+        let target = root.join("fresh");
+        std::fs::create_dir_all(&target).unwrap();
+        staged(&target).commit(&target).unwrap();
+        assert!(exists(&target));
+        assert!(!previous_bundle(&target).unwrap().exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Recovery only ever touches a `.previous` that is itself a bundle.
+    #[test]
+    fn recovery_leaves_an_unrelated_previous_directory_alone() {
+        let root = scratch("unrelated-previous");
+        let bundle = root.join("bundle.hxbundle");
+        let previous = previous_bundle(&bundle).unwrap();
+        std::fs::create_dir_all(&previous).unwrap();
+        std::fs::write(previous.join("keep.txt"), b"mine").unwrap();
+
+        // Beside a live bundle: not cleaned up as a stale generation.
+        assert!(exists(&bundle));
+        assert_eq!(std::fs::read(previous.join("keep.txt")).unwrap(), b"mine");
+        // And it blocks replacing the bundle rather than being overwritten.
+        let error = staged(&bundle).commit(&bundle).unwrap_err().to_string();
+        assert!(error.contains("in the way"), "{error}");
+        assert_eq!(std::fs::read(previous.join("keep.txt")).unwrap(), b"mine");
+        assert!(bundle.join("presets/000 One.hxpreset").is_file());
+
+        // With no live bundle: not promoted into its place either.
+        std::fs::remove_dir_all(&bundle).unwrap();
+        assert!(!exists(&bundle));
+        assert!(!bundle.exists());
+        assert_eq!(std::fs::read(previous.join("keep.txt")).unwrap(), b"mine");
         let _ = std::fs::remove_dir_all(root);
     }
 

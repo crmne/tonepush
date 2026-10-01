@@ -43,6 +43,16 @@ of that, **Back up…** and **Restore…** on the preset list do it on demand.
 So the copy on disk is never older than the last thing you did, and nothing
 ever interrupts playing.
 
+## Where a bundle may go [built]
+
+`tonepush back-up DIR` (and the editor's **Back up…**) writes the bundle as
+`DIR` itself, built beside it and swapped in whole. `DIR` may be new, empty, or
+an earlier TonePush bundle, which is replaced. Anything else is refused: a
+folder of your own files is never moved or deleted to make room for a backup.
+The old bundle sits briefly in `DIR.previous` during the swap; a `DIR.previous`
+that is not a bundle is left alone, and a backup that would need its name stops
+and says so.
+
 ## The `.hxb` container (AF6L) - decoded
 
 ```
