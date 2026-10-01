@@ -32,6 +32,21 @@ say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m warning:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[31m error:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Remove a command this script installed, and only that. What it installs is a
+# plain file; a symlink of the same name is a package manager's (Homebrew links
+# /usr/local/bin/tonepush into its Cellar) and is that manager's to remove.
+remove_bin() {
+    local path="$1" note="${2:-}"
+    if [ -L "$path" ]; then
+        warn "left $path: it links to $(readlink "$path"), which this script did not install"
+    elif [ -f "$path" ]; then
+        rm -f "$path"
+        say "removed $path$note"
+        return 0
+    fi
+    return 1
+}
+
 bin_dir() {
     for d in "${BIN_DIRS[@]}"; do
         case ":$PATH:" in *":$d:"*) [ -d "$d" ] && [ -w "$d" ] && { echo "$d"; return; };; esac
@@ -57,7 +72,7 @@ retire_former_name() {
     local dir found=0
     for dir in "${BIN_DIRS[@]}"; do
         for bin in "$FORMER_SLUG" "$FORMER_SLUG-gui"; do
-            [ -f "$dir/$bin" ] && { rm -f "$dir/$bin"; say "removed $dir/$bin (the old name)"; found=1; }
+            remove_bin "$dir/$bin" " (the old name)" && found=1
         done
     done
     [ -d "$MAC_APPS/$FORMER_NAME.app" ] && {
@@ -80,7 +95,7 @@ uninstall() {
     local dir
     for dir in "${BIN_DIRS[@]}"; do
         for bin in tonepush tonepush-gui; do
-            [ -f "$dir/$bin" ] && { rm -f "$dir/$bin"; say "removed $dir/$bin"; }
+            remove_bin "$dir/$bin" || true
         done
     done
     [ -d "$MAC_APPS/$APP_NAME.app" ] && {
