@@ -77,7 +77,7 @@ pub(crate) fn backup_section(
     ui.label(
         egui::RichText::new("BACK UP & RESTORE")
             .small()
-            .color(theme::DIM),
+            .color(theme::muted()),
     );
     ui.add_space(4.0);
     let mut actions = BackupActions::default();
@@ -123,7 +123,7 @@ pub(crate) fn fixed_signal_block(
         art.as_ref(),
         selected,
         enabled,
-        category_accent(category),
+        theme::category_colour(category),
     )
 }
 
@@ -136,7 +136,7 @@ pub(crate) fn fixed_endpoint(ui: &mut Ui, label: &str, selected: bool) -> egui::
         art.as_ref(),
         selected,
         true,
-        category_accent(label),
+        theme::category_colour(label),
     )
 }
 
@@ -145,7 +145,7 @@ pub(crate) fn fixed_endpoint(ui: &mut Ui, label: &str, selected: bool) -> egui::
 pub(crate) fn preset_dirty_marker(ui: &mut Ui, dirty: bool) {
     let (dot, _) = ui.allocate_exact_size(egui::Vec2::new(10.0, 14.0), egui::Sense::hover());
     if dirty {
-        ui.painter().circle_filled(dot.center(), 4.0, theme::DIRTY);
+        ui.painter().circle_filled(dot.center(), 4.0, theme::hot());
     }
 }
 
@@ -161,7 +161,7 @@ pub(crate) fn preset_title(
     ui.label(
         egui::RichText::new(format!("{slot}  "))
             .size(16.0)
-            .color(theme::DIM),
+            .color(theme::muted()),
     );
 
     if let Some(draft) = renaming {
@@ -187,7 +187,7 @@ pub(crate) fn preset_title(
             rename_enabled,
             egui::Label::new(egui::RichText::new(name).font(theme::semibold(16.0)).color(
                 if dirty {
-                    theme::ACCENT
+                    theme::accent()
                 } else {
                     ui.visuals().strong_text_color()
                 },
@@ -326,7 +326,7 @@ pub(crate) fn tempo_control(
                 egui::Label::new(
                     egui::RichText::new(format!("{tempo:.1} BPM"))
                         .monospace()
-                        .color(theme::ACCENT),
+                        .color(theme::accent()),
                 )
                 .sense(egui::Sense::click()),
             );
@@ -348,21 +348,6 @@ pub(crate) fn control_grid(ui: &Ui, count: usize) -> (usize, f32) {
         .min(count.max(1));
     let indent = ((ui.available_width() - columns as f32 * pitch) / 2.0).max(0.0);
     (columns, indent)
-}
-
-fn category_accent(category: &str) -> egui::Color32 {
-    match category {
-        "Distortion" => egui::Color32::from_rgb(0xd8, 0x9a, 0x35),
-        "Dynamics" | "EQ" => egui::Color32::from_rgb(0xd3, 0xc3, 0x43),
-        "Amp" | "Amp+Cab" | "Preamp" => egui::Color32::from_rgb(0xd0, 0x55, 0x4d),
-        "Cab" | "IR" => egui::Color32::from_rgb(0x9b, 0x72, 0xc7),
-        "Modulation" => egui::Color32::from_rgb(0x52, 0xa9, 0xb8),
-        "Delay" => egui::Color32::from_rgb(0x54, 0xaa, 0x68),
-        "Reverb" => egui::Color32::from_rgb(0x70, 0x83, 0xd0),
-        "Pitch/Synth" | "Filter" | "Wah" => egui::Color32::from_rgb(0xb0, 0x67, 0xb7),
-        "Volume/Pan" | "Input" | "Output" => theme::DIM,
-        _ => theme::ACCENT,
-    }
 }
 
 pub(crate) fn parameter_row(

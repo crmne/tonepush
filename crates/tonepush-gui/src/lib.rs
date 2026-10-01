@@ -999,9 +999,8 @@ impl App {
     /// Styling is applied once here rather than per frame: it clones and
     /// rewrites the whole `Style`, which is pure waste sixty times a second.
     pub fn new(ctx: &egui::Context, to_device: Sender<Cmd>, from_device: Receiver<Evt>) -> Self {
-        theme::fonts(ctx);
-        theme::register_icons(ctx);
-        theme::apply(ctx);
+        let config = config::Config::load();
+        theme::install(ctx, config.appearance);
         let mut app = App {
             to_device,
             from_device,
@@ -1055,7 +1054,7 @@ impl App {
             irs: Vec::new(),
             setlists: Vec::new(),
             setlist: 0,
-            config: config::Config::load(),
+            config,
             show_favorites_only: false,
             preview: None,
             display_only: false,
@@ -1637,6 +1636,8 @@ impl App {
     /// design screenshots can draw the editor without a native window.
     pub(crate) fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // Every token this frame reads the theme egui resolved for it.
+        theme::follow(&ctx);
 
         let pro_active = self.pro.claims_ui() && self.connection != Connection::Online;
         if pro_active {
@@ -1737,13 +1738,31 @@ impl App {
         if !self.closing {
             return;
         }
-        theme::modal("Closing").show(ctx, |ui| {
-            ui.set_max_width(320.0);
-            ui.label("TonePush is finishing with the pedal and closes when it is done.");
-            if let Some((what, progress)) = self.working.clone() {
-                ui.add_space(6.0);
-                processor::operation_progress(ui, &what, progress);
-            }
+        // Nothing to answer: it closes by itself, so Escape does nothing here.
+        let working = self.working.clone();
+        let _ = theme::dialog(ctx, "closing", 400.0, |ui| {
+            theme::dialog_header(
+                ui,
+                "Finishing with the pedal",
+                Some("TonePush closes as soon as the pedal is done."),
+            );
+            theme::dialog_body(ui, |ui| match &working {
+                Some((what, progress)) => {
+                    theme::label(ui, what, theme::regular(12.5), theme::muted());
+                    theme::progress(ui, *progress, 6.0, None);
+                }
+                None => {
+                    ui.horizontal(|ui| {
+                        theme::spinner(ui);
+                        theme::label(
+                            ui,
+                            "Waiting for the pedal",
+                            theme::regular(12.5),
+                            theme::muted(),
+                        );
+                    });
+                }
+            });
         });
     }
 
@@ -1821,28 +1840,47 @@ impl App {
             .filter(|n| !n.is_empty())
             .cloned()
             .unwrap_or_else(|| "this preset".to_owned());
+        let slot = self.active_slot_label(index);
         let mut decided = None;
-        theme::modal("Remove preset").show(ctx, |ui| {
-            ui.set_max_width(320.0);
-            ui.label(format!(
-                "Empty {} - “{name}” - back to a blank preset?",
-                self.active_slot_label(index)
-            ));
-            ui.label(
-                RichText::new("This writes the pedal's flash. Undo does not reach it.")
-                    .small()
-                    .color(theme::DIM),
+        let (_, close) = theme::dialog(ctx, "confirm-clear", 440.0, |ui| {
+            theme::dialog_header(
+                ui,
+                &format!("Empty {slot}?"),
+                Some(&format!(
+                    "“{name}” goes from the pedal and the slot holds a blank preset."
+                )),
             );
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
-                    decided = Some(false);
-                }
-                if ui.button("Remove").clicked() {
-                    decided = Some(true);
-                }
+            theme::dialog_body(ui, |ui| {
+                theme::outcomes(
+                    ui,
+                    &[theme::Outcome {
+                        icon: theme::Icon::Remove,
+                        count: "1".into(),
+                        sentence: format!("slot emptied: {slot} {name}"),
+                        quiet: false,
+                    }],
+                );
             });
+            theme::dialog_footer(
+                ui,
+                "This writes the pedal's memory. Undo does not reach it.",
+                |ui| {
+                    if theme::Button::new("Empty the slot")
+                        .danger()
+                        .show(ui)
+                        .clicked()
+                    {
+                        decided = Some(true);
+                    }
+                    if theme::Button::new("Cancel").show(ui).clicked() {
+                        decided = Some(false);
+                    }
+                },
+            );
         });
+        if close && decided.is_none() {
+            decided = Some(false);
+        }
         match decided {
             Some(true) => {
                 self.confirm_clear = None;
@@ -1859,7 +1897,7 @@ impl App {
             ui.add_space(8.0);
             let colour = match self.connection {
                 Connection::Online => egui::Color32::from_rgb(0x4c, 0xc0, 0x60),
-                _ => theme::DIM,
+                _ => theme::muted(),
             };
             theme::status_dot(ui, colour);
 
@@ -1897,7 +1935,9 @@ impl App {
             if !self.firmware.is_empty() {
                 // Same size as the device name, so the two share a
                 // baseline instead of the smaller one riding high.
-                ui.label(RichText::new(format!("firmware {}", self.firmware)).color(theme::DIM));
+                ui.label(
+                    RichText::new(format!("firmware {}", self.firmware)).color(theme::muted()),
+                );
             }
             // The other two things that belong to the pedal rather than
             // to a preset, each behind its own button rather than
@@ -1941,7 +1981,7 @@ impl App {
                     ui.label(
                         RichText::new("Looking for a connected pedal…")
                             .small()
-                            .color(theme::DIM),
+                            .color(theme::muted()),
                     );
                 }
                 Connection::Offline => {
@@ -1973,7 +2013,7 @@ impl App {
                 // separator. Silence is the healthy state.
                 if !self.status.is_empty() {
                     ui.separator();
-                    ui.label(RichText::new(&self.status).small().color(theme::DIM));
+                    ui.label(RichText::new(&self.status).small().color(theme::muted()));
                 }
             });
         });
@@ -2308,25 +2348,35 @@ impl App {
             format!("Loading {going_to} discards them.")
         };
         let mut answer = None;
-        theme::modal("Unsaved changes").show(ctx, |ui| {
-            ui.set_max_width(340.0);
-            ui.label(format!(
-                "“{}” has changes you have not saved. {consequence}",
-                self.preset_name
-            ));
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
-                    answer = Some(SwitchAnswer::Cancel);
+        let (_, close) = theme::dialog(ctx, "confirm-switch", 460.0, |ui| {
+            theme::dialog_header(
+                ui,
+                &format!("“{}” has changes you have not saved", self.preset_name),
+                Some(&consequence),
+            );
+            theme::dialog_footer(ui, "Save writes them into the preset first.", |ui| {
+                if theme::Button::new("Save, then load")
+                    .primary()
+                    .show(ui)
+                    .clicked()
+                {
+                    answer = Some(SwitchAnswer::Save);
                 }
-                if ui.button("Discard and load").clicked() {
+                if theme::Button::new("Discard and load")
+                    .tone(theme::Tone::DangerLine)
+                    .show(ui)
+                    .clicked()
+                {
                     answer = Some(SwitchAnswer::Discard);
                 }
-                if ui.button("Save, then load").clicked() {
-                    answer = Some(SwitchAnswer::Save);
+                if theme::Button::new("Cancel").show(ui).clicked() {
+                    answer = Some(SwitchAnswer::Cancel);
                 }
             });
         });
+        if close && answer.is_none() {
+            answer = Some(SwitchAnswer::Cancel);
+        }
         if let Some(answer) = answer {
             self.answer_switch(answer);
         }
@@ -2467,9 +2517,9 @@ impl App {
                 _ => {
                     let active = i == self.current_snapshot;
                     let text = if active {
-                        RichText::new(name).color(theme::ACCENT).strong()
+                        RichText::new(name).color(theme::accent()).strong()
                     } else {
-                        RichText::new(name).color(theme::DIM)
+                        RichText::new(name).color(theme::muted())
                     };
                     let button = ui.selectable_label(active, text);
                     if button.clicked() {
@@ -2509,15 +2559,15 @@ impl App {
                 // SETLIST, not PRESETS: what the pedal holds is a setlist,
                 // and it is the same word the device itself uses for a bank
                 // of 126. Calling the panel Presets was always a half-truth.
-                ui.label(RichText::new("SETLIST").small().color(theme::DIM))
+                ui.label(RichText::new("SETLIST").small().color(theme::muted()))
                     .on_hover_text("Use ↑/↓ to move through presets when no field is active");
                 // The same drawn star as the rows use. As a small text
                 // glyph it sat on its own baseline, a few pixels above the
                 // word beside it.
                 let (mark, colour) = if self.show_favorites_only {
-                    (theme::Icon::StarOn, theme::ACCENT)
+                    (theme::Icon::StarOn, theme::accent())
                 } else {
-                    (theme::Icon::Star, theme::DIM)
+                    (theme::Icon::Star, theme::muted())
                 };
                 if theme::small_icon_button(ui, mark, Some(colour))
                     .on_hover_text("Show favourites only")
@@ -2550,7 +2600,7 @@ impl App {
                     ui.label(
                         RichText::new(format!("Choose a slot for {}", sending.name))
                             .small()
-                            .color(theme::ACCENT),
+                            .color(theme::accent()),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Cancel").clicked() {
@@ -2608,9 +2658,9 @@ impl App {
                             // pointer. As a text glyph it did not read as
                             // something you could press at all.
                             let (mark, colour) = if fav {
-                                (theme::Icon::StarOn, theme::ACCENT)
+                                (theme::Icon::StarOn, theme::accent())
                             } else {
-                                (theme::Icon::Star, theme::DIM)
+                                (theme::Icon::Star, theme::muted())
                             };
                             if theme::small_icon_button(ui, mark, Some(colour))
                                 .on_hover_text(if fav { "Remove favourite" } else { "Favourite" })
@@ -2673,9 +2723,9 @@ impl App {
                                         "{}  empty",
                                         self.active_slot_label(index)
                                     ))
-                                    .color(theme::ACCENT)
+                                    .color(theme::accent())
                                 } else {
-                                    RichText::new(&label).color(theme::DIM)
+                                    RichText::new(&label).color(theme::muted())
                                 };
                                 let target = ui.add(
                                     egui::Button::new(())
@@ -2710,7 +2760,7 @@ impl App {
                                 }
                             } else {
                                 let text = if selected {
-                                    RichText::new(&label).color(theme::ACCENT).strong()
+                                    RichText::new(&label).color(theme::accent()).strong()
                                 } else {
                                     RichText::new(&label)
                                 };
@@ -2781,7 +2831,7 @@ impl App {
                         ui.label(
                             RichText::new("No favorites yet. Tap a star to add one.")
                                 .small()
-                                .color(theme::DIM),
+                                .color(theme::muted()),
                         );
                     }
                     if let Some(index) = toggle {
@@ -2878,52 +2928,60 @@ impl App {
         let holder = clash.holder.clone();
         let hash = clash.hash.clone();
         let mut decided = None;
-        theme::modal("That name is taken").show(ctx, |ui| {
-            ui.set_max_width(380.0);
-            ui.label(format!(
-                "Your library already has a different tone called “{holder}”."
-            ));
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(
-                    "Save new version keeps both revisions under that tone. \
-                         Existing setlists continue to play the exact revision they saved.",
-                )
-                .small()
-                .color(theme::DIM),
+        let (_, close) = theme::dialog(ctx, "name-clash", 460.0, |ui| {
+            theme::dialog_header(
+                ui,
+                "That name is taken",
+                Some(&format!(
+                    "Your library already has a different tone called “{holder}”."
+                )),
             );
-            ui.add_space(8.0);
-            ui.label(RichText::new("Save as").small().color(theme::DIM));
             let free = library::name_is_free(&clash.draft, &hash);
-            ui.add(
-                egui::TextEdit::singleline(&mut clash.draft)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("a name of its own"),
-            );
-            if !free {
-                ui.label(
-                    RichText::new("that name is taken too")
-                        .small()
-                        .color(theme::ACCENT),
+            theme::dialog_body(ui, |ui| {
+                theme::label(
+                    ui,
+                    "Save new version keeps both revisions under that tone. Existing setlists \
+                     go on playing the exact revision they saved.",
+                    theme::regular(12.5),
+                    theme::muted(),
                 );
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
-                    decided = Some(Clash::Cancel);
+                ui.add_space(6.0);
+                theme::caption(ui, "Or save as");
+                ui.add(
+                    egui::TextEdit::singleline(&mut clash.draft)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("a name of its own"),
+                );
+                if !free {
+                    theme::label(
+                        ui,
+                        "That name is taken too.",
+                        theme::regular(12.0),
+                        theme::hot(),
+                    );
                 }
-                if ui.button("Save new version").clicked() {
-                    decided = Some(Clash::Override);
-                }
+            });
+            theme::dialog_footer(ui, "", |ui| {
                 let named = !clash.draft.trim().is_empty() && free;
-                if ui
-                    .add_enabled(named, egui::Button::new("Save as"))
+                if theme::Button::new("Save as")
+                    .primary()
+                    .enabled(named)
+                    .show(ui)
                     .clicked()
                 {
                     decided = Some(Clash::SaveAs(clash.draft.trim().to_owned()));
                 }
+                if theme::Button::new("Save new version").show(ui).clicked() {
+                    decided = Some(Clash::Override);
+                }
+                if theme::Button::new("Cancel").show(ui).clicked() {
+                    decided = Some(Clash::Cancel);
+                }
             });
         });
+        if close && decided.is_none() {
+            decided = Some(Clash::Cancel);
+        }
 
         let Some(decided) = decided else { return };
         let clash = self.name_clash.take().expect("checked above");
@@ -3066,33 +3124,43 @@ impl App {
             .collect();
         names.sort_by_key(|name| name.to_ascii_lowercase());
         names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-        theme::modal("Save captured setlist")
-            .show(ctx, |ui| {
-                ui.set_width(390.0);
-                ui.label(
-                    "Choose an existing name to save a new version, or type a new name to create a setlist.",
-                );
-                ui.add_space(6.0);
+        let setlists = &self.lib_setlists;
+        let (_, close) = theme::dialog(ctx, "save-setlist", 460.0, |ui| {
+            theme::dialog_header(
+                ui,
+                "Save the captured setlist",
+                Some(
+                    "Choose an existing name to save a new version, or type a new name to \
+                     start a setlist.",
+                ),
+            );
+            let mut submit = false;
+            theme::dialog_body(ui, |ui| {
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut saving.draft)
                         .desired_width(f32::INFINITY)
                         .hint_text("setlist name"),
                 );
+                submit =
+                    field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
                 if !names.is_empty() {
-                    ui.label(RichText::new("MATCHING SETLISTS").small().color(theme::DIM));
+                    ui.add_space(4.0);
+                    theme::caption(ui, "Matching setlists");
                     egui::ScrollArea::vertical()
                         .max_height(130.0)
                         .show(ui, |ui| {
                             for name in &names {
-                                let revisions = self
-                                    .lib_setlists
+                                let revisions = setlists
                                     .iter()
                                     .filter(|(_, setlist)| setlist.name.eq_ignore_ascii_case(name))
                                     .count();
                                 if ui
                                     .selectable_label(
                                         saving.draft.eq_ignore_ascii_case(name),
-                                        format!("{name}  ·  {revisions} version{}", if revisions == 1 { "" } else { "s" }),
+                                        format!(
+                                            "{name}  ·  {revisions} version{}",
+                                            if revisions == 1 { "" } else { "s" }
+                                        ),
                                     )
                                     .clicked()
                                 {
@@ -3101,26 +3169,27 @@ impl App {
                             }
                         });
                 }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        decided = Some(false);
-                    }
-                    let submit = field.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    if (ui
-                        .add_enabled(
-                            !saving.draft.trim().is_empty(),
-                            egui::Button::new("Save version"),
-                        )
-                        .clicked()
-                        || submit)
-                        && !saving.draft.trim().is_empty()
-                    {
-                        decided = Some(true);
-                    }
-                });
             });
+            theme::dialog_footer(ui, "", |ui| {
+                let named = !saving.draft.trim().is_empty();
+                if (theme::Button::new("Save version")
+                    .primary()
+                    .enabled(named)
+                    .show(ui)
+                    .clicked()
+                    || submit)
+                    && named
+                {
+                    decided = Some(true);
+                }
+                if theme::Button::new("Cancel").show(ui).clicked() {
+                    decided = Some(false);
+                }
+            });
+        });
+        if close && decided.is_none() {
+            decided = Some(false);
+        }
 
         match decided {
             Some(false) => self.setlist_save = None,
@@ -3974,7 +4043,7 @@ impl App {
 
     fn cloud_tags_rail(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.label(RichText::new("SORT").small().color(theme::DIM));
+        ui.label(RichText::new("SORT").small().color(theme::muted()));
         let before = self.cloud_order;
         egui::ComboBox::from_id_salt("cloud-order")
             .width(ui.available_width())
@@ -3999,13 +4068,13 @@ impl App {
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(6.0);
-        ui.label(RichText::new("TAGS").small().color(theme::DIM));
+        ui.label(RichText::new("TAGS").small().color(theme::muted()));
         tag_rail(ui, &mut self.cloud_tag_filter, &self.cloud_tags);
     }
 
     fn cloud_table(&mut self, ui: &mut egui::Ui) {
         if let Some(why) = &self.cloud_error {
-            ui.label(RichText::new(why).color(theme::ACCENT));
+            ui.label(RichText::new(why).color(theme::accent()));
             ui.add_space(4.0);
         }
         let filter = self.cloud_tag_filter.clone();
@@ -4177,7 +4246,7 @@ impl App {
             })
         else {
             ui.label(
-                RichText::new("Select a tone to see its published details.").color(theme::DIM),
+                RichText::new("Select a tone to see its published details.").color(theme::muted()),
             );
             return;
         };
@@ -4198,7 +4267,7 @@ impl App {
         );
         ui.heading(&entry.tone.summary.name);
         if !line.is_empty() {
-            ui.label(RichText::new(line).small().color(theme::DIM));
+            ui.label(RichText::new(line).small().color(theme::muted()));
         }
         ui.add_space(6.0);
         egui::Grid::new("cloud-fields")
@@ -4243,7 +4312,7 @@ impl App {
                             display_date(&historical.created_at)
                         ));
                         if historical.current {
-                            ui.label(RichText::new("current").small().color(theme::DIM));
+                            ui.label(RichText::new("current").small().color(theme::muted()));
                         } else {
                             if ui.small_button("Audition").clicked() {
                                 chosen_version = Some((historical.clone(), CloudAction::Audition));
@@ -4262,17 +4331,25 @@ impl App {
         }
         if !meta.description.is_empty() {
             ui.add_space(6.0);
-            ui.label(RichText::new("Song description").small().color(theme::DIM));
+            ui.label(
+                RichText::new("Song description")
+                    .small()
+                    .color(theme::muted()),
+            );
             ui.label(meta.description);
         }
         if !meta.tone_description.is_empty() {
             ui.add_space(6.0);
-            ui.label(RichText::new("Tone description").small().color(theme::DIM));
+            ui.label(
+                RichText::new("Tone description")
+                    .small()
+                    .color(theme::muted()),
+            );
             ui.label(meta.tone_description);
         }
         if !meta.tags.is_empty() {
             ui.add_space(6.0);
-            ui.label(RichText::new("Song tags").small().color(theme::DIM));
+            ui.label(RichText::new("Song tags").small().color(theme::muted()));
             ui.horizontal_wrapped(|ui| {
                 for tag in &meta.tags {
                     ui.label(format!("# {tag}"));
@@ -4319,7 +4396,7 @@ impl App {
                 .max_rect(left_rect)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
-                ui.label(RichText::new("LIBRARY").small().color(theme::DIM));
+                ui.label(RichText::new("LIBRARY").small().color(theme::muted()));
                 ui.add_space(6.0);
                 // The selector, rather than tabs on the window: this is one
                 // library with local and public views of the same Tones.
@@ -4720,7 +4797,7 @@ impl App {
     fn setlist_slots(&mut self, ui: &mut egui::Ui) {
         let Some(i) = self.lib_setlist else {
             ui.add_space(8.0);
-            ui.label(RichText::new("Choose a setlist to see what is in it.").color(theme::DIM));
+            ui.label(RichText::new("Choose a setlist to see what is in it.").color(theme::muted()));
             return;
         };
         let Some((_, setlist)) = self.lib_setlists.get(i).cloned() else {
@@ -4734,7 +4811,7 @@ impl App {
             ui.label(
                 RichText::new(format!("{} presets", setlist.filled()))
                     .small()
-                    .color(theme::DIM),
+                    .color(theme::muted()),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -4842,7 +4919,7 @@ impl App {
     fn setlist_details(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         let Some(i) = self.lib_setlist else {
-            ui.label(RichText::new("Select a setlist to edit its details.").color(theme::DIM));
+            ui.label(RichText::new("Select a setlist to edit its details.").color(theme::muted()));
             return;
         };
         if let Some((_, setlist)) = self.lib_setlists.get(i) {
@@ -4853,7 +4930,7 @@ impl App {
                     display_date(&setlist.modified_at)
                 ))
                 .small()
-                .color(theme::DIM),
+                .color(theme::muted()),
             );
             ui.add_space(4.0);
         }
@@ -4861,7 +4938,7 @@ impl App {
         // into there, the same as a tone's. What is left is the one field no
         // column could hold.
         let mut changed = false;
-        ui.label(RichText::new("Notes").small().color(theme::DIM));
+        ui.label(RichText::new("Notes").small().color(theme::muted()));
         changed |= ui
             .add(
                 egui::TextEdit::multiline(&mut self.lib_setlist_draft.description)
@@ -4948,31 +5025,73 @@ impl App {
             return;
         };
         let mut decided = None;
-        theme::modal("Put the setlist on the pedal").show(ctx, |ui| {
-            ui.set_max_width(360.0);
-            ui.label(format!(
-                "Write “{}” - {} presets - over everything on the pedal?",
-                setlist.name,
-                setlist.filled()
-            ));
-            ui.label(
-                RichText::new(
-                    "Every slot is a flash write and undo does not reach them. \
-                         Capture the pedal first if you want what is on it now.",
-                )
-                .small()
-                .color(theme::DIM),
-            );
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
-                    decided = Some(false);
-                }
-                if ui.button("Write it").clicked() {
-                    decided = Some(true);
-                }
+        let pedal = if self.device.trim().is_empty() {
+            "the pedal".to_owned()
+        } else {
+            format!("the {}", self.device.trim())
+        };
+        let filled = setlist.filled();
+        let missing = setlist
+            .slots
+            .iter()
+            .filter(|slot| !slot.is_empty() && !library::holds(&slot.hash))
+            .count();
+        let empty = setlist.slots.len() - filled;
+        let written = filled - missing;
+        let mut rows = vec![
+            theme::Outcome {
+                icon: theme::Icon::Download,
+                count: written.to_string(),
+                sentence: if written == 1 {
+                    "preset written into its slot".to_owned()
+                } else {
+                    "presets written, each into its slot".to_owned()
+                },
+                quiet: false,
+            },
+            theme::Outcome {
+                icon: theme::Icon::Remove,
+                count: empty.to_string(),
+                sentence: "slots the setlist leaves empty are emptied".to_owned(),
+                quiet: empty == 0,
+            },
+        ];
+        if missing > 0 {
+            rows.push(theme::Outcome {
+                icon: theme::Icon::CircleAlert,
+                count: missing.to_string(),
+                sentence: "tones are missing from the library; their slots are left alone"
+                    .to_owned(),
+                quiet: true,
             });
+        }
+        let (_, close) = theme::dialog(ctx, "confirm-push", 520.0, |ui| {
+            theme::dialog_header(
+                ui,
+                &format!("Put “{}” on {pedal}?", setlist.name),
+                Some(
+                    "TonePush writes every slot of the setlist, in order, over what is on the \
+                     pedal now. Undo cannot reach the pedal's memory.",
+                ),
+            );
+            theme::dialog_body(ui, |ui| theme::outcomes(ui, &rows));
+            theme::dialog_footer(
+                ui,
+                "Keep the pedal as a setlist first if you want what is on it now.",
+                |ui| {
+                    let write = format!("Write {} slots", written + empty);
+                    if theme::Button::new(&write).danger().show(ui).clicked() {
+                        decided = Some(true);
+                    }
+                    if theme::Button::new("Cancel").show(ui).clicked() {
+                        decided = Some(false);
+                    }
+                },
+            );
         });
+        if close && decided.is_none() {
+            decided = Some(false);
+        }
         match decided {
             Some(true) => {
                 self.confirm_push = None;
@@ -5023,7 +5142,7 @@ impl App {
     /// The left rail: every tag, click one to filter the table to it.
     fn library_tags_rail(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.label(RichText::new("TAGS").small().color(theme::DIM));
+        ui.label(RichText::new("TAGS").small().color(theme::muted()));
         let tags = if self.library_device_filter.is_none() {
             self.library_lookup.tags.clone()
         } else {
@@ -5309,7 +5428,7 @@ impl App {
             ui.label(
                 RichText::new(format!("code {}", signing.code))
                     .small()
-                    .color(theme::ACCENT),
+                    .color(theme::accent()),
             )
             .on_hover_text(format!(
                 "approve it at {}\nthen this signs itself in",
@@ -5736,56 +5855,49 @@ impl App {
             return;
         };
         let mut decided = None;
-        theme::modal("Delete tones").show(ctx, |ui| {
-            ui.set_max_width(360.0);
-            ui.label(if chosen.len() == 1 {
-                "Delete this tone from the library?".to_owned()
-            } else {
-                format!("Delete {} tones from the library?", chosen.len())
-            });
-            if !affected.is_empty() {
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(format!(
-                        "{} played by the {} {}, and will keep playing there.",
-                        if chosen.len() == 1 {
-                            "This tone is"
-                        } else {
-                            "Some of them are"
-                        },
-                        if affected.len() == 1 {
-                            "setlist"
-                        } else {
-                            "setlists"
-                        },
-                        affected
-                            .iter()
-                            .map(|n| format!("“{n}”"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ))
-                    .color(theme::DIM),
-                );
-            }
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new(
-                    "Nothing else playing them goes to the library's trash, \
-                         not out of existence.",
-                )
-                .small()
-                .color(theme::DIM),
-            );
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
-                    decided = Some(false);
-                }
-                if ui.button("Delete").clicked() {
-                    decided = Some(true);
-                }
-            });
+        let title = if chosen.len() == 1 {
+            "Delete this tone from the library?".to_owned()
+        } else {
+            format!("Delete {} tones from the library?", chosen.len())
+        };
+        let still_played = (!affected.is_empty()).then(|| {
+            format!(
+                "{} played by the {} {}, and will keep playing there.",
+                if chosen.len() == 1 {
+                    "It is"
+                } else {
+                    "Some of them are"
+                },
+                if affected.len() == 1 {
+                    "setlist"
+                } else {
+                    "setlists"
+                },
+                affected
+                    .iter()
+                    .map(|n| format!("“{n}”"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         });
+        let (_, close) = theme::dialog(ctx, "confirm-delete", 460.0, |ui| {
+            theme::dialog_header(ui, &title, still_played.as_deref());
+            theme::dialog_footer(
+                ui,
+                "Anything nothing else plays goes to the library's trash, not out of existence.",
+                |ui| {
+                    if theme::Button::new("Delete").danger().show(ui).clicked() {
+                        decided = Some(true);
+                    }
+                    if theme::Button::new("Cancel").show(ui).clicked() {
+                        decided = Some(false);
+                    }
+                },
+            );
+        });
+        if close && decided.is_none() {
+            decided = Some(false);
+        }
         match decided {
             Some(true) => {
                 self.confirm_delete = None;
@@ -5834,7 +5946,7 @@ impl App {
 
         ui.add_space(4.0);
         let Some(i) = self.lib_selected else {
-            ui.label(RichText::new("Select a tone to edit its details.").color(theme::DIM));
+            ui.label(RichText::new("Select a tone to edit its details.").color(theme::muted()));
             return;
         };
         // The name is editable here, and only here. It is a label rather than
@@ -5853,7 +5965,7 @@ impl App {
             ui.label(
                 RichText::new("another tone has that name")
                     .small()
-                    .color(theme::ACCENT),
+                    .color(theme::accent()),
             );
         }
         // Held back until the field is done being typed in, so a name in
@@ -5865,7 +5977,7 @@ impl App {
             ui.label(
                 RichText::new(&self.lib_entries[i].line)
                     .small()
-                    .color(theme::DIM),
+                    .color(theme::muted()),
             );
         }
         let history = library::versions_of(&hash);
@@ -5877,7 +5989,7 @@ impl App {
             ui.label(
                 RichText::new(format!("Version {current} of {}", history.len()))
                     .small()
-                    .color(theme::DIM),
+                    .color(theme::muted()),
             );
             let mut restore = None;
             ui.collapsing("Version history", |ui| {
@@ -5889,7 +6001,7 @@ impl App {
                             display_date(&version.meta.modified_at)
                         ));
                         if version.hash == hash {
-                            ui.label(RichText::new("current").small().color(theme::DIM));
+                            ui.label(RichText::new("current").small().color(theme::muted()));
                         } else if ui.small_button("Make current").clicked() {
                             restore = Some(version.hash.clone());
                         }
@@ -5914,7 +6026,7 @@ impl App {
                 return;
             }
         } else {
-            ui.label(RichText::new("Version 1").small().color(theme::DIM));
+            ui.label(RichText::new("Version 1").small().color(theme::muted()));
         }
         ui.add_space(6.0);
 
@@ -5979,7 +6091,11 @@ impl App {
                                 } else {
                                     theme::Icon::Star
                                 };
-                                let colour = if filled { theme::ACCENT } else { theme::DIM };
+                                let colour = if filled {
+                                    theme::accent()
+                                } else {
+                                    theme::muted()
+                                };
                                 if theme::small_icon_button(ui, icon, Some(colour))
                                     .on_hover_text(format!("{star} out of 5"))
                                     .clicked()
@@ -6008,7 +6124,11 @@ impl App {
                     .collect();
 
                 ui.add_space(6.0);
-                ui.label(RichText::new("Song description").small().color(theme::DIM));
+                ui.label(
+                    RichText::new("Song description")
+                        .small()
+                        .color(theme::muted()),
+                );
                 ui.add(
                     egui::TextEdit::multiline(&mut self.lib_draft.description)
                         .desired_rows(2)
@@ -6016,7 +6136,11 @@ impl App {
                 );
 
                 ui.add_space(6.0);
-                ui.label(RichText::new("Tone description").small().color(theme::DIM));
+                ui.label(
+                    RichText::new("Tone description")
+                        .small()
+                        .color(theme::muted()),
+                );
                 ui.add(
                     egui::TextEdit::multiline(&mut self.lib_draft.tone_description)
                         .desired_rows(2)
@@ -6024,7 +6148,7 @@ impl App {
                 );
 
                 ui.add_space(6.0);
-                ui.label(RichText::new("Song tags").small().color(theme::DIM));
+                ui.label(RichText::new("Song tags").small().color(theme::muted()));
                 let mut remove = None;
                 ui.horizontal_wrapped(|ui| {
                     for (ti, tag) in self.lib_draft.tags.iter().enumerate() {
@@ -6100,7 +6224,7 @@ impl App {
         // confirmation ceremony.
         if ui
             .add(
-                egui::Button::new(RichText::new("Remove from library").color(theme::DIM))
+                egui::Button::new(RichText::new("Remove from library").color(theme::muted()))
                     .frame(false),
             )
             .clicked()
@@ -6210,7 +6334,7 @@ impl App {
                 ui.set_max_width(440.0);
                 ui.label(
                     RichText::new(format!("{}  ·  firmware {}", self.device, self.firmware))
-                        .color(theme::DIM),
+                        .color(theme::muted()),
                 );
                 ui.separator();
                 egui::ScrollArea::vertical()
@@ -6225,7 +6349,11 @@ impl App {
                         let free_ir = session::free_ir_slot(&self.irs);
                         let mut import_ir = false;
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("IMPULSE RESPONSES").small().color(theme::DIM));
+                            ui.label(
+                                RichText::new("IMPULSE RESPONSES")
+                                    .small()
+                                    .color(theme::muted()),
+                            );
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -6249,7 +6377,7 @@ impl App {
                         }
 
                         if self.irs.is_empty() {
-                            ui.label(RichText::new("No impulse responses").color(theme::DIM));
+                            ui.label(RichText::new("No impulse responses").color(theme::muted()));
                         }
                         let irs = self.irs.clone();
                         let mut ir_save = None;
@@ -6332,7 +6460,11 @@ impl App {
                         );
                         let mut add_favourite = false;
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("FAVORITE BLOCKS").small().color(theme::DIM));
+                            ui.label(
+                                RichText::new("FAVORITE BLOCKS")
+                                    .small()
+                                    .color(theme::muted()),
+                            );
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -6356,7 +6488,7 @@ impl App {
                             }
                         }
                         if favourites.is_empty() {
-                            ui.label(RichText::new("No favorite blocks").color(theme::DIM));
+                            ui.label(RichText::new("No favorite blocks").color(theme::muted()));
                         }
                         let mut forget = None;
                         for (index, name) in &favourites {
@@ -6378,7 +6510,7 @@ impl App {
                         }
 
                         theme::section_break(ui);
-                        ui.label(RichText::new("DIAGNOSTICS").small().color(theme::DIM));
+                        ui.label(RichText::new("DIAGNOSTICS").small().color(theme::muted()));
                         ui.checkbox(&mut self.show_activity, "Device activity");
                     });
             });
@@ -6430,7 +6562,9 @@ impl App {
             .resizable(false)
             .show(ctx, |ui| {
                 if !matches!(self.connection, Connection::Online) {
-                    ui.label(RichText::new("connect to read the device's EQ").color(theme::DIM));
+                    ui.label(
+                        RichText::new("connect to read the device's EQ").color(theme::muted()),
+                    );
                     return;
                 }
                 // Not "some settings have arrived" but "the EQ's own have":
@@ -6438,7 +6572,7 @@ impl App {
                 // not seen, and a panel that can be dragged while it is showing
                 // substitutes would write them over the pedal's real ones.
                 if !self.eq_settings_known() {
-                    ui.label(RichText::new("reading the device's EQ…").color(theme::DIM));
+                    ui.label(RichText::new("reading the device's EQ…").color(theme::muted()));
                     return;
                 }
                 // The bypass leads, because a curve you cannot hear is the
@@ -6906,7 +7040,7 @@ impl App {
         let (rect, _) =
             ui.allocate_exact_size(egui::Vec2::new(width, HEIGHT), egui::Sense::hover());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, egui::CornerRadius::same(4), theme::BACKGROUND);
+        painter.rect_filled(rect, egui::CornerRadius::same(4), theme::bg());
 
         let x_of = |hz: f32| rect.left() + eq::position(hz) * rect.width();
         let y_of = |db: f32| rect.center().y - (db / RANGE_DB) * (rect.height() / 2.0);
@@ -6914,7 +7048,7 @@ impl App {
         let hz_of = |x: f32| eq::from_position((x - rect.left()) / rect.width());
 
         // The grid, at the frequencies and gains anyone reads an EQ by.
-        let grid = egui::Stroke::new(1.0_f32, theme::PANEL);
+        let grid = egui::Stroke::new(1.0_f32, theme::panel());
         for hz in [50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0] {
             let x = x_of(hz);
             painter.line_segment(
@@ -6931,7 +7065,7 @@ impl App {
                 egui::Align2::CENTER_BOTTOM,
                 label,
                 egui::FontId::proportional(9.0),
-                theme::DIM.gamma_multiply(0.7),
+                theme::muted().gamma_multiply(0.7),
             );
         }
         for db in [-12.0, -6.0, 6.0, 12.0] {
@@ -6948,16 +7082,16 @@ impl App {
                 egui::pos2(rect.left(), zero),
                 egui::pos2(rect.right(), zero),
             ],
-            egui::Stroke::new(1.0_f32, theme::DIM.gamma_multiply(0.6)),
+            egui::Stroke::new(1.0_f32, theme::muted().gamma_multiply(0.6)),
         );
 
         // The response. Dim when the EQ is bypassed - the shape is still worth
         // seeing, it just is not doing anything.
         let curve = self.eq_curve_now();
         let ink = if active {
-            theme::ACCENT
+            theme::accent()
         } else {
-            theme::DIM.gamma_multiply(0.8)
+            theme::muted().gamma_multiply(0.8)
         };
         let points: Vec<egui::Pos2> = curve
             .sampled(rect.width().max(2.0) as usize)
@@ -7033,7 +7167,7 @@ impl App {
                 handle.gamma_multiply(0.55)
             };
             painter.circle_filled(at, 6.0, handle);
-            painter.circle_stroke(at, 6.0, egui::Stroke::new(1.5_f32, theme::BACKGROUND));
+            painter.circle_stroke(at, 6.0, egui::Stroke::new(1.5_f32, theme::bg()));
             if response.hovered() || response.dragged() {
                 painter.circle_stroke(at, 9.0, egui::Stroke::new(1.5_f32, handle));
             }
@@ -7078,7 +7212,7 @@ impl App {
             // would be a lie, so it goes hollow instead.
             let mark = theme::rgb(colour);
             if off {
-                painter.circle_filled(at, 5.0, theme::BACKGROUND);
+                painter.circle_filled(at, 5.0, theme::bg());
                 painter.circle_stroke(
                     at,
                     5.0,
@@ -7086,7 +7220,7 @@ impl App {
                 );
             } else {
                 painter.circle_filled(at, 6.0, mark);
-                painter.circle_stroke(at, 6.0, egui::Stroke::new(1.5_f32, theme::BACKGROUND));
+                painter.circle_stroke(at, 6.0, egui::Stroke::new(1.5_f32, theme::bg()));
             }
             if response.hovered() || response.dragged() {
                 painter.circle_stroke(at, 9.0, egui::Stroke::new(1.5_f32, mark));
@@ -7146,11 +7280,11 @@ impl App {
         use hx_proto::settings::{self, Kind};
 
         if !matches!(self.connection, Connection::Online) {
-            ui.label(RichText::new("connect to read the device's settings").color(theme::DIM));
+            ui.label(RichText::new("connect to read the device's settings").color(theme::muted()));
             return;
         }
         if self.settings.is_empty() {
-            ui.label(RichText::new("reading the device's settings…").color(theme::DIM));
+            ui.label(RichText::new("reading the device's settings…").color(theme::muted()));
             return;
         }
 
@@ -7162,7 +7296,7 @@ impl App {
             ui.label(
                 RichText::new(group.to_uppercase())
                     .small()
-                    .color(theme::DIM),
+                    .color(theme::muted()),
             );
             for setting in settings::SETTINGS.iter().filter(|s| s.group == group) {
                 let Some(&current) = self.settings.get(&setting.id) else {
@@ -7606,7 +7740,7 @@ impl App {
             .resizable(true)
             .default_width(width)
             .show(ctx, |ui| {
-                ui.label(RichText::new(&preview.line).color(theme::DIM));
+                ui.label(RichText::new(&preview.line).color(theme::muted()));
                 ui.add_space(6.0);
                 egui::ScrollArea::horizontal()
                     .id_salt("tone-preview")
@@ -7618,7 +7752,7 @@ impl App {
                                     ui.label(
                                         RichText::new(format!("PATH {}", n + 1))
                                             .small()
-                                            .color(theme::DIM),
+                                            .color(theme::muted()),
                                     );
                                 }
                                 let _ = self.path_row(ui, path);
@@ -7626,11 +7760,11 @@ impl App {
                         });
                     });
                 for skipped in &preview.skipped {
-                    ui.label(RichText::new(skipped).small().color(theme::DIM));
+                    ui.label(RichText::new(skipped).small().color(theme::muted()));
                 }
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Load into").color(theme::DIM));
+                    ui.label(RichText::new("Load into").color(theme::muted()));
                     let total = if self.presets.is_empty() {
                         self.preset_count as i64
                     } else {
@@ -7712,12 +7846,21 @@ impl App {
         egui::Panel::bottom("activity")
             .exact_size(100.0)
             .show(root_ui, |ui| {
-                ui.label(RichText::new("DEVICE ACTIVITY").small().color(theme::DIM));
+                ui.label(
+                    RichText::new("DEVICE ACTIVITY")
+                        .small()
+                        .color(theme::muted()),
+                );
                 egui::ScrollArea::vertical()
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
                         for line in &self.log {
-                            ui.label(RichText::new(line).small().monospace().color(theme::DIM));
+                            ui.label(
+                                RichText::new(line)
+                                    .small()
+                                    .monospace()
+                                    .color(theme::muted()),
+                            );
                         }
                     });
             });
@@ -7777,10 +7920,10 @@ impl App {
                         if self.loading {
                             ui.horizontal(|ui| {
                                 theme::spinner(ui);
-                                ui.label(RichText::new("loading…").color(theme::DIM));
+                                ui.label(RichText::new("loading…").color(theme::muted()));
                             });
                         } else {
-                            ui.label(RichText::new("No preset loaded").color(theme::DIM));
+                            ui.label(RichText::new("No preset loaded").color(theme::muted()));
                         }
                     });
                     return;
@@ -7811,7 +7954,7 @@ impl App {
                                     ui.label(
                                         RichText::new(format!("PATH {}", n + 1))
                                             .small()
-                                            .color(theme::DIM),
+                                            .color(theme::muted()),
                                     );
                                 }
                                 pick = self.path_row(ui, path).or(pick);
@@ -8379,7 +8522,7 @@ impl App {
         processor::editor(root_ui, |ui| {
             let Some(block) = self.chain.get(self.selected).cloned() else {
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("Connect a device to begin").color(theme::DIM));
+                    ui.label(RichText::new("Connect a device to begin").color(theme::muted()));
                 });
                 return;
             };
@@ -8393,7 +8536,7 @@ impl App {
             }
 
             let Some(model) = self.slot_model(&block).cloned() else {
-                ui.label(RichText::new("Install HX Edit for model names").color(theme::DIM));
+                ui.label(RichText::new("Install HX Edit for model names").color(theme::muted()));
                 return;
             };
             egui::ScrollArea::vertical()
@@ -8486,7 +8629,7 @@ impl App {
                                     "Thanks for downloading! One quick step, and you only \
                                      ever do it once.",
                                 )
-                                .color(theme::ACCENT),
+                                .color(theme::accent()),
                             );
                             ui.add_space(14.0);
                             ui.label(
@@ -8516,7 +8659,7 @@ impl App {
                             ui.horizontal(|ui| {
                                 ui.add_space(block);
                                 ui.label(RichText::new(icon).size(16.0));
-                                ui.label(RichText::new(line).color(theme::TEXT));
+                                ui.label(RichText::new(line).color(theme::text()));
                             });
                             ui.add_space(4.0);
                         }
@@ -8534,7 +8677,7 @@ impl App {
                             }
                             ui.add_space(10.0);
                             ui.label(
-                                RichText::new("then, once it is downloaded:").color(theme::DIM),
+                                RichText::new("then, once it is downloaded:").color(theme::muted()),
                             );
                             ui.add_space(8.0);
                             let row = button_width(ui, "Check my Downloads folder")
@@ -8579,7 +8722,7 @@ impl App {
                                 ui.label(
                                     RichText::new("…or drop the installer anywhere on this window")
                                         .small()
-                                        .color(theme::DIM),
+                                        .color(theme::muted()),
                                 );
                             }
 
@@ -8588,11 +8731,11 @@ impl App {
                                 ui.horizontal(|ui| {
                                     theme::spinner(ui);
                                     if let Some(status) = &self.onboarding_status {
-                                        ui.label(RichText::new(status).color(theme::DIM));
+                                        ui.label(RichText::new(status).color(theme::muted()));
                                     }
                                 });
                             } else if let Some(status) = &self.onboarding_status {
-                                ui.label(RichText::new(status).color(theme::ACCENT));
+                                ui.label(RichText::new(status).color(theme::accent()));
                             }
                         });
 
@@ -8606,23 +8749,25 @@ impl App {
                                      Yamaha Guitar Group.",
                                 )
                                 .small()
-                                .color(theme::DIM),
+                                .color(theme::muted()),
                             );
                             ui.horizontal(|ui| {
                                 center_row(ui, credits_width(ui), |ui| {
                                     ui.label(
-                                        RichText::new("made with ♥ by").small().color(theme::DIM),
+                                        RichText::new("made with ♥ by")
+                                            .small()
+                                            .color(theme::muted()),
                                     );
                                     ui.hyperlink_to(
                                         RichText::new("Carmine Paolino").small(),
                                         "https://paolino.me",
                                     );
-                                    ui.label(RichText::new("·").small().color(theme::DIM));
+                                    ui.label(RichText::new("·").small().color(theme::muted()));
                                     ui.hyperlink_to(
                                         RichText::new("follow updates").small(),
                                         "https://x.com/paolino",
                                     );
-                                    ui.label(RichText::new("·").small().color(theme::DIM));
+                                    ui.label(RichText::new("·").small().color(theme::muted()));
                                     ui.hyperlink_to(
                                         RichText::new("♥ sponsor").small(),
                                         "https://github.com/sponsors/crmne",
@@ -8824,7 +8969,7 @@ impl App {
         ui.add_space(10.0);
         ui.separator();
         ui.add_space(4.0);
-        ui.label(RichText::new("ASSIGNMENTS").small().color(theme::DIM));
+        ui.label(RichText::new("ASSIGNMENTS").small().color(theme::muted()));
         ui.add_space(2.0);
 
         // One header covers every row under it, so it can only follow the
@@ -8851,7 +8996,7 @@ impl App {
             .iter()
             .find(|b| b.position == position)
             .map(|b| self.block_colour(b))
-            .unwrap_or(theme::ACCENT);
+            .unwrap_or(theme::accent());
 
         // Nothing fills. This table has five narrow columns and lives in a panel
         // as wide as the window; a column that took the slack put half a screen
@@ -9130,9 +9275,11 @@ impl App {
                 .as_ref()
                 .map(|s| self.led_colour(s.lit()))
                 .or_else(|| block.map(|b| self.block_colour(b)))
-                .unwrap_or(theme::ACCENT),
+                .unwrap_or(theme::accent()),
             driven: menu.under.map(|source| source.short()),
-            tint: block.map(|b| self.block_colour(b)).unwrap_or(theme::ACCENT),
+            tint: block
+                .map(|b| self.block_colour(b))
+                .unwrap_or(theme::accent()),
             on_a_switch: carried.is_some(),
             auto_engage: menu
                 .under
@@ -9207,7 +9354,7 @@ impl App {
                 ((rgb >> 8) & 0xff) as u8,
                 (rgb & 0xff) as u8,
             ),
-            None => theme::DIM,
+            None => theme::muted(),
         }
     }
 
@@ -9219,7 +9366,7 @@ impl App {
     fn endpoint_editor(&mut self, ui: &mut egui::Ui, block: &session::Block) {
         let Some(model) = self.slot_model(block).cloned() else {
             ui.add_space(8.0);
-            ui.label(RichText::new("nothing to edit here").color(theme::DIM));
+            ui.label(RichText::new("nothing to edit here").color(theme::muted()));
             return;
         };
         ui.add_space(8.0);
@@ -9240,7 +9387,7 @@ impl App {
     /// symbol table, so resolving it painted the input and output in the amp
     /// category's red.
     fn block_colour(&self, block: &session::Block) -> egui::Color32 {
-        let fallback = theme::DIM;
+        let fallback = theme::muted();
         if block.kind != hx_proto::preset::Kind::Block || block.model == 0 {
             return fallback;
         }
@@ -9251,7 +9398,7 @@ impl App {
             .model_number(block.model)
             .and_then(|m| catalog.category_of(&m.id))
             .and_then(|c| catalog.category(c))
-            .map(|c| theme::category_colour(c.colour))
+            .map(|c| theme::category_colour(&c.name))
             .unwrap_or(fallback)
     }
 
@@ -9476,9 +9623,9 @@ impl App {
             .unwrap_or_else(|| current.to_string());
 
         ui.horizontal(|ui| {
-            ui.label(RichText::new(&param.name).small().color(theme::DIM));
+            ui.label(RichText::new(&param.name).small().color(theme::muted()));
             egui::ComboBox::from_id_salt(("routing", position))
-                .selected_text(RichText::new(showing).color(theme::ACCENT))
+                .selected_text(RichText::new(showing).color(theme::accent()))
                 .width(240.0)
                 .show_ui(ui, |ui| {
                     for (index, label) in choices.iter().enumerate() {
@@ -9513,14 +9660,14 @@ impl App {
 
         let mut picked = None;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Type").small().color(theme::DIM));
+            ui.label(RichText::new("Type").small().color(theme::muted()));
             for model in family {
                 let name = model.name.strip_prefix("Split ").unwrap_or(&model.name);
                 let on = model.id == current;
                 // The split types are named, not pictured: they are three
                 // variations on one thing, and HX Edit gives the category a
                 // single glyph that would say the same on all three.
-                let chip = theme::category_chip(ui, name, None, theme::ACCENT, on)
+                let chip = theme::category_chip(ui, name, None, theme::accent(), on)
                     .on_hover_text(split_type_hint(&model.name));
                 if chip.clicked() && !on {
                     picked = number_of(catalog, &model.id);
@@ -9633,7 +9780,7 @@ impl App {
                             ui.painter().rect_stroke(
                                 rect.shrink(1.0),
                                 egui::CornerRadius::same(4),
-                                egui::Stroke::new(1.0_f32, theme::ACCENT),
+                                egui::Stroke::new(1.0_f32, theme::accent()),
                                 egui::StrokeKind::Middle,
                             );
                             if ui
@@ -9671,7 +9818,7 @@ impl App {
                                     ui.label(
                                         RichText::new(catalog.format(param, current))
                                             .monospace()
-                                            .color(theme::ACCENT),
+                                            .color(theme::accent()),
                                     );
                                 }
                                 // Only a catalog entry with actual labels is a
@@ -9688,7 +9835,7 @@ impl App {
                                     .width(cell.x)
                                     .selected_text(
                                         RichText::new(catalog.format(param, current))
-                                            .color(theme::ACCENT),
+                                            .color(theme::accent()),
                                     )
                                     .show_ui(ui, |ui| {
                                         for (n, label) in choices.iter().enumerate() {
@@ -9755,7 +9902,7 @@ impl App {
                                                         catalog.format(param, current),
                                                     )
                                                     .monospace()
-                                                    .color(theme::ACCENT),
+                                                    .color(theme::accent()),
                                                 )
                                                 .sense(egui::Sense::click()),
                                             );
@@ -9781,8 +9928,8 @@ impl App {
                             // told you only that there was one.
                             let menu = &menus[index];
                             let label = match menu.under {
-                                Some(_) => RichText::new(&param.name).color(theme::ACCENT),
-                                None => RichText::new(&param.name).color(theme::DIM),
+                                Some(_) => RichText::new(&param.name).color(theme::accent()),
+                                None => RichText::new(&param.name).color(theme::muted()),
                             };
                             let name = ui.add(
                                 egui::Label::new(label).sense(egui::Sense::click()),
@@ -9842,7 +9989,7 @@ impl App {
                         ui.painter().rect_stroke(
                             rect.shrink(1.0),
                             egui::CornerRadius::same(4),
-                            egui::Stroke::new(1.0_f32, theme::ACCENT),
+                            egui::Stroke::new(1.0_f32, theme::accent()),
                             egui::StrokeKind::Middle,
                         );
                         // On top of the control, so a pick cannot turn a knob
@@ -9932,7 +10079,7 @@ fn center_row(ui: &mut egui::Ui, content_width: f32, add: impl FnOnce(&mut egui:
 /// What a button with this label will measure, for centring rows of them.
 fn button_width(ui: &egui::Ui, text: &str) -> f32 {
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let galley = ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_owned(), font, theme::TEXT));
+    let galley = ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_owned(), font, theme::text()));
     galley.size().x + 2.0 * ui.spacing().button_padding.x
 }
 
@@ -9952,7 +10099,7 @@ fn credits_width(ui: &egui::Ui) -> f32 {
             .iter()
             .map(|piece| {
                 fonts
-                    .layout_no_wrap((*piece).to_owned(), font.clone(), theme::DIM)
+                    .layout_no_wrap((*piece).to_owned(), font.clone(), theme::muted())
                     .size()
                     .x
             })
@@ -10068,7 +10215,7 @@ fn model_picker(
         open,
     } = chrome;
     ui.horizontal(|ui| {
-        ui.label(RichText::new(heading).small().color(theme::DIM));
+        ui.label(RichText::new(heading).small().color(theme::muted()));
         let collapse_width = if open.is_some() { 24.0 } else { 0.0 };
         let field = ui.add(
             egui::TextEdit::singleline(search)
@@ -10197,7 +10344,7 @@ fn model_picker(
     // model browser, responsive to the room it has.
     if ui.available_width() < 400.0 {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("CATEGORY").small().color(theme::DIM));
+            ui.label(RichText::new("CATEGORY").small().color(theme::muted()));
             egui::ComboBox::from_id_salt("model-category")
                 .selected_text(if searching {
                     "All search results"
@@ -10240,7 +10387,7 @@ fn model_picker(
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             for category in &categories {
-                                let colour = theme::category_colour(category.colour);
+                                let colour = theme::category_colour(&category.name);
                                 let on = !searching && category.id == showing;
                                 let icon = picker_category_icon(catalog, category);
                                 if theme::category_rail_row(
@@ -10267,11 +10414,11 @@ fn model_picker(
                 |ui| {
                     ui.horizontal_wrapped(|ui| {
                         let heading = if searching {
-                            RichText::new("Search results").color(theme::DIM)
+                            RichText::new("Search results").color(theme::muted())
                         } else {
                             let category = catalog.category(showing);
                             RichText::new(category.map_or("Models", |c| c.name.as_str())).color(
-                                category.map_or(theme::TEXT, |c| theme::category_colour(c.colour)),
+                                category.map_or(theme::text(), |c| theme::category_colour(&c.name)),
                             )
                         };
                         ui.label(heading.strong());
@@ -10342,7 +10489,7 @@ fn picker_models(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if models.is_empty() {
-                ui.label(RichText::new("Nothing matches").color(theme::DIM));
+                ui.label(RichText::new("Nothing matches").color(theme::muted()));
                 return;
             }
 
@@ -10371,8 +10518,8 @@ fn picker_models(
                     let colour = catalog
                         .category_of(&model.id)
                         .and_then(|id| catalog.category(id))
-                        .map(|category| theme::category_colour(category.colour))
-                        .unwrap_or(theme::ACCENT);
+                        .map(|category| theme::category_colour(&category.name))
+                        .unwrap_or(theme::accent());
                     let art = catalog
                         .artwork(model)
                         .map(|p| theme::Art::whole(format!("file://{}", p.display())));
@@ -10499,7 +10646,7 @@ fn eq_cut_group(
     ui.label(
         RichText::new(if off { "off" } else { "on" })
             .small()
-            .color(if off { theme::DIM } else { colour }),
+            .color(if off { theme::muted() } else { colour }),
     );
     write
 }
@@ -10579,7 +10726,7 @@ fn assign_menu(ui: &mut egui::Ui, menu: &AssignMenu) -> Option<AssignAction> {
     ui.label(
         RichText::new(format!("Control {} with", menu.name))
             .small()
-            .color(theme::DIM),
+            .color(theme::muted()),
     );
     let mut action = None;
     if ui
@@ -10628,7 +10775,7 @@ fn switch_settings(
             edit,
         })
     };
-    let dim = |ui: &mut egui::Ui, text: &str| ui.label(RichText::new(text).color(theme::DIM));
+    let dim = |ui: &mut egui::Ui, text: &str| ui.label(RichText::new(text).color(theme::muted()));
 
     // Wrapped rather than laid out in columns: the panel is as wide as the
     // window leaves it, and controls that run off the edge of a narrow one are
@@ -10676,7 +10823,7 @@ fn switch_settings(
             // of what it carries - and this is that colour.
             theme::led_dot(ui, view.lit);
             egui::ComboBox::from_id_salt(("switch-colour", view.switch))
-                .selected_text(RichText::new(&showing).color(theme::ACCENT))
+                .selected_text(RichText::new(&showing).color(theme::accent()))
                 .width(120.0)
                 .show_ui(ui, |ui| {
                     for (n, name) in colours.iter().enumerate() {
@@ -10772,9 +10919,9 @@ fn bypass_cell(ui: &mut egui::Ui, cell: egui::Vec2, view: &BypassView) -> Option
                         RichText::new(if view.enabled { "On" } else { "Off" })
                             .monospace()
                             .color(if view.enabled {
-                                theme::ACCENT
+                                theme::accent()
                             } else {
-                                theme::DIM
+                                theme::muted()
                             }),
                     )
                     .selectable(false)
@@ -10788,8 +10935,8 @@ fn bypass_cell(ui: &mut egui::Ui, cell: egui::Vec2, view: &BypassView) -> Option
             // block wears in the chain.
             let label = ui.add(
                 egui::Label::new(RichText::new("On/Off").color(match view.driven {
-                    Some(_) => theme::ACCENT,
-                    None => theme::DIM,
+                    Some(_) => theme::accent(),
+                    None => theme::muted(),
                 }))
                 .selectable(false)
                 .sense(egui::Sense::click()),

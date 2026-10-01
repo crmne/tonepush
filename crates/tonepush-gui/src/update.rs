@@ -339,7 +339,7 @@ impl Updates {
         let Some(release) = self.release.clone() else {
             let label = RichText::new(format!("TonePush {VERSION}"))
                 .small()
-                .color(theme::DIM);
+                .color(theme::muted());
             if ui
                 .add(egui::Label::new(label).sense(egui::Sense::click()))
                 .on_hover_text(format!("TonePush {VERSION} · click for the releases page"))
@@ -362,7 +362,7 @@ impl Updates {
             release.version
         ))
         .small()
-        .color(theme::ACCENT);
+        .color(theme::accent());
         if ui
             .add(egui::Label::new(label).sense(egui::Sense::click()))
             .on_hover_text(hover)
@@ -400,7 +400,7 @@ impl Updates {
             }
             DownloadState::Ready(_) => {
                 if ui
-                    .small_button(RichText::new("Restart to update").color(theme::ACCENT))
+                    .small_button(RichText::new("Restart to update").color(theme::accent()))
                     .on_hover_text(format!(
                         "TonePush closes, lets the pedal go and opens {}. If the new \
                          version does not start, this one comes back.",
@@ -413,7 +413,7 @@ impl Updates {
             }
             DownloadState::Installing => {
                 theme::spinner(ui);
-                ui.label(RichText::new("Restarting…").small().color(theme::DIM));
+                ui.label(RichText::new("Restarting…").small().color(theme::muted()));
             }
             DownloadState::Failed(error) => {
                 if ui

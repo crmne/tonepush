@@ -821,7 +821,7 @@ impl Panel {
                 if self.online {
                     egui::Color32::from_rgb(0x4c, 0xc0, 0x60)
                 } else {
-                    theme::DIM
+                    theme::muted()
                 },
             );
             let device_name = snapshot
@@ -842,7 +842,7 @@ impl Panel {
             if let Some(snapshot) = &snapshot {
                 ui.label(
                     RichText::new(format!("firmware {}", snapshot.identity.version))
-                        .color(theme::DIM),
+                        .color(theme::muted()),
                 );
             }
             if self.online {
@@ -863,7 +863,7 @@ impl Panel {
                 } else {
                     "Automatic backup required for Save"
                 };
-                let guard = ui.label(RichText::new(guard).small().color(theme::DIM));
+                let guard = ui.label(RichText::new(guard).small().color(theme::muted()));
                 if let Some(path) = &self.rollback {
                     guard.on_hover_text(format!(
                         "TonePush can restore persistent changes from {}",
@@ -872,7 +872,7 @@ impl Panel {
                 }
                 if !self.status.is_empty() {
                     ui.separator();
-                    ui.label(RichText::new(&self.status).small().color(theme::DIM));
+                    ui.label(RichText::new(&self.status).small().color(theme::muted()));
                 }
             });
         });
@@ -911,7 +911,7 @@ impl Panel {
             }
             None => {
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new(&self.status).color(theme::DIM));
+                    ui.label(RichText::new(&self.status).color(theme::muted()));
                 });
             }
         });
@@ -936,7 +936,7 @@ impl Panel {
             .default_width(900.0)
             .default_height(430.0)
             .show(ctx, |ui| {
-                ui.label(RichText::new("StompStation PRO preset · preview").color(theme::DIM));
+                ui.label(RichText::new("StompStation PRO preset · preview").color(theme::muted()));
                 ui.separator();
                 ui.add_enabled_ui(false, |ui| {
                     let height = 150.0_f32.min(ui.available_height() * 0.42);
@@ -973,12 +973,12 @@ impl Panel {
             };
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("SETLIST").small().color(theme::DIM))
+                ui.label(RichText::new("SETLIST").small().color(theme::muted()))
                     .on_hover_text("Use ↑/↓ to move through presets when no field is active");
                 let (mark, colour) = if self.show_favorites_only {
-                    (theme::Icon::StarOn, theme::ACCENT)
+                    (theme::Icon::StarOn, theme::accent())
                 } else {
-                    (theme::Icon::Star, theme::DIM)
+                    (theme::Icon::Star, theme::muted())
                 };
                 if theme::small_icon_button(ui, mark, Some(colour))
                     .on_hover_text("Show favourites only")
@@ -1006,7 +1006,7 @@ impl Panel {
                     ui.label(
                         RichText::new(format!("Choose a slot for {name}"))
                             .small()
-                            .color(theme::ACCENT),
+                            .color(theme::accent()),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Cancel").clicked() {
@@ -1031,19 +1031,19 @@ impl Panel {
                     let selected = name.as_deref() == snapshot.active_preset.as_deref();
                     let label = format!("{:>2}  {label}", index + 1);
                     let text = if selected {
-                        RichText::new(&label).color(theme::ACCENT).strong()
+                        RichText::new(&label).color(theme::accent()).strong()
                     } else if name.is_some() {
                         RichText::new(&label)
                     } else {
-                        RichText::new(&label).color(theme::DIM)
+                        RichText::new(&label).color(theme::muted())
                     };
                     ui.horizontal(|ui| {
                         ui.set_min_height(20.0);
                         ui.spacing_mut().item_spacing.x = 2.0;
                         let (star, colour) = if favorite {
-                            (theme::Icon::StarOn, theme::ACCENT)
+                            (theme::Icon::StarOn, theme::accent())
                         } else {
-                            (theme::Icon::Star, theme::DIM)
+                            (theme::Icon::Star, theme::muted())
                         };
                         if theme::small_icon_button(ui, star, Some(colour))
                             .on_hover_text(if favorite { "Remove favourite" } else { "Favourite" })
@@ -1078,9 +1078,9 @@ impl Panel {
                         if sending.is_some() {
                             let empty = name.is_none();
                             let target_text = if empty {
-                                RichText::new(format!("{:>2}  empty", index + 1)).color(theme::ACCENT)
+                                RichText::new(format!("{:>2}  empty", index + 1)).color(theme::accent())
                             } else {
-                                RichText::new(&label).color(theme::DIM)
+                                RichText::new(&label).color(theme::muted())
                             };
                             let target = ui.add(
                                 egui::Button::new(()).left_text(target_text).frame(false)
@@ -1392,7 +1392,7 @@ impl Panel {
             ui.label(
                 RichText::new("Choose an installed model below to manage its slot.")
                     .small()
-                    .color(theme::DIM),
+                    .color(theme::muted()),
             );
         }
         ui.separator();
@@ -1415,7 +1415,7 @@ impl Panel {
                         "{}  ·  firmware {}  ·  {}",
                         snapshot.identity.name, snapshot.identity.version, snapshot.transport
                     ))
-                    .color(theme::DIM),
+                    .color(theme::muted()),
                 );
                 ui.add_space(8.0);
                 self.backup_actions(ui, snapshot);
@@ -1471,7 +1471,7 @@ impl Panel {
                 RichText::new(
                     "Load and verify a current rollback bundle in Backup & restore before changing global settings.",
                 )
-                .color(theme::DIM),
+                .color(theme::muted()),
             );
         }
         ui.separator();
@@ -1524,7 +1524,7 @@ impl Panel {
         let persistent = group == INPUT_GROUP;
         ui.horizontal(|ui| {
             ui.heading(&title);
-            ui.label(RichText::new(category).color(theme::DIM));
+            ui.label(RichText::new(category).color(theme::muted()));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.search)
@@ -1537,7 +1537,7 @@ impl Panel {
             ui.label(
                 RichText::new("Input settings unlock after a rollback backup verifies.")
                     .small()
-                    .color(theme::DIM),
+                    .color(theme::muted()),
             );
         }
         ui.separator();
@@ -1625,7 +1625,7 @@ impl Panel {
                                                     &Value::from(number as f64),
                                                 ))
                                                 .monospace()
-                                                .color(theme::ACCENT),
+                                                .color(theme::accent()),
                                             );
                                         }
                                         Some(NodeKind::Enum | NodeKind::Array)
@@ -1640,7 +1640,7 @@ impl Panel {
                                             ui.label(
                                                 RichText::new(value_text(&current))
                                                     .monospace()
-                                                    .color(theme::ACCENT),
+                                                    .color(theme::accent()),
                                             );
                                         }
                                         Some(
@@ -1677,7 +1677,7 @@ impl Panel {
                                             .width(processor::CONTROL_CELL.x)
                                             .selected_text(
                                                 RichText::new(value_text(&current))
-                                                    .color(theme::ACCENT),
+                                                    .color(theme::accent()),
                                             )
                                             .show_ui(
                                                 ui,
@@ -1705,7 +1705,7 @@ impl Panel {
                                             ui.label(
                                                 RichText::new(if enabled { "On" } else { "Off" })
                                                     .monospace()
-                                                    .color(theme::ACCENT),
+                                                    .color(theme::accent()),
                                             );
                                         }
                                         _ => {
@@ -1713,7 +1713,7 @@ impl Panel {
                                             ui.label(
                                                 RichText::new(value_text(&current))
                                                     .monospace()
-                                                    .color(theme::ACCENT),
+                                                    .color(theme::accent()),
                                             );
                                             ui.add_space(24.0);
                                         }
@@ -1827,7 +1827,7 @@ impl Panel {
                 ui.label(
                     RichText::new(value_text(&current))
                         .monospace()
-                        .color(theme::DIM),
+                        .color(theme::muted()),
                 );
             }
         }
@@ -1907,7 +1907,7 @@ impl Panel {
                 state.info.count.saturating_sub(occupied)
             ))
             .small()
-            .color(theme::DIM),
+            .color(theme::muted()),
         );
     }
 
@@ -1916,12 +1916,12 @@ impl Panel {
         let occupied = state.info.names.get(index).and_then(Option::as_deref);
         let Some(original) = occupied else {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Empty and ready for an import").color(theme::DIM));
+                ui.label(RichText::new("Empty and ready for an import").color(theme::muted()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         RichText::new(format!("Slot {}", index + 1))
                             .small()
-                            .color(theme::DIM),
+                            .color(theme::muted()),
                     );
                 });
             });
@@ -1956,7 +1956,7 @@ impl Panel {
                     ui.label(
                         RichText::new(format!("Slot {}", index + 1))
                             .small()
-                            .color(theme::DIM),
+                            .color(theme::muted()),
                     );
                 });
             });
@@ -1967,7 +1967,7 @@ impl Panel {
                     ui.label(
                         RichText::new(format!("Slot {}", index + 1))
                             .small()
-                            .color(theme::DIM),
+                            .color(theme::muted()),
                     );
                 });
             });
@@ -2133,7 +2133,7 @@ impl Panel {
                         ui.label(
                             RichText::new(format!("{:>2}", index + 1))
                                 .monospace()
-                                .color(theme::DIM),
+                                .color(theme::muted()),
                         );
                         let selected = selector
                             .and_then(|(_, _, current)| current.as_str())
@@ -2142,7 +2142,7 @@ impl Panel {
                             || (selector.is_none() && managed == index + 1);
                         let text = match name {
                             Some(name) => RichText::new(name),
-                            None => RichText::new("Empty slot").italics().color(theme::DIM),
+                            None => RichText::new("Empty slot").italics().color(theme::muted()),
                         };
                         if ui.selectable_label(selected, text).clicked() {
                             chose = Some(index);
@@ -2162,7 +2162,7 @@ impl Panel {
                 }
             });
         if shown == 0 {
-            ui.label(RichText::new("No slots match this search.").color(theme::DIM));
+            ui.label(RichText::new("No slots match this search.").color(theme::muted()));
         }
         if let Some(index) = chose {
             if self.slot_renaming != Some((library, index)) {
@@ -2312,7 +2312,7 @@ impl Panel {
                 ui.label(
                     RichText::new("A current backup is required before persistent writes.")
                         .small()
-                        .color(theme::DIM),
+                        .color(theme::muted()),
                 );
                 if ui
                     .add_enabled(available, egui::Button::new("Use existing backup…"))
@@ -2334,19 +2334,19 @@ impl Panel {
         let action = confirmation.action;
         let mut confirm = false;
         let mut cancel = false;
-        egui::Window::new("Confirm")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.set_max_width(420.0);
-                ui.label(question);
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    confirm = ui.button(action).clicked();
-                    cancel = ui.button("Cancel").clicked();
-                });
+        let note = if matches!(confirmation.command, Cmd::SelectPreset(_)) {
+            "The edits play on the pedal until another preset loads."
+        } else {
+            "This writes the pedal's memory. The automatic backup can put it back."
+        };
+        let (_, close) = theme::dialog(ctx, "pro-confirm", 460.0, |ui| {
+            theme::dialog_header(ui, &question, None);
+            theme::dialog_footer(ui, note, |ui| {
+                confirm = theme::Button::new(action).danger().show(ui).clicked();
+                cancel = theme::Button::new("Cancel").show(ui).clicked();
             });
+        });
+        cancel |= close && !confirm;
         if confirm {
             if let Some(confirmation) = self.confirmation.take() {
                 let _ = self.tx.send(confirmation.command);

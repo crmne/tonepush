@@ -319,11 +319,11 @@ pub fn show(ui: &mut Ui, id: &str, grid: &mut Grid) -> Did {
         let column_visibility = draw_headers(ui, grid);
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(grid.nothing_yet).color(theme::DIM));
+            ui.label(RichText::new(grid.nothing_yet).color(theme::muted()));
             if let Some(icon) = grid.nothing_icon {
                 theme::place_enabled(ui, icon, theme::Sync::Absent, false);
                 if !grid.nothing_after_icon.is_empty() {
-                    ui.label(RichText::new(grid.nothing_after_icon).color(theme::DIM));
+                    ui.label(RichText::new(grid.nothing_after_icon).color(theme::muted()));
                 }
             }
         });
@@ -432,9 +432,9 @@ fn draw_headers(ui: &mut Ui, grid: &Grid) -> Option<(usize, bool)> {
                     &column.title,
                     egui::TextStyle::Body.resolve(ui.style()),
                     if i == grid.sort.0 {
-                        theme::ACCENT
+                        theme::accent()
                     } else {
-                        theme::TEXT
+                        theme::text()
                     },
                 );
             }
@@ -459,7 +459,7 @@ fn column_context_menu(
     }
     let mut changed = None;
     response.context_menu(|ui| {
-        ui.label(RichText::new("Columns").small().color(theme::DIM));
+        ui.label(RichText::new("Columns").small().color(theme::muted()));
         for (key, title, shown) in choices {
             let mut visible = *shown;
             if ui.checkbox(&mut visible, title).changed() {
@@ -507,11 +507,8 @@ impl egui_table::TableDelegate for Delegate<'_> {
         let (rect, hit) = ui.allocate_exact_size(size, egui::Sense::click());
         if ui.is_rect_visible(rect) {
             if hit.hovered() {
-                ui.painter().rect_filled(
-                    rect,
-                    egui::CornerRadius::same(3),
-                    egui::Color32::from_rgb(0x25, 0x29, 0x31),
-                );
+                ui.painter()
+                    .rect_filled(rect, egui::CornerRadius::same(3), theme::raised());
             }
             ui.painter().text(
                 rect.left_center() + egui::vec2(PADDING, 0.0),
@@ -519,9 +516,9 @@ impl egui_table::TableDelegate for Delegate<'_> {
                 format!("{}{arrow}", column.title),
                 egui::TextStyle::Body.resolve(ui.style()),
                 if index == sorting {
-                    theme::ACCENT
+                    theme::accent()
                 } else {
-                    theme::TEXT
+                    theme::text()
                 },
             );
         }
@@ -549,10 +546,11 @@ impl egui_table::TableDelegate for Delegate<'_> {
             self.grid.chosen.get(row).copied().unwrap_or(false) || self.grid.selected == Some(row);
         // Striping and selection are painted here rather than by the table:
         // egui_table draws cells, and the row is the thing a person sees.
+        // Selection is a neutral fill: amber is kept for the next action.
         let background = if picked {
-            Some(ui.visuals().selection.bg_fill)
+            Some(theme::hover())
         } else if row % 2 == 1 {
-            Some(egui::Color32::from_rgb(0x1e, 0x21, 0x28))
+            Some(theme::alpha(theme::raised(), 0.55))
         } else {
             None
         };
@@ -688,7 +686,7 @@ impl egui_table::TableDelegate for Delegate<'_> {
                             }
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(text).monospace().color(theme::ACCENT),
+                                    RichText::new(text).monospace().color(theme::accent()),
                                 )
                                 .selectable(false)
                                 .sense(egui::Sense::click()),
@@ -737,7 +735,7 @@ impl egui_table::TableDelegate for Delegate<'_> {
             }
             Cell::Text(text) | Cell::Dim(text) => {
                 let rich = if matches!(content, Cell::Dim(_)) {
-                    RichText::new(text).color(theme::DIM)
+                    RichText::new(text).color(theme::muted())
                 } else {
                     RichText::new(text)
                 };
@@ -756,7 +754,7 @@ impl egui_table::TableDelegate for Delegate<'_> {
             }
             Cell::Value { text, dim, .. } => {
                 let rich = if *dim {
-                    RichText::new(text).color(theme::DIM)
+                    RichText::new(text).color(theme::muted())
                 } else {
                     RichText::new(text)
                 };

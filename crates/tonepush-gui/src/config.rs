@@ -54,6 +54,9 @@ pub struct Config {
     /// every time it starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Dark, light, or whichever the desktop is.
+    #[serde(default)]
+    pub appearance: crate::theme::Appearance,
 }
 
 impl Config {

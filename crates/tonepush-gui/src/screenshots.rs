@@ -20,16 +20,17 @@
 //! gpu-lock cargo test -p tonepush-gui --lib screenshots -- --ignored --test-threads=1
 //! ```
 //!
-//! `TONEPUSH_SCREENSHOT_SCENES` (comma separated names) and
-//! `TONEPUSH_SCREENSHOT_SIZES` (`1280x760,2560x1440`) narrow the run. The
-//! renderer insists on a discrete GPU and says which one it used.
+//! `TONEPUSH_SCREENSHOT_SCENES` (comma separated names),
+//! `TONEPUSH_SCREENSHOT_SIZES` (`1280x760,2560x1440`) and
+//! `TONEPUSH_SCREENSHOT_THEMES` (`dark,light`) narrow the run. The renderer
+//! insists on a discrete GPU and says which one it used.
 
 use std::sync::mpsc;
 use std::sync::Arc;
 
 use egui_kittest::Harness;
 
-use crate::{session, App, Connection};
+use crate::{session, theme, App, Connection};
 
 /// The sizes the design was drawn at: the smallest supported window, the
 /// reference, and a large display at a scale of one.
@@ -43,16 +44,24 @@ enum Scene {
     ProEdit,
     /// Nothing plugged in.
     NoDevice,
+    /// The HX Stomp with a setlist about to be written, asking first.
+    SetlistConfirm,
 }
 
 impl Scene {
-    const ALL: [Scene; 3] = [Scene::HxEdit, Scene::ProEdit, Scene::NoDevice];
+    const ALL: [Scene; 4] = [
+        Scene::HxEdit,
+        Scene::ProEdit,
+        Scene::NoDevice,
+        Scene::SetlistConfirm,
+    ];
 
     fn name(self) -> &'static str {
         match self {
             Scene::HxEdit => "hx-edit",
             Scene::ProEdit => "pro-edit",
             Scene::NoDevice => "no-device",
+            Scene::SetlistConfirm => "setlist-confirm",
         }
     }
 
@@ -64,6 +73,10 @@ impl Scene {
         match self {
             Scene::HxEdit => hx_stomp(app),
             Scene::ProEdit => app.pro.show_demo(),
+            Scene::SetlistConfirm => {
+                hx_stomp(app);
+                app.confirm_push = Some(0);
+            }
             Scene::NoDevice => {
                 app.connection = Connection::Offline;
                 app.status =
@@ -78,6 +91,7 @@ impl Scene {
 /// it draws, so fonts, icons and styles are installed where they are used.
 struct Demo {
     scene: Scene,
+    appearance: theme::Appearance,
     app: Option<App>,
 }
 
@@ -91,6 +105,7 @@ impl Demo {
             let (to_device, _nowhere) = mpsc::channel();
             let (_silent, from_device) = mpsc::channel();
             let mut app = App::new(ui.ctx(), to_device, from_device);
+            theme::choose(ui.ctx(), self.appearance);
             self.scene.stage(&mut app);
             self.app = Some(app);
             return;
@@ -131,6 +146,26 @@ fn gpu_renderer() -> egui_kittest::wgpu::WgpuTestRenderer {
     egui_kittest::wgpu::WgpuTestRenderer::from_render_state(state)
 }
 
+/// Save a frame as an opaque PNG at the encoder's best lossless compression:
+/// these are committed, so every kilobyte is kept for good.
+fn write_png(path: &std::path::Path, image: image::RgbaImage) {
+    use image::ImageEncoder;
+    let rgb = image::DynamicImage::ImageRgba8(image).to_rgb8();
+    let file = std::io::BufWriter::new(std::fs::File::create(path).expect("the PNG is created"));
+    image::codecs::png::PngEncoder::new_with_quality(
+        file,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    )
+    .write_image(
+        rgb.as_raw(),
+        rgb.width(),
+        rgb.height(),
+        image::ExtendedColorType::Rgb8,
+    )
+    .expect("the PNG is written");
+}
+
 fn wanted<T: Copy>(variable: &str, all: &[T], parse: impl Fn(&str) -> Option<T>) -> Vec<T> {
     match std::env::var(variable) {
         Ok(list) if !list.trim().is_empty() => list
@@ -161,23 +196,42 @@ fn screenshots() {
         let (width, height) = size.split_once('x')?;
         Some((width.parse().ok()?, height.parse().ok()?))
     });
+    let themes = wanted(
+        "TONEPUSH_SCREENSHOT_THEMES",
+        &[theme::Appearance::Dark, theme::Appearance::Light],
+        |name| match name {
+            "dark" => Some(theme::Appearance::Dark),
+            "light" => Some(theme::Appearance::Light),
+            _ => None,
+        },
+    );
     for scene in scenes {
         for &(width, height) in &sizes {
-            let mut harness = Harness::builder()
-                .with_size(egui::vec2(width as f32, height as f32))
-                .with_pixels_per_point(1.0)
-                .renderer(gpu_renderer())
-                .build_ui_state(
-                    |ui, demo: &mut Demo| demo.frame(ui),
-                    Demo { scene, app: None },
-                );
-            // Fonts and styles installed on the first frame apply from the
-            // next; a few more let images load and layouts settle.
-            harness.run_steps(8);
-            let image = harness.render().expect("the frame renders");
-            let path = out.join(format!("{}-{width}x{height}-dark.png", scene.name()));
-            image.save(&path).expect("the PNG is written");
-            eprintln!("wrote {}", path.display());
+            for &appearance in &themes {
+                let mut harness = Harness::builder()
+                    .with_size(egui::vec2(width as f32, height as f32))
+                    .with_pixels_per_point(1.0)
+                    .renderer(gpu_renderer())
+                    .build_ui_state(
+                        |ui, demo: &mut Demo| demo.frame(ui),
+                        Demo {
+                            scene,
+                            appearance,
+                            app: None,
+                        },
+                    );
+                // Fonts and styles installed on the first frame apply from
+                // the next; a few more let images load and layouts settle.
+                harness.run_steps(8);
+                let image = harness.render().expect("the frame renders");
+                let path = out.join(format!(
+                    "{}-{width}x{height}-{}.png",
+                    scene.name(),
+                    appearance.label().to_ascii_lowercase()
+                ));
+                write_png(&path, image);
+                eprintln!("wrote {}", path.display());
+            }
         }
     }
 }
