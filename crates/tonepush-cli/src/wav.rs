@@ -20,16 +20,11 @@ pub fn read(path: &Path) -> Result<Wav> {
         bail!("{path:?} is not a WAV file");
     }
     let declared = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-    if usize::try_from(declared).ok() != Some(bytes.len() - 8) {
-        bail!(
-            "WAV declares {declared} bytes after its RIFF header, but {} are present",
-            bytes.len() - 8
-        );
-    }
 
     let mut format = None;
     let mut samples = None;
     let mut pos = 12;
+    let mut missing_pad = false;
 
     while pos < bytes.len() {
         if bytes.len() - pos < 8 {
@@ -68,14 +63,19 @@ pub fn read(path: &Path) -> Result<Wav> {
             }
             _ => {}
         }
-        // Chunks are word-aligned, and an odd length is padded.
-        let padded_end = body_end
-            .checked_add(len & 1)
-            .context("WAV chunk padding overflow")?;
-        if padded_end > bytes.len() {
-            bail!("WAV chunk padding is truncated");
-        }
-        pos = padded_end;
+        // Chunks are word-aligned, and an odd length is padded. Plenty of
+        // writers leave the pad byte off the last chunk, where nothing follows
+        // to be misaligned, so only there may it be missing.
+        let padded_end = body_end + (len & 1);
+        missing_pad = padded_end > bytes.len();
+        pos = padded_end.min(bytes.len());
+    }
+
+    // The RIFF size counts what is present, or the pad byte a writer left off.
+    let present = bytes.len() - 8;
+    let counted = usize::try_from(declared).ok();
+    if counted != Some(present) && !(missing_pad && counted == Some(present + 1)) {
+        bail!("WAV declares {declared} bytes after its RIFF header, but {present} are present");
     }
 
     let format = format.context("WAV has no fmt chunk")?;
@@ -103,8 +103,16 @@ struct Format {
 
 impl Format {
     fn parse(body: &[u8]) -> Format {
+        const EXTENSIBLE: u16 = 0xFFFE;
+        let mut tag = u16::from_le_bytes(body[0..2].try_into().unwrap());
+        // WAVE_FORMAT_EXTENSIBLE, which most editors write for 24-bit audio,
+        // names the real format in the first two bytes of its SubFormat GUID,
+        // after the extension size, valid bits and channel mask.
+        if tag == EXTENSIBLE && body.len() >= 26 {
+            tag = u16::from_le_bytes(body[24..26].try_into().unwrap());
+        }
         Format {
-            tag: u16::from_le_bytes(body[0..2].try_into().unwrap()),
+            tag,
             channels: u16::from_le_bytes(body[2..4].try_into().unwrap()),
             sample_rate: u32::from_le_bytes(body[4..8].try_into().unwrap()),
             bits: u16::from_le_bytes(body[14..16].try_into().unwrap()),
@@ -244,6 +252,71 @@ mod tests {
         let mut wrong_riff_size = wav_16bit(&[1]);
         wrong_riff_size[4..8].copy_from_slice(&12u32.to_le_bytes());
         let path = write_temp(&wrong_riff_size, "hx-test-wrong-riff-size.wav");
+        assert!(read(&path).unwrap_err().to_string().contains("declares"));
+    }
+
+    /// A mono 24-bit PCM file the way most editors save one: in a
+    /// WAVE_FORMAT_EXTENSIBLE fmt chunk.
+    fn wav_24bit_extensible(samples: &[i32]) -> Vec<u8> {
+        let data: Vec<u8> = samples
+            .iter()
+            .flat_map(|s| s.to_le_bytes()[..3].to_vec())
+            .collect();
+        let mut out = b"RIFF".to_vec();
+        out.extend(((60 + data.len()) as u32).to_le_bytes());
+        out.extend(b"WAVEfmt ");
+        out.extend(40u32.to_le_bytes());
+        out.extend(0xFFFEu16.to_le_bytes());
+        out.extend(1u16.to_le_bytes());
+        out.extend(48_000u32.to_le_bytes());
+        out.extend(144_000u32.to_le_bytes());
+        out.extend(3u16.to_le_bytes());
+        out.extend(24u16.to_le_bytes());
+        out.extend(22u16.to_le_bytes()); // extension size
+        out.extend(24u16.to_le_bytes()); // valid bits
+        out.extend(4u32.to_le_bytes()); // front centre
+        out.extend(1u16.to_le_bytes()); // KSDATAFORMAT_SUBTYPE_PCM
+        out.extend([
+            0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+        ]);
+        out.extend(b"data");
+        out.extend((data.len() as u32).to_le_bytes());
+        out.extend(data);
+        out
+    }
+
+    #[test]
+    fn reads_24_bit_extensible_mono() {
+        let path = write_temp(
+            &wav_24bit_extensible(&[0, 4_194_304, -4_194_304, 8_388_607]),
+            "hx-test-extensible.wav",
+        );
+        let wav = read(&path).unwrap();
+        assert_eq!(wav.sample_rate, 48_000);
+        assert_eq!(wav.samples.len(), 4);
+        assert!((wav.samples[1] - 0.5).abs() < 1e-6);
+        assert!((wav.samples[2] + 0.5).abs() < 1e-6);
+    }
+
+    /// Three bytes of one 24-bit sample make an odd data chunk, and the pad
+    /// byte after it is often left off, with or without the RIFF size
+    /// counting it.
+    #[test]
+    fn tolerates_a_missing_pad_byte_after_the_last_chunk() {
+        let unpadded = wav_24bit_extensible(&[4_194_304]);
+        let path = write_temp(&unpadded, "hx-test-unpadded.wav");
+        assert!((read(&path).unwrap().samples[0] - 0.5).abs() < 1e-6);
+
+        let mut counted = unpadded.clone();
+        let riff_len = (counted.len() - 7) as u32;
+        counted[4..8].copy_from_slice(&riff_len.to_le_bytes());
+        let path = write_temp(&counted, "hx-test-unpadded-counted.wav");
+        assert_eq!(read(&path).unwrap().samples.len(), 1);
+
+        let mut overcounted = unpadded;
+        let riff_len = (overcounted.len() - 6) as u32;
+        overcounted[4..8].copy_from_slice(&riff_len.to_le_bytes());
+        let path = write_temp(&overcounted, "hx-test-unpadded-overcounted.wav");
         assert!(read(&path).unwrap_err().to_string().contains("declares"));
     }
 }
