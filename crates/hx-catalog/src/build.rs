@@ -131,7 +131,14 @@ pub fn slots_from_hlx(preset: &mut Preset, document: &Json, catalog: &Catalog) -
             found.sort_unstable();
             found
         };
-        let named = numbered("block");
+        let explicitly_placed =
+            |node: &Json| node.get("@slot").is_some() || node.get("@position").is_some();
+        // Blocks that say where they sat go in first, so a block that does
+        // not say can never take a slot a later block names: it packs into
+        // whatever is left. The sort is stable, so each group keeps the
+        // order the file numbers it in.
+        let mut named = numbered("block");
+        named.sort_by_key(|(_, key)| !dsp.get(key).is_some_and(explicitly_placed));
         // An Amp+Cab is one slot on the wire and two nodes in the file: the amp
         // as a block, its cab as `cab0`, `cab1`, … HX Edit's own convention,
         // and positional - the k-th cab belongs to the k-th block that can take
@@ -152,7 +159,7 @@ pub fn slots_from_hlx(preset: &mut Preset, document: &Json, catalog: &Catalog) -
             // the branch, and the place along that branch's row, which is not
             // the slot the moment a chain splits. A file with neither packs
             // from the front, which is all a dense numbering can mean.
-            let explicitly_placed = node.get("@slot").is_some() || node.get("@position").is_some();
+            let explicitly_placed = explicitly_placed(node);
             let branch = match node.get("@path") {
                 None => 0,
                 Some(value) => match value.as_u64() {
@@ -621,6 +628,34 @@ mod tests {
         assert_eq!(preset.blocks().count(), 2);
         assert_eq!(built.skipped.len(), 1);
         assert!(built.skipped[0].contains("outside"));
+    }
+
+    #[test]
+    fn a_block_without_a_slot_leaves_the_slot_a_later_block_names() {
+        const FIXTURE: &[u8] = include_bytes!("../../hx-proto/tests/preset.bin");
+        let Some(catalog) = crate::tests::catalog() else {
+            return;
+        };
+        let mut preset = Preset::parse(FIXTURE).expect("fixture");
+        empty_the_chain(&mut preset);
+        let first = preset
+            .slots
+            .iter()
+            .position(|slot| slot.kind == hx_proto::preset::Kind::Empty)
+            .expect("a block slot");
+        let document = serde_json::json!({
+            "data": { "tone": { "dsp0": {
+                // Numbered first but placed nowhere: it must not take the slot
+                // block1 asks for.
+                "block0": { "@model": "HD2_DistScream808Mono" },
+                "block1": { "@model": "HD2_DistScream808Mono", "@slot": first }
+            }}}
+        });
+
+        let built = slots_from_hlx(&mut preset, &document, &catalog);
+        assert!(built.skipped.is_empty(), "{:?}", built.skipped);
+        assert_eq!(built.blocks, 2);
+        assert_eq!(preset.blocks().count(), 2);
     }
 
     #[test]
