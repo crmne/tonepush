@@ -657,6 +657,25 @@ impl Session {
         stream.extend_from_slice(&encoded);
 
         let chunks: Vec<_> = stream.chunks(Self::CHUNK).collect();
+        // Once the first chunk is out, any failure leaves a partial message
+        // on the wire, and no later request can recover from that - whether
+        // it was a later write that failed or a read between two of them.
+        let mut started = false;
+        let sent = self.send_chunks(id, &chunks, &mut started);
+        if let Err(e) = &sent {
+            if started {
+                self.poisoned = Some(format!(
+                    "a transfer failed part-way through ({e}); the device needs its \
+                     9V adapter pulled before it will accept a new session"
+                ));
+            }
+        }
+        sent
+    }
+
+    /// The frames of one stream message, in order. `started` is set as soon
+    /// as the first of them is on the wire.
+    fn send_chunks(&mut self, id: ChannelId, chunks: &[&[u8]], started: &mut bool) -> Result<()> {
         for (n, chunk) in chunks.iter().enumerate() {
             let (seq, ack) = self.tick(id)?;
             let mut payload = Vec::with_capacity(ChannelHeader::SIZE + chunk.len());
@@ -667,17 +686,8 @@ impl Session {
             }
             .encode_into(&mut payload);
             payload.extend_from_slice(chunk);
-            // A failure after the first chunk has left a partial message on the
-            // wire, and no later request can recover from that.
-            if let Err(e) = self.write(&Frame::new(id.device, id.host, payload)) {
-                if n > 0 {
-                    self.poisoned = Some(format!(
-                        "a transfer failed part-way through ({e}); the device needs its \
-                         9V adapter pulled before it will accept a new session"
-                    ));
-                }
-                return Err(e);
-            }
+            self.write(&Frame::new(id.device, id.host, payload))?;
+            *started = true;
             self.mark_acknowledged(id);
 
             // Read between chunks on a long send. The device paces us with
@@ -1431,6 +1441,38 @@ mod tests {
         assert_eq!(chunks.len(), 16);
         assert!(chunks.iter().all(|c| c.len() <= Session::CHUNK));
         assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), body.len());
+    }
+
+    /// A read between two chunks of a long message that fails outright, not
+    /// by timing out, has left the message half-sent all the same. The
+    /// session refuses to say anything more rather than talk past it.
+    #[test]
+    fn a_failed_read_between_chunks_ends_the_session() {
+        let pedal = fake::Pedal::new();
+        let mut session = fake::session(&pedal);
+        let preset = session.read_preset().unwrap();
+        assert!(preset.encode().len() > Session::CHUNK, "a multi-chunk send");
+        pedal.lock().unwrap().fail_reads_after_data = Some("pipe error".into());
+
+        assert!(matches!(
+            session.write_preset(&preset),
+            Err(Error::Usb(ref why)) if why == "pipe error"
+        ));
+
+        let received = {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.failing_reads = None;
+            pedal.frames_in
+        };
+        assert!(matches!(
+            session.read_preset(),
+            Err(Error::Protocol(ref why)) if why.contains("part-way")
+        ));
+        assert_eq!(
+            pedal.lock().unwrap().frames_in,
+            received,
+            "nothing more sent"
+        );
     }
 
     /// Two real uploads captured from HX Edit, each with the sum it declared.
