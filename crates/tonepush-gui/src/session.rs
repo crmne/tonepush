@@ -1447,7 +1447,7 @@ impl Worker {
         // rather than after, because the editor reads that bundle to know
         // what the pedal is holding, and a stale answer would show up as a
         // dot saying the opposite of the truth.
-        self.back_up_one(index);
+        self.back_up_one(setlist, index);
         self.send(Evt::Saved);
         true
     }
@@ -1912,14 +1912,14 @@ impl Worker {
     /// Silent on purpose: it costs milliseconds and nobody asked for it, so it
     /// should not interrupt. A missing backup directory simply means automatic
     /// backups are not set up yet, which is not an error worth reporting.
-    fn back_up_one(&mut self, index: i64) {
+    fn back_up_one(&mut self, setlist: i64, index: i64) {
         let Some(dir) = self.automatic.clone() else {
             return;
         };
         if !hx_usb::backup::exists(&dir) {
             return;
         }
-        let _ = self.try_on_device(|d| hx_usb::backup::capture_one(d, &dir, index));
+        let _ = self.try_on_device(|d| hx_usb::backup::capture_one_in(d, &dir, setlist, index));
     }
 
     fn reload(&mut self) {
