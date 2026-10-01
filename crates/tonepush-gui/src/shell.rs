@@ -2383,6 +2383,8 @@ mod tests {
         assert!(app.foot().icon.is_none(), "no pedal: TonePush's own mark");
         app.connection = Connection::Online;
         app.device = "HX Stomp".to_owned();
+        // Starting reads the real automatic backup; this test starts without.
+        app.automatic_backup = None;
         assert_eq!(app.foot().text, "Not backed up yet");
         app.automatic_backup = Some(hx_usb::backup::Manifest {
             version: 1,
