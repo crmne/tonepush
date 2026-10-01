@@ -49,9 +49,9 @@ pub(crate) fn source_tag(source: Source) -> String {
 // Fitting a face
 
 /// Under a knob: the reading, the name and a row of tags.
-const CELL_TEXT: f32 = 3.0 + 17.0 + 15.0 + 4.0 + 18.0;
+pub(crate) const CELL_TEXT: f32 = 3.0 + 17.0 + 15.0 + 4.0 + 18.0;
 /// Between rows of a face.
-const ROW_GAP: f32 = 8.0;
+pub(crate) const ROW_GAP: f32 = 8.0;
 /// The rule and the cab's name between an amp's controls and its cab's.
 const GROUP_GAP: f32 = 30.0;
 
@@ -114,7 +114,7 @@ pub(crate) fn fit_face(
 }
 
 /// How tall a face is with `rows` of knobs `size` across, padding included.
-fn face_height(size: f32, rows: &[Vec<usize>]) -> f32 {
+pub(crate) fn face_height(size: f32, rows: &[Vec<usize>]) -> f32 {
     let lines: usize = rows.iter().map(Vec::len).sum();
     let groups = rows.iter().filter(|group| !group.is_empty()).count();
     lines as f32 * (size + 66.0) + 24.0 + groups.saturating_sub(1) as f32 * GROUP_GAP
@@ -479,7 +479,7 @@ fn group_heading(ui: &mut Ui, title: Option<&str>, width: f32) {
 }
 
 /// Paint one line of text centred on `centre`, no wider than `width`.
-fn centred(
+pub(crate) fn centred(
     ui: &Ui,
     text: impl Into<String>,
     font: egui::FontId,
@@ -901,7 +901,7 @@ fn lens_head(ui: &mut Ui, title: &str, subtitle: &str, right: impl FnOnce(&mut U
 
 /// A card's head: an icon, the title, a quieter aside, and room at the
 /// right laid out right to left.
-fn card_head(
+pub(crate) fn card_head(
     ui: &mut Ui,
     icon: Option<Icon>,
     title: &str,

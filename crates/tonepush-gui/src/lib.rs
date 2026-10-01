@@ -22,7 +22,6 @@ mod library_view;
 mod pages;
 mod pane;
 mod pro;
-mod processor;
 #[cfg(test)]
 mod screenshots;
 mod session;
@@ -1729,7 +1728,9 @@ impl App {
         self.settle_publishing(&ctx);
         self.settle_cloud_search(&ctx);
         self.settle_cloud_download(&ctx);
-        if !pro_active {
+        if pro_active {
+            self.pro.dropped_files(&ctx);
+        } else {
             self.dropped_files(&ctx);
         }
 
@@ -1740,7 +1741,8 @@ impl App {
             shell::Page::Edit => {
                 self.deck(ui, tier);
                 if pro_active {
-                    self.pro.body(ui);
+                    let note = self.pro_library_note();
+                    self.pro.body(ui, tier, &note);
                 } else {
                     self.signal_chain(ui);
                     if self.shows_floor(tier) {
@@ -1756,7 +1758,7 @@ impl App {
             shell::Page::Pedal => {
                 self.small_deck(ui);
                 if pro_active {
-                    self.pro.pedal_page(ui);
+                    self.pro.pedal_page(ui, tier);
                 } else {
                     self.pedal_page(ui, tier);
                 }
@@ -2441,6 +2443,39 @@ impl App {
                 self.note(said);
             }
             Err(why) => self.note(why),
+        }
+    }
+
+    /// What the library knows of the StompStation PRO's loaded preset, for
+    /// the card beside it on a large window.
+    fn pro_library_note(&self) -> pro::LibraryNote {
+        let Some((name, sync)) = self.pro.loaded(&self.library_lookup) else {
+            return pro::LibraryNote::default();
+        };
+        let Some(entry) = self
+            .lib_entries
+            .iter()
+            .find(|entry| entry.pro && entry.name.trim().eq_ignore_ascii_case(name.trim()))
+        else {
+            return pro::LibraryNote {
+                sync,
+                ..pro::LibraryNote::default()
+            };
+        };
+        let meta = &entry.meta;
+        pro::LibraryNote {
+            kept: Some((entry.name.clone(), entry.version)),
+            rows: [
+                ("Song", meta.song.clone()),
+                ("Artist", meta.artist.clone()),
+                ("Part", meta.part.clone()),
+                ("Guitar", meta.guitar.clone()),
+                ("Tags", meta.tags.join(", ")),
+            ]
+            .into_iter()
+            .filter(|(_, value)| !value.trim().is_empty())
+            .collect(),
+            sync,
         }
     }
 

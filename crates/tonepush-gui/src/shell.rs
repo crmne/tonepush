@@ -974,6 +974,8 @@ pub(crate) struct DeckAsked {
     pub redo: bool,
     pub discard: bool,
     pub save: bool,
+    /// The backup that unlocks saving, asked for in Save's place.
+    pub unlock: bool,
 }
 
 /// What the end of a deck needs to know.
@@ -987,6 +989,9 @@ pub(crate) struct DeckActions<'a> {
     pub can_save: bool,
     /// Why Save is unavailable, when it is.
     pub save_refused: &'a str,
+    /// Saving waits for a backup this deck can take: the backup takes
+    /// Save's place, enabled when nothing else is talking to the pedal.
+    pub unlock: Option<bool>,
 }
 
 /// Discard, undo, redo and Save, the way every deck ends. Laid out right to
@@ -1004,7 +1009,19 @@ pub(crate) fn deck_actions(ui: &mut Ui, actions: &DeckActions) -> DeckAsked {
         egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
         egui::Key::Z,
     );
-    if actions.dirty {
+    if let Some(ready) = actions.unlock {
+        asked.unlock = theme::Button::new("Back up to unlock saving")
+            .primary()
+            .icon(Icon::Download)
+            .enabled(ready)
+            .show(ui)
+            .on_hover_text(
+                "Read the whole pedal into a checked backup on this computer; saving, \
+                 renaming and importing are on once it matches",
+            )
+            .on_disabled_hover_text("The pedal is busy")
+            .clicked();
+    } else if actions.dirty {
         let mut save = theme::Button::new("Save")
             .primary()
             .enabled(actions.can_save);
@@ -1970,6 +1987,7 @@ impl App {
                             dirty: self.dirty,
                             can_save: self.dirty,
                             save_refused: "Nothing to save",
+                            unlock: None,
                         },
                     );
                     if asked.save {

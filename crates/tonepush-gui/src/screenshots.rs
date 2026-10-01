@@ -68,10 +68,18 @@ enum Scene {
     HxSnapshots,
     /// The library's setlists, one compared with the pedal bank by bank.
     HxSetlists,
+    /// The StompStation PRO's NAM amps, the AC30 chosen.
+    ProNam,
+    /// The StompStation PRO's impulse responses, a stereo pair chosen.
+    ProIrs,
+    /// The StompStation PRO before a backup of it matches: saving waits.
+    ProUnprotected,
+    /// The StompStation PRO's own settings.
+    ProSettings,
 }
 
 impl Scene {
-    const ALL: [Scene; 15] = [
+    const ALL: [Scene; 19] = [
         Scene::HxEdit,
         Scene::ProEdit,
         Scene::NoDevice,
@@ -87,6 +95,10 @@ impl Scene {
         Scene::HxFootswitches,
         Scene::HxSnapshots,
         Scene::HxSetlists,
+        Scene::ProNam,
+        Scene::ProIrs,
+        Scene::ProUnprotected,
+        Scene::ProSettings,
     ];
 
     fn name(self) -> &'static str {
@@ -106,6 +118,10 @@ impl Scene {
             Scene::HxFootswitches => "hx-footswitches",
             Scene::HxSnapshots => "hx-snapshots",
             Scene::HxSetlists => "hx-setlists",
+            Scene::ProNam => "pro-nam",
+            Scene::ProIrs => "pro-irs",
+            Scene::ProUnprotected => "pro-unprotected",
+            Scene::ProSettings => "pro-settings",
         }
     }
 
@@ -158,6 +174,20 @@ impl Scene {
                 pro(app);
                 app.page = shell::Page::Pedal;
                 app.pro.demo_page();
+            }
+            Scene::ProNam | Scene::ProIrs => {
+                pro(app);
+                app.page = shell::Page::Pedal;
+                app.pro.demo_library(self == Scene::ProIrs);
+            }
+            Scene::ProUnprotected => {
+                pro(app);
+                app.pro.demo_unprotected();
+            }
+            Scene::ProSettings => {
+                pro(app);
+                app.page = shell::Page::Pedal;
+                app.pro.demo_settings();
             }
             Scene::HxBrowser => {
                 hx_stomp(app);

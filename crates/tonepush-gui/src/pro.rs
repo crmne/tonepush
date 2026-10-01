@@ -11,10 +11,16 @@ use voidx_client::backup::{self, ArmedRollback};
 use voidx_client::{BlobList, Device, Identity, SerialLink, UploadStep, WriteSafety};
 use voidx_proto::{NodeDescription, NodeKind, NodePath, Preset};
 
-use crate::{config, processor, theme, LibraryLookup};
+use crate::{config, theme, LibraryLookup};
 
+mod board;
 mod frame;
+mod libraries;
+mod pane;
+mod settings;
 pub(crate) use frame::{slot_label, Picked};
+use libraries::LibraryFacts;
+pub(crate) use pane::LibraryNote;
 
 /// Keep PRO favourites apart from the first HX setlist in the existing local
 /// preferences file. The UI is shared; only the device-address key differs.
@@ -156,6 +162,9 @@ enum Cmd {
         file: PathBuf,
     },
     Backup(PathBuf),
+    /// Back the pedal up where TonePush keeps its own backups, which unlocks
+    /// saving once it matches.
+    BackupHere,
     Restore(PathBuf),
 }
 
@@ -191,6 +200,7 @@ enum Evt {
     Guarded {
         path: PathBuf,
         preset_hashes: BTreeMap<usize, String>,
+        facts: LibraryFacts,
     },
     History {
         undo: usize,
@@ -246,7 +256,6 @@ pub(crate) struct Panel {
     tab: Tab,
     selected_group: String,
     search: String,
-    shelf_search: String,
     drafts: BTreeMap<String, Value>,
     saved_drafts: BTreeMap<String, Value>,
     undo_depth: usize,
@@ -274,6 +283,13 @@ pub(crate) struct Panel {
     /// from `busy`: a progress meter communicates work without turning live
     /// sound controls into a loading screen.
     working: Option<(String, f32)>,
+    /// A reading being typed: its node, and the text so far.
+    typing: Option<(String, String)>,
+    /// What the checked backup says about the libraries' files.
+    facts: LibraryFacts,
+    /// Sent after the confirmation's own command once it is confirmed: the
+    /// second slot of a stereo pair being removed.
+    after_confirmation: Option<Cmd>,
 }
 
 impl Panel {
@@ -297,7 +313,6 @@ impl Panel {
             tab: Tab::Backups,
             selected_group: String::new(),
             search: String::new(),
-            shelf_search: String::new(),
             drafts: BTreeMap::new(),
             saved_drafts: BTreeMap::new(),
             undo_depth: 0,
@@ -321,6 +336,9 @@ impl Panel {
             preview: None,
             confirmation: None,
             working: None,
+            typing: None,
+            facts: LibraryFacts::default(),
+            after_confirmation: None,
         };
         // A test builds an App, and an App builds this panel: it must never
         // reach for a StompStation PRO that happens to be plugged into the
@@ -416,7 +434,9 @@ impl Panel {
                 Ok(Evt::Guarded {
                     path,
                     preset_hashes,
+                    facts,
                 }) => {
+                    self.facts = facts;
                     // The bundle is written once and published whole, so the
                     // folder's time is when the backup was taken.
                     self.rollback_time = std::fs::metadata(&path)
@@ -460,6 +480,8 @@ impl Panel {
                     self.read_only = None;
                     self.preset_hashes.clear();
                     self.working = None;
+                    self.typing = None;
+                    self.facts = LibraryFacts::default();
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -659,6 +681,14 @@ impl Panel {
         }
     }
 
+    /// The loaded preset's name, and whether the library holds it as it is.
+    pub(crate) fn loaded(&self, lookup: &LibraryLookup) -> Option<(String, theme::Sync)> {
+        let snapshot = self.snapshot.as_ref()?;
+        let index = active_preset_index(snapshot)?;
+        let name = snapshot.active_preset.clone()?;
+        Some((name, self.slot_sync(index, lookup)))
+    }
+
     fn slot_sync(&self, index: usize, lookup: &LibraryLookup) -> theme::Sync {
         if let Some(hash) = self.preset_hashes.get(&index) {
             let name = self
@@ -772,43 +802,46 @@ impl Panel {
         }
     }
 
-    pub(crate) fn body(&mut self, root: &mut egui::Ui) {
-        let snapshot = self.snapshot.clone();
-        if let Some(snapshot) = &snapshot {
-            let max_height = (root.available_height() - 96.0).max(126.0);
-            processor::chain_panel(
-                root,
-                "pro_chain",
-                106.0_f32.min(max_height),
-                106.0..=max_height,
-                |ui| self.signal_chain(ui, snapshot),
-            );
-            // The picker belongs to the editor below the chain. Creating this
-            // dock after the top panel means it cannot steal chain width or
-            // paint over the rightmost controls.
-            if block_selector(snapshot, &self.selected_group).is_some() {
-                egui::Panel::right("pro_shelf")
-                    .min_size(320.0)
-                    .max_size(420.0)
-                    .default_size(360.0)
-                    .resizable(true)
-                    .show(root, |ui| self.model_shelf(ui, snapshot));
-            }
+    /// The Edit page for a PRO: the strip that says saving waits, when it
+    /// does, the board, and the pane.
+    pub(crate) fn body(&mut self, root: &mut egui::Ui, tier: theme::Tier, note: &LibraryNote) {
+        let Some(snapshot) = self.snapshot.clone() else {
+            let status = self.status.clone();
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(theme::bg()))
+                .show(root, |ui| {
+                    let rect = ui.max_rect();
+                    crate::pane::centred(
+                        ui,
+                        status,
+                        theme::regular(theme::BODY),
+                        theme::muted(),
+                        egui::pos2(rect.center().x, rect.top() + 72.0),
+                        rect.width() - 40.0,
+                    );
+                });
+            return;
+        };
+        if self.unlock_offer().is_some() {
+            self.unlock_strip(root);
         }
+        self.board(root, &snapshot, tier);
+        self.pane(root, &snapshot, tier, note);
+    }
 
-        processor::editor(root, |ui| match &snapshot {
-            Some(snapshot) => {
-                let guarded = self.selected_group != INPUT_GROUP || self.rollback.is_some();
-                ui.add_enabled_ui(self.online && !self.busy && guarded, |ui| {
-                    self.nodes_ui(ui, snapshot, false, Some(self.selected_group.clone()))
-                });
-            }
-            None => {
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new(&self.status).color(theme::muted()));
-                });
-            }
-        });
+    /// Whether saving waits for a backup the deck can take, and whether it
+    /// can be taken now.
+    pub(crate) fn unlock_offer(&self) -> Option<bool> {
+        (self.online
+            && self.snapshot.is_some()
+            && self.rollback.is_none()
+            && self.read_only.is_none())
+        .then_some(!self.busy && self.working.is_none())
+    }
+
+    /// Back the pedal up where TonePush keeps its own backups.
+    pub(crate) fn back_up_here(&self) {
+        let _ = self.tx.send(Cmd::BackupHere);
     }
 
     /// The questions and previews that float over whichever page shows.
@@ -821,6 +854,7 @@ impl Panel {
         let Some((name, snapshot)) = self.preview.clone() else {
             return;
         };
+        let tier = theme::Tier::now(ctx);
         let mut open = true;
         egui::Window::new(name)
             .open(&mut open)
@@ -828,918 +862,24 @@ impl Panel {
             .default_height(430.0)
             .show(ctx, |ui| {
                 ui.label(RichText::new("StompStation PRO preset · preview").color(theme::muted()));
-                ui.separator();
-                ui.add_enabled_ui(false, |ui| {
-                    let height = 150.0_f32.min(ui.available_height() * 0.42);
-                    ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
-                        self.signal_chain(ui, &snapshot);
-                    });
-                    ui.separator();
-                    self.pedal_nodes_ui(ui, &snapshot, &self.selected_group.clone());
-                });
+                ui.add_space(6.0);
+                let g = crate::board::Geometry::pro(tier);
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), g.top + g.tile_height + g.bottom),
+                    egui::Sense::hover(),
+                );
+                ui.painter().rect_filled(
+                    rect,
+                    egui::CornerRadius::same(theme::RADIUS_CARD),
+                    theme::bg_deep(),
+                );
+                let mut board = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                let _ = self.draw_board(&mut board, &snapshot, &g, tier, false);
+                ui.add_space(4.0);
+                self.preview_pane(ui, &snapshot, tier);
             });
         if !open {
             self.preview = None;
-        }
-    }
-
-    fn signal_chain(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
-        egui::ScrollArea::horizontal()
-            .id_salt("pro-fixed-chain-v2")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    // Each card already owns its four-pixel wire. egui's
-                    // ordinary widget gap on top of that was nearly three
-                    // extra card widths across this fixed fourteen-block run.
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    if processor::fixed_endpoint(ui, "Input", self.selected_group == INPUT_GROUP)
-                        .on_hover_text("input and pickup settings")
-                        .clicked()
-                    {
-                        self.selected_group = INPUT_GROUP.into();
-                        self.search.clear();
-                    }
-                    processor::fixed_connector(ui);
-                    let groups = app_groups(snapshot);
-                    for group in &groups {
-                        let title = friendly_group(group);
-                        let name = block_model_name(snapshot, group).unwrap_or(title);
-                        let category = group_category(group);
-                        if processor::fixed_signal_block(
-                            ui,
-                            &name,
-                            category,
-                            self.selected_group == *group,
-                            block_enabled(snapshot, group),
-                        )
-                        .clicked()
-                        {
-                            self.selected_group = group.clone();
-                            self.search.clear();
-                        }
-                        processor::fixed_connector(ui);
-                    }
-                    if processor::fixed_endpoint(ui, "Output", self.selected_group == "output")
-                        .on_hover_text("master and preset output settings")
-                        .clicked()
-                    {
-                        self.selected_group = "output".into();
-                        self.search.clear();
-                    }
-                });
-            });
-    }
-
-    fn model_shelf(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
-        let Some((path, description)) = block_selector(snapshot, &self.selected_group) else {
-            return;
-        };
-        let current = self
-            .drafts
-            .get(path.as_str())
-            .cloned()
-            .or_else(|| description.value.clone())
-            .unwrap_or(Value::Null);
-        let choices = selector_choices(snapshot, &description);
-        ui.add_space(8.0);
-        ui.heading(format!("{} models", friendly_group(&self.selected_group)));
-        ui.add(
-            egui::TextEdit::singleline(&mut self.shelf_search)
-                .hint_text("Search models or slots")
-                .desired_width(f32::INFINITY),
-        );
-        let needle = self.shelf_search.trim().to_ascii_lowercase();
-        let referenced_library = description.reference.as_deref().and_then(|reference| {
-            snapshot
-                .libraries
-                .iter()
-                .find(|state| state.info.path.as_str() == reference)
-        });
-        if let Some(state) = referenced_library {
-            if matches!(
-                state.library,
-                Library::Irs | Library::Amps | Library::Drives
-            ) {
-                self.slot_library_shelf(ui, state, &path, &description, &current, &needle);
-                return;
-            }
-        }
-
-        ui.separator();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for choice in choices {
-                    let name = value_text(&choice);
-                    if !needle.is_empty() && !name.to_ascii_lowercase().contains(&needle) {
-                        continue;
-                    }
-                    if ui
-                        .selectable_label(current == choice, &name)
-                        .on_hover_text(format!("choose {name}"))
-                        .clicked()
-                    {
-                        let _ = self.tx.send(Cmd::SetNode {
-                            path: path.clone(),
-                            description: Box::new(description.clone()),
-                            before: current.clone(),
-                            value: choice.clone(),
-                            persistent: false,
-                        });
-                        self.drafts.insert(path.to_string(), choice);
-                        self.recompute_dirty();
-                    }
-                }
-            });
-    }
-
-    /// Installed IR/NAM choices are physical device slots, so show that fact
-    /// directly instead of putting a slot-number form above a name-only list.
-    fn slot_library_shelf(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &LibraryState,
-        path: &NodePath,
-        description: &NodeDescription,
-        current: &Value,
-        needle: &str,
-    ) {
-        let library = state.library;
-        let current_index = current.as_str().and_then(|selected| {
-            state
-                .info
-                .names
-                .iter()
-                .position(|name| name.as_deref() == Some(selected))
-        });
-        if let Some(index) = current_index {
-            self.target_slots.insert(library, index + 1);
-        }
-        ui.add_space(5.0);
-        self.slot_count_header(ui, state);
-        if let Some(index) = current_index {
-            self.slot_tools_ui(ui, state, index);
-        } else {
-            ui.label(
-                RichText::new("Choose an installed model below to manage its slot.")
-                    .small()
-                    .color(theme::muted()),
-            );
-        }
-        ui.separator();
-        self.slot_rows_ui(ui, state, needle, Some((path, description, current)));
-    }
-
-    fn nodes_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        snapshot: &Snapshot,
-        settings: bool,
-        group: Option<String>,
-    ) {
-        if settings {
-            return self.settings_ui(ui, snapshot);
-        }
-        if let Some(group) = group.as_deref() {
-            self.pedal_nodes_ui(ui, snapshot, group)
-        }
-    }
-
-    fn settings_ui(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
-        ui.horizontal(|ui| {
-            ui.heading("Settings");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.search)
-                        .hint_text("Filter parameters")
-                        .desired_width(220.0),
-                );
-            });
-        });
-        if self.rollback.is_none() {
-            ui.label(
-                RichText::new(
-                    "Load and verify a current rollback bundle in Backup & restore before changing global settings.",
-                )
-                .color(theme::muted()),
-            );
-        }
-        ui.separator();
-        let needle = self.search.trim().to_ascii_lowercase();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for (section, heading) in [
-                    ("tuner", "Tuner"),
-                    ("input", "Input"),
-                    ("misc", "General"),
-                    ("ctrl", "Controller"),
-                ] {
-                    let nodes = snapshot
-                        .settings
-                        .iter()
-                        .filter(|(path, description)| {
-                            settings_group(path.as_str()) == Some(section)
-                                && description.value.as_ref().is_some_and(|value| {
-                                    editable_node(path.as_str(), description, value)
-                                })
-                                && node_matches_search(path.as_str(), description, &needle)
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if nodes.is_empty() {
-                        continue;
-                    }
-                    ui.add_space(8.0);
-                    ui.label(RichText::new(heading).strong());
-                    ui.separator();
-                    for (path, description) in nodes {
-                        let label = node_label(&path, &description);
-                        let path_text = path.to_string();
-                        processor::parameter_row(
-                            ui,
-                            self.rollback.is_some(),
-                            &label,
-                            &path_text,
-                            |ui| self.node_control(ui, snapshot, path, description, true),
-                        );
-                    }
-                }
-            });
-    }
-
-    fn pedal_nodes_ui(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot, group: &str) {
-        let title = block_model_name(snapshot, group).unwrap_or_else(|| friendly_group(group));
-        let category = group_category(group);
-        let persistent = group == INPUT_GROUP;
-        ui.horizontal(|ui| {
-            ui.heading(&title);
-            ui.label(RichText::new(category).color(theme::muted()));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.search)
-                        .hint_text("Filter parameters")
-                        .desired_width(220.0),
-                );
-            });
-        });
-        if persistent && self.rollback.is_none() {
-            ui.label(
-                RichText::new("Input settings unlock after a rollback backup verifies.")
-                    .small()
-                    .color(theme::muted()),
-            );
-        }
-        ui.separator();
-
-        let needle = self.search.trim().to_ascii_lowercase();
-        let source = if persistent {
-            &snapshot.settings
-        } else {
-            &snapshot.app
-        };
-        let selector_path = block_selector(snapshot, group).map(|(path, _)| path);
-        let nodes = source
-            .iter()
-            .filter(|(path, description)| {
-                let in_group = if persistent {
-                    path.as_str().starts_with("root\\settings\\input\\")
-                } else {
-                    app_group(path.as_str()).as_deref() == Some(group)
-                };
-                in_group
-                    && selector_path.as_ref() != Some(path)
-                    && description
-                        .value
-                        .as_ref()
-                        .is_some_and(|value| editable_node(path.as_str(), description, value))
-                    && node_matches_search(path.as_str(), description, &needle)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let (columns, indent) = processor::control_grid(ui, nodes.len());
-        egui::ScrollArea::vertical()
-            .id_salt("pro-pedal")
-            .show(ui, |ui| {
-                if let Some(art) = theme::category_icon(category) {
-                    ui.vertical_centered(|ui| {
-                        theme::pedal_image(ui, &art, 150.0);
-                        ui.label(RichText::new(&title).heading());
-                    });
-                    ui.add_space(10.0);
-                }
-                for row in nodes.chunks(columns) {
-                    ui.horizontal_top(|ui| {
-                        ui.add_space(indent);
-                        for (path, description) in row {
-                            let Some(current) = self.drafts.get(path.as_str()).cloned() else {
-                                continue;
-                            };
-                            let path = path.clone();
-                            let description = description.clone();
-                            ui.allocate_ui(processor::CONTROL_CELL, |ui| {
-                                ui.vertical_centered(|ui| {
-                                    let mut changed = None;
-                                    match description.kind.as_ref() {
-                                        Some(NodeKind::Float) => {
-                                            let min = description.min.unwrap_or(0.0) as f32;
-                                            let max = description.max.unwrap_or(100.0) as f32;
-                                            let mut number =
-                                                current.as_f64().unwrap_or_default() as f32;
-                                            let hit = theme::knob(ui, &mut number, min..=max);
-                                            if hit.double_clicked() {
-                                                if let Some(default) = description
-                                                    .default
-                                                    .as_ref()
-                                                    .and_then(Value::as_f64)
-                                                {
-                                                    number = default as f32;
-                                                    changed = json_number(number as f64);
-                                                }
-                                            } else if hit.changed() {
-                                                let rounded = description
-                                                    .step
-                                                    .filter(|step| *step > 0.0)
-                                                    .map(|step| {
-                                                        let base = description.min.unwrap_or(0.0);
-                                                        base + ((number as f64 - base) / step)
-                                                            .round()
-                                                            * step
-                                                    })
-                                                    .unwrap_or(number as f64);
-                                                changed = json_number(rounded);
-                                            }
-                                            ui.label(
-                                                RichText::new(format_node_value(
-                                                    &description,
-                                                    &Value::from(number as f64),
-                                                ))
-                                                .monospace()
-                                                .color(theme::accent()),
-                                            );
-                                        }
-                                        Some(NodeKind::Enum | NodeKind::Array)
-                                            if toggle_choices(&description).is_some() =>
-                                        {
-                                            let (off, on) = toggle_choices(&description)
-                                                .expect("guarded above");
-                                            let mut enabled = current == on;
-                                            if ui.add(theme::switch(&mut enabled)).changed() {
-                                                changed = Some(if enabled { on } else { off });
-                                            }
-                                            ui.label(
-                                                RichText::new(value_text(&current))
-                                                    .monospace()
-                                                    .color(theme::accent()),
-                                            );
-                                        }
-                                        Some(
-                                            NodeKind::Enum
-                                            | NodeKind::Array
-                                            | NodeKind::PropertyList,
-                                        ) => {
-                                            ui.add_space(11.0);
-                                            let mut choices = description
-                                                .options
-                                                .clone()
-                                                .or(description.items.clone())
-                                                .unwrap_or_default();
-                                            if let Some(reference) = &description.reference {
-                                                if let Some(library) =
-                                                    snapshot.libraries.iter().find(|library| {
-                                                        library.info.path.as_str() == reference
-                                                    })
-                                                {
-                                                    choices = library
-                                                        .info
-                                                        .names
-                                                        .iter()
-                                                        .filter_map(|name| {
-                                                            name.clone().map(Value::String)
-                                                        })
-                                                        .collect();
-                                                }
-                                            }
-                                            egui::ComboBox::from_id_salt((
-                                                "pro-pedal-param",
-                                                path.as_str(),
-                                            ))
-                                            .width(processor::CONTROL_CELL.x)
-                                            .selected_text(
-                                                RichText::new(value_text(&current))
-                                                    .color(theme::accent()),
-                                            )
-                                            .show_ui(
-                                                ui,
-                                                |ui| {
-                                                    for choice in choices {
-                                                        if ui
-                                                            .selectable_label(
-                                                                choice == current,
-                                                                value_text(&choice),
-                                                            )
-                                                            .clicked()
-                                                        {
-                                                            changed = Some(choice);
-                                                        }
-                                                    }
-                                                },
-                                            );
-                                            ui.add_space(11.0);
-                                        }
-                                        Some(NodeKind::Item) if current.is_boolean() => {
-                                            let mut enabled = current.as_bool().unwrap_or_default();
-                                            if ui.add(theme::switch(&mut enabled)).changed() {
-                                                changed = Some(Value::Bool(enabled));
-                                            }
-                                            ui.label(
-                                                RichText::new(if enabled { "On" } else { "Off" })
-                                                    .monospace()
-                                                    .color(theme::accent()),
-                                            );
-                                        }
-                                        _ => {
-                                            ui.add_space(24.0);
-                                            ui.label(
-                                                RichText::new(value_text(&current))
-                                                    .monospace()
-                                                    .color(theme::accent()),
-                                            );
-                                            ui.add_space(24.0);
-                                        }
-                                    }
-                                    let label = description.desc.as_deref().unwrap_or_else(|| {
-                                        path.as_str().rsplit('\\').next().unwrap_or(path.as_str())
-                                    });
-                                    ui.label(RichText::new(label).small());
-                                    if let Some(value) = changed {
-                                        if description.validate_value(&value).is_ok() {
-                                            self.drafts.insert(path.to_string(), value.clone());
-                                            self.recompute_dirty();
-                                            let _ = self.tx.send(Cmd::SetNode {
-                                                path: path.clone(),
-                                                description: Box::new(description.clone()),
-                                                before: current.clone(),
-                                                value,
-                                                persistent,
-                                            });
-                                        }
-                                    }
-                                });
-                            });
-                        }
-                    });
-                }
-            });
-    }
-
-    fn node_control(
-        &mut self,
-        ui: &mut egui::Ui,
-        snapshot: &Snapshot,
-        path: NodePath,
-        description: NodeDescription,
-        persistent: bool,
-    ) {
-        let Some(current) = self.drafts.get(path.as_str()).cloned() else {
-            return;
-        };
-        let mut changed = None;
-        match description.kind.as_ref() {
-            Some(NodeKind::Float) => {
-                let mut number = current.as_f64().unwrap_or_default();
-                let response = match (description.min, description.max) {
-                    (Some(min), Some(max)) => ui.add(
-                        egui::Slider::new(&mut number, min..=max)
-                            .step_by(description.step.unwrap_or(0.0).max(0.0))
-                            .suffix(
-                                description
-                                    .unit
-                                    .as_deref()
-                                    .map(|unit| format!(" {unit}"))
-                                    .unwrap_or_default(),
-                            ),
-                    ),
-                    _ => ui.add(egui::DragValue::new(&mut number)),
-                };
-                if response.changed() {
-                    changed = serde_json::Number::from_f64(number).map(Value::Number);
-                }
-            }
-            Some(NodeKind::Enum | NodeKind::Array | NodeKind::PropertyList) => {
-                let mut choices = description
-                    .options
-                    .clone()
-                    .or(description.items.clone())
-                    .unwrap_or_default();
-                if let Some(reference) = &description.reference {
-                    if let Some(library) = snapshot
-                        .libraries
-                        .iter()
-                        .find(|library| library.info.path.as_str() == reference)
-                    {
-                        choices = library
-                            .info
-                            .names
-                            .iter()
-                            .filter_map(|name| name.clone().map(Value::String))
-                            .collect();
-                    }
-                }
-                egui::ComboBox::from_id_salt(("pro-node", path.as_str()))
-                    .selected_text(value_text(&current))
-                    .width(210.0)
-                    .show_ui(ui, |ui| {
-                        for choice in choices {
-                            if ui
-                                .selectable_label(choice == current, value_text(&choice))
-                                .clicked()
-                            {
-                                changed = Some(choice);
-                            }
-                        }
-                    });
-            }
-            Some(NodeKind::Item) if current.is_boolean() => {
-                let mut value = current.as_bool().unwrap_or_default();
-                if ui.checkbox(&mut value, "").changed() {
-                    changed = Some(Value::Bool(value));
-                }
-            }
-            Some(NodeKind::Item) if current.is_string() => {
-                let mut value = current.as_str().unwrap_or_default().to_owned();
-                let response = ui.add(egui::TextEdit::singleline(&mut value).desired_width(210.0));
-                if response.lost_focus() && response.changed() {
-                    changed = Some(Value::String(value));
-                }
-            }
-            _ => {
-                ui.label(
-                    RichText::new(value_text(&current))
-                        .monospace()
-                        .color(theme::muted()),
-                );
-            }
-        }
-        if let Some(value) = changed {
-            if description.validate_value(&value).is_ok() {
-                self.drafts.insert(path.to_string(), value.clone());
-                self.recompute_dirty();
-                let _ = self.tx.send(Cmd::SetNode {
-                    path,
-                    description: Box::new(description),
-                    before: current,
-                    value,
-                    persistent,
-                });
-            }
-        }
-    }
-
-    fn library_ui(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot, library: Library) {
-        let Some(state) = snapshot
-            .libraries
-            .iter()
-            .find(|state| state.library == library)
-        else {
-            return;
-        };
-        ui.horizontal(|ui| {
-            ui.heading(library.title());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let search = self.library_searches.entry(library).or_default();
-                ui.add(
-                    egui::TextEdit::singleline(search)
-                        .hint_text("Search slots")
-                        .desired_width(220.0),
-                );
-            });
-        });
-        if library == Library::Presets {
-            ui.horizontal(|ui| {
-                ui.label("Save live state as");
-                ui.add(egui::TextEdit::singleline(&mut self.save_name).desired_width(230.0));
-                if ui
-                    .add_enabled(
-                        self.rollback.is_some() && !self.save_name.trim().is_empty(),
-                        egui::Button::new("Save preset"),
-                    )
-                    .on_disabled_hover_text("load a rollback bundle first")
-                    .clicked()
-                {
-                    let _ = self.tx.send(Cmd::SavePreset(self.save_name.trim().into()));
-                }
-            });
-        }
-        self.slot_count_header(ui, state);
-        let selected = self
-            .target_slots
-            .entry(library)
-            .or_insert(1)
-            .saturating_sub(1)
-            .min(state.info.count.saturating_sub(1));
-        self.slot_tools_ui(ui, state, selected);
-        ui.separator();
-        let needle = self
-            .library_searches
-            .get(&library)
-            .map_or("", String::as_str)
-            .trim()
-            .to_ascii_lowercase();
-        self.slot_rows_ui(ui, state, &needle, None);
-    }
-
-    fn slot_count_header(&self, ui: &mut egui::Ui, state: &LibraryState) {
-        let occupied = state.info.occupied().count();
-        ui.label(
-            RichText::new(format!(
-                "{occupied} installed · {} empty",
-                state.info.count.saturating_sub(occupied)
-            ))
-            .small()
-            .color(theme::muted()),
-        );
-    }
-
-    fn slot_tools_ui(&mut self, ui: &mut egui::Ui, state: &LibraryState, index: usize) {
-        let library = state.library;
-        let occupied = state.info.names.get(index).and_then(Option::as_deref);
-        let Some(original) = occupied else {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Empty and ready for an import").color(theme::muted()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(format!("Slot {}", index + 1))
-                            .small()
-                            .color(theme::muted()),
-                    );
-                });
-            });
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(self.rollback.is_some(), egui::Button::new("Import here…"))
-                    .on_disabled_hover_text("automatic backup must be ready first")
-                    .clicked()
-                {
-                    self.import_into_slot(state, index);
-                }
-            });
-            return;
-        };
-
-        let key = (library, index);
-        let editing_name = self.slot_renaming == Some(key);
-        let mut draft = self
-            .names
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| original.to_owned());
-        if editing_name {
-            ui.horizontal(|ui| {
-                if ui
-                    .add(egui::TextEdit::singleline(&mut draft).hint_text("Model name"))
-                    .changed()
-                {
-                    self.names.insert(key, draft.clone());
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(format!("Slot {}", index + 1))
-                            .small()
-                            .color(theme::muted()),
-                    );
-                });
-            });
-        } else {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(original).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(format!("Slot {}", index + 1))
-                            .small()
-                            .color(theme::muted()),
-                    );
-                });
-            });
-        }
-
-        let mut begin_rename = false;
-        let mut save_rename = false;
-        let mut cancel_rename = false;
-        let mut replace = false;
-        let mut export = false;
-        let mut up = false;
-        let mut down = false;
-        let mut remove = false;
-        let mut export_pair = false;
-        ui.horizontal_wrapped(|ui| {
-            if editing_name {
-                save_rename = ui
-                    .add_enabled(
-                        self.rollback.is_some() && !draft.trim().is_empty() && draft != original,
-                        egui::Button::new("Save name"),
-                    )
-                    .clicked();
-                cancel_rename = ui.button("Cancel").clicked();
-            } else {
-                begin_rename = ui
-                    .add_enabled(self.rollback.is_some(), egui::Button::new("Rename"))
-                    .clicked();
-                replace = ui
-                    .add_enabled(self.rollback.is_some(), egui::Button::new("Replace…"))
-                    .clicked();
-                export = ui.button("Export…").clicked();
-                if library == Library::Irs
-                    && state.info.names.get(index + 1).is_some_and(Option::is_some)
-                {
-                    export_pair = ui
-                        .button("Export pair…")
-                        .on_hover_text(format!(
-                            "export slots {} and {} as a stereo WAV",
-                            index + 1,
-                            index + 2
-                        ))
-                        .clicked();
-                }
-                if state.info.movable {
-                    up = ui
-                        .add_enabled(self.rollback.is_some() && index > 0, egui::Button::new("↑"))
-                        .on_hover_text("move this slot up")
-                        .clicked();
-                    down = ui
-                        .add_enabled(
-                            self.rollback.is_some() && index + 1 < state.info.count,
-                            egui::Button::new("↓"),
-                        )
-                        .on_hover_text("move this slot down")
-                        .clicked();
-                }
-                remove = ui
-                    .add_enabled(self.rollback.is_some(), egui::Button::new("Remove"))
-                    .clicked();
-            }
-        });
-
-        if begin_rename {
-            self.names.insert(key, original.to_owned());
-            self.slot_renaming = Some(key);
-        }
-        if save_rename {
-            let _ = self.tx.send(Cmd::Rename {
-                library,
-                index,
-                name: draft.trim().into(),
-            });
-            self.slot_renaming = None;
-        }
-        if cancel_rename {
-            self.names.insert(key, original.to_owned());
-            self.slot_renaming = None;
-        }
-        if replace {
-            self.import_into_slot(state, index);
-        }
-        if export {
-            let stem = sanitise(if draft.is_empty() { "slot" } else { &draft });
-            if let Some(file) = rfd::FileDialog::new()
-                .set_file_name(format!("{stem}.{}", library.extension()))
-                .save_file()
-            {
-                let _ = self.tx.send(Cmd::Export {
-                    library,
-                    index,
-                    file,
-                });
-            }
-        }
-        if export_pair {
-            let stem = sanitise(if draft.is_empty() {
-                "stereo-ir"
-            } else {
-                &draft
-            });
-            if let Some(file) = rfd::FileDialog::new()
-                .set_file_name(format!("{stem}.wav"))
-                .save_file()
-            {
-                let _ = self.tx.send(Cmd::ExportStereo {
-                    left: index,
-                    right: index + 1,
-                    file,
-                });
-            }
-        }
-        if up {
-            let _ = self.tx.send(Cmd::Move {
-                library,
-                from: index,
-                to: index - 1,
-            });
-        }
-        if down {
-            let _ = self.tx.send(Cmd::Move {
-                library,
-                from: index,
-                to: index + 1,
-            });
-        }
-        if remove {
-            self.confirmation = Some(Confirmation {
-                action: "Write to pedal",
-                question: format!(
-                    "Remove {original} from {} slot {}?",
-                    library.title(),
-                    index + 1
-                ),
-                command: Cmd::Clear { library, index },
-            });
-        }
-    }
-
-    fn slot_rows_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &LibraryState,
-        needle: &str,
-        selector: Option<(&NodePath, &NodeDescription, &Value)>,
-    ) {
-        let library = state.library;
-        let managed = self.target_slots.get(&library).copied().unwrap_or(1);
-        let mut chose = None;
-        let mut import = None;
-        let mut shown = 0usize;
-        egui::ScrollArea::vertical()
-            .id_salt(("pro-slot-list", library.path()))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for index in 0..state.info.count {
-                    let name = state.info.names.get(index).and_then(Option::as_deref);
-                    if !slot_matches_search(index, name, needle) {
-                        continue;
-                    }
-                    shown += 1;
-                    ui.horizontal(|ui| {
-                        ui.set_min_height(24.0);
-                        ui.label(
-                            RichText::new(format!("{:>2}", index + 1))
-                                .monospace()
-                                .color(theme::muted()),
-                        );
-                        let selected = selector
-                            .and_then(|(_, _, current)| current.as_str())
-                            .zip(name)
-                            .is_some_and(|(current, name)| current == name)
-                            || (selector.is_none() && managed == index + 1);
-                        let text = match name {
-                            Some(name) => RichText::new(name),
-                            None => RichText::new("Empty slot").italics().color(theme::muted()),
-                        };
-                        if ui.selectable_label(selected, text).clicked() {
-                            chose = Some(index);
-                        }
-                        if name.is_none()
-                            && ui
-                                .add_enabled(
-                                    self.rollback.is_some(),
-                                    egui::Button::new("Import…").min_size(egui::vec2(68.0, 20.0)),
-                                )
-                                .on_disabled_hover_text("automatic backup must be ready first")
-                                .clicked()
-                        {
-                            import = Some(index);
-                        }
-                    });
-                }
-            });
-        if shown == 0 {
-            ui.label(RichText::new("No slots match this search.").color(theme::muted()));
-        }
-        if let Some(index) = chose {
-            if self.slot_renaming != Some((library, index)) {
-                self.slot_renaming = None;
-            }
-            self.target_slots.insert(library, index + 1);
-            if let (Some((path, description, current)), Some(name)) = (
-                selector,
-                state.info.names.get(index).and_then(Option::as_deref),
-            ) {
-                let value = Value::String(name.to_owned());
-                if description.validate_value(&value).is_ok() && value != *current {
-                    let _ = self.tx.send(Cmd::SetNode {
-                        path: path.clone(),
-                        description: Box::new(description.clone()),
-                        before: current.clone(),
-                        value: value.clone(),
-                        persistent: false,
-                    });
-                    self.drafts.insert(path.to_string(), value);
-                    self.recompute_dirty();
-                }
-            }
-        }
-        if let Some(index) = import {
-            self.import_into_slot(state, index);
         }
     }
 
@@ -1756,6 +896,12 @@ impl Panel {
         else {
             return;
         };
+        self.import_file(state, index, file);
+    }
+
+    /// Import a file into a slot, asking first when that replaces something.
+    fn import_file(&mut self, state: &LibraryState, index: usize, file: PathBuf) {
+        let library = state.library;
         let name = file
             .file_stem()
             .and_then(|name| name.to_str())
@@ -1857,8 +1003,12 @@ impl Panel {
             if let Some(confirmation) = self.confirmation.take() {
                 let _ = self.tx.send(confirmation.command);
             }
+            if let Some(next) = self.after_confirmation.take() {
+                let _ = self.tx.send(next);
+            }
         } else if cancel {
             self.confirmation = None;
+            self.after_confirmation = None;
         }
     }
 }
@@ -2279,13 +1429,17 @@ fn format_node_value(description: &NodeDescription, value: &Value) -> String {
     let Some(number) = value.as_f64() else {
         return value_text(value);
     };
-    let reading = if description.step.is_some_and(|step| step >= 1.0) {
-        format!("{number:.0}")
-    } else {
-        format!("{number:.2}")
+    // As many decimals as the node's step has: a step of 0.1 reads 6.0,
+    // of 1 reads 6. Without a step, two at most and no trailing zeros.
+    let reading = match description.step.filter(|step| *step > 0.0) {
+        Some(step) => {
+            let decimals = (-step.log10()).ceil().clamp(0.0, 2.0) as usize;
+            format!("{number:.decimals$}")
+        }
+        None => format!("{number:.2}")
             .trim_end_matches('0')
             .trim_end_matches('.')
-            .to_owned()
+            .to_owned(),
     };
     description
         .unit
@@ -2565,6 +1719,7 @@ impl Worker {
             Cmd::UseRollback(path) => {
                 let bundle = backup::open_verified(&path)?;
                 let preset_hashes = preset_hashes_from_bundle(&bundle)?;
+                let facts = libraries::facts_of(&bundle);
                 let device = self.device()?;
                 let rollback = bundle.arm(device)?;
                 device.enable_writes()?;
@@ -2573,6 +1728,7 @@ impl Worker {
                 self.send(Evt::Guarded {
                     path,
                     preset_hashes,
+                    facts,
                 });
                 Ok(())
             }
@@ -2818,6 +1974,11 @@ impl Worker {
                 self.send(Evt::Success(format!("Backup complete: {}", path.display())));
                 Ok(())
             }
+            Cmd::BackupHere => {
+                self.back_up_automatically()?;
+                self.send(Evt::Success("Backed up · saving is on".into()));
+                Ok(())
+            }
             Cmd::Restore(path) => {
                 self.require_guard()?;
                 let source = backup::open_verified(&path)?;
@@ -2925,39 +2086,49 @@ impl Worker {
         // is important, but it should not make a healthy pedal look absent
         // while it runs: publish the live editor first, then unlock writes.
         let guarded = self.device.as_mut().and_then(latest_matching_rollback);
-        if let Some((path, rollback, preset_hashes)) = guarded {
+        if let Some((path, rollback, preset_hashes, facts)) = guarded {
             self.rollback = Some(rollback);
             self.rollback_path = Some(path.clone());
             self.send(Evt::Guarded {
                 path,
                 preset_hashes,
+                facts,
             });
         } else {
             self.rollback = None;
             self.rollback_path = None;
-            if can_refresh_backup {
-                let Some(directory) = hx_catalog::home::backups() else {
-                    self.send(Evt::Success(
-                        "Live editing ready · choose Backup to unlock persistent controls".into(),
-                    ));
-                    return Ok(());
-                };
-                let captured = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|error| WorkError::Other(error.to_string()))?
-                    .as_secs();
-                // To the second: a reconnect later the same day must not
-                // replace the backup taken before that day's edits.
-                let stamp = jiff::Timestamp::now().strftime("%Y%m%d-%H%M%S").to_string();
-                let path = directory.join(format!("{AUTOMATIC_BACKUP}{version}-{stamp}.vxbundle"));
-                self.capture_backup(&path, captured)?;
-                prune_automatic_backups(&directory, &path);
+            if can_refresh_backup && hx_catalog::home::backups().is_some() {
+                self.back_up_automatically()?;
             } else {
                 self.send(Evt::Success(
-                    "Live editing ready · choose Backup to unlock Save and device libraries".into(),
+                    "Live editing ready · back up to unlock saving".into(),
                 ));
             }
         }
+        let _ = version;
+        Ok(())
+    }
+
+    /// Back the pedal up where TonePush keeps its own backups, under a name
+    /// that says it took it, keeping the newest few of those.
+    fn back_up_automatically(&mut self) -> WorkResult<()> {
+        let directory = hx_catalog::home::backups().ok_or_else(|| {
+            WorkError::Other("There is no folder for backups on this computer".into())
+        })?;
+        std::fs::create_dir_all(&directory).map_err(|error| {
+            WorkError::Other(format!("Could not make {}: {error}", directory.display()))
+        })?;
+        let version = self.device()?.identity().version.clone();
+        let captured = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| WorkError::Other(error.to_string()))?
+            .as_secs();
+        // To the second: a reconnect later the same day must not replace the
+        // backup taken before that day's edits.
+        let stamp = jiff::Timestamp::now().strftime("%Y%m%d-%H%M%S").to_string();
+        let path = directory.join(format!("{AUTOMATIC_BACKUP}{version}-{stamp}.vxbundle"));
+        self.capture_backup(&path, captured)?;
+        prune_automatic_backups(&directory, &path);
         Ok(())
     }
 
@@ -3026,12 +2197,14 @@ impl Worker {
         })?;
         let bundle = backup::open_verified(path)?;
         let preset_hashes = preset_hashes_from_bundle(&bundle)?;
+        let facts = libraries::facts_of(&bundle);
         let rollback = bundle.arm(self.device()?)?;
         self.rollback = Some(rollback);
         self.rollback_path = Some(path.to_owned());
         self.send(Evt::Guarded {
             path: path.to_owned(),
             preset_hashes,
+            facts,
         });
         Ok(())
     }
@@ -3381,16 +2554,27 @@ impl Worker {
 /// retaining the PRO rule that a persistent write never starts unguarded.
 fn latest_matching_rollback(
     device: &mut Device<SerialLink>,
-) -> Option<(PathBuf, ArmedRollback, BTreeMap<usize, String>)> {
+) -> Option<(
+    PathBuf,
+    ArmedRollback,
+    BTreeMap<usize, String>,
+    LibraryFacts,
+)> {
     for path in backup_candidates()? {
         let Ok(bundle) = backup::open_verified(&path) else {
             continue;
         };
+        // Another pedal's, or another firmware's, never arms: no need to
+        // read what its files say first.
+        if bundle.manifest().identity != *device.identity() {
+            continue;
+        }
         let Ok(preset_hashes) = preset_hashes_from_bundle(&bundle) else {
             continue;
         };
+        let facts = libraries::facts_of(&bundle);
         if let Ok(rollback) = bundle.arm(device) {
-            return Some((path, rollback, preset_hashes));
+            return Some((path, rollback, preset_hashes, facts));
         }
     }
     None
@@ -3808,6 +2992,116 @@ pub(crate) mod demo {
         )
     }
 
+    /// What the demo's backup says about its files: who captured each amp
+    /// and drive and what gear, each impulse response's length and shape,
+    /// and which presets play what.
+    fn facts() -> LibraryFacts {
+        use super::libraries::{SlotFacts, User};
+
+        const GEAR: [&str; 14] = [
+            "Marshall JCM800 2203",
+            "Vox AC30 Top Boost",
+            "Fender Twin Reverb",
+            "Marshall 1959 SLP",
+            "Mesa Dual Rectifier",
+            "Fender Bassman 5F6A",
+            "EVH 5150 III",
+            "Overdrive Special clone",
+            "Matchless DC-30",
+            "Friedman BE-100",
+            "Orange Rockerverb 50",
+            "Bogner Shiva",
+            "Mesa Mark IIC+",
+            "Soldano SLO-100",
+        ];
+        const SIZES: [&str; 4] = ["Standard", "Standard", "Lite", "Feather"];
+        const MAKERS: [&str; 3] = ["J. Rivera", "M. Okafor", "S. Lindqvist"];
+        const PEDALS: [&str; 9] = [
+            "Ibanez TS808",
+            "Klon Centaur clone",
+            "ProCo Rat",
+            "Boss BD-2",
+            "EHX Big Muff",
+            "Dunlop Fuzz Face",
+            "Fulltone OCD",
+            "Boss SD-1",
+            "Paul Cochrane Timmy",
+        ];
+        let mut facts = LibraryFacts::default();
+        for (index, name) in AMPS.iter().enumerate() {
+            facts.files.insert(
+                (Library::Amps, (*name).to_owned()),
+                SlotFacts {
+                    gear: Some(GEAR[index].to_owned()),
+                    modeled_by: Some(MAKERS[index % 3].to_owned()),
+                    size: Some(SIZES[index % 4].to_owned()),
+                    input_dbu: Some(12.2),
+                    bytes: 1_920_000 - index * 41_000,
+                    ..SlotFacts::default()
+                },
+            );
+        }
+        for (index, name) in DRIVES.iter().enumerate() {
+            facts.files.insert(
+                (Library::Drives, (*name).to_owned()),
+                SlotFacts {
+                    gear: Some(PEDALS[index].to_owned()),
+                    modeled_by: Some(MAKERS[(index + 1) % 3].to_owned()),
+                    size: Some(SIZES[(index + 2) % 4].to_owned()),
+                    input_dbu: Some(10.4),
+                    bytes: 1_180_000 - index * 23_000,
+                    ..SlotFacts::default()
+                },
+            );
+        }
+        let lengths = [
+            200.0, 200.0, 500.0, 500.0, 200.0, 170.0, 320.0, 320.0, 200.0, 200.0, 400.0,
+        ];
+        for (index, name) in IRS.iter().enumerate() {
+            let ms: f64 = lengths[index];
+            // A decaying ring, different on each side of a pair.
+            let wave = (0..240)
+                .map(|point| {
+                    let t = point as f32 / 240.0;
+                    let decay = (-t * (6.0 + index as f32)).exp();
+                    decay * ((t * 90.0 + index as f32).sin() * 0.8 + (t * 37.0).cos() * 0.2)
+                })
+                .collect();
+            facts.files.insert(
+                (Library::Irs, (*name).to_owned()),
+                SlotFacts {
+                    length_ms: Some(ms),
+                    wave,
+                    bytes: (ms * 48.0 * 4.0) as usize,
+                    ..SlotFacts::default()
+                },
+            );
+        }
+        let user = |preset: usize, block: &str| User {
+            preset,
+            name: PRESETS[preset].to_owned(),
+            block: block.to_owned(),
+        };
+        let uses: [(Library, &str, &[usize], &str); 9] = [
+            (Library::Amps, AMPS[0], &[2, 4, 7, 9, 12, 16], "Amp"),
+            (Library::Amps, AMPS[1], &[1, 3, 13, 15], "Amp"),
+            (Library::Amps, AMPS[2], &[0, 5, 18], "Amp"),
+            (Library::Amps, AMPS[3], &[5, 11], "Amp"),
+            (Library::Drives, DRIVES[0], &[2, 7, 11, 20], "Drive"),
+            (Library::Irs, IRS[0], &[0, 2, 4, 7, 9, 12, 16], "IR"),
+            (Library::Irs, IRS[1], &[1, 3, 13, 15], "IR"),
+            (Library::Irs, IRS[2], &[3, 15], "IR"),
+            (Library::Irs, IRS[3], &[3, 15], "IR"),
+        ];
+        for (library, name, presets, block) in uses {
+            facts.users.insert(
+                (library, name.to_owned()),
+                presets.iter().map(|preset| user(*preset, block)).collect(),
+            );
+        }
+        facts
+    }
+
     /// 03B Velvet Drive, as a firmware 1.5.12 pedal would describe it.
     fn snapshot() -> Snapshot {
         let app = vec![
@@ -4063,11 +3357,38 @@ pub(crate) mod demo {
             self.recompute_dirty();
             self.selected_group = "amp".into();
             self.undo_depth = 2;
+            self.facts = facts();
         }
 
         /// Which slots hold what the library holds, as a backup would say.
         pub(crate) fn demo_library_marks(&mut self, hashes: BTreeMap<usize, String>) {
             self.preset_hashes = hashes;
+        }
+
+        /// Open the pedal's page on a library: the NAM amps on the AC30, or
+        /// the impulse responses on the Oxford Room pair.
+        pub(crate) fn demo_library(&mut self, irs: bool) {
+            if irs {
+                self.tab = Tab::Library(Library::Irs);
+                self.target_slots.insert(Library::Irs, 3);
+            } else {
+                self.tab = Tab::Library(Library::Amps);
+                self.target_slots.insert(Library::Amps, 2);
+            }
+        }
+
+        /// Open the pedal's page on its settings.
+        pub(crate) fn demo_settings(&mut self) {
+            self.tab = Tab::Settings;
+        }
+
+        /// The pedal before any backup of it matches: edits play, saving
+        /// waits.
+        pub(crate) fn demo_unprotected(&mut self) {
+            self.rollback = None;
+            self.rollback_time = None;
+            self.facts = LibraryFacts::default();
+            self.preset_hashes.clear();
         }
 
         /// Open the pedal's page on its backups.

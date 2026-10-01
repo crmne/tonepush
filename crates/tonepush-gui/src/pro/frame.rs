@@ -34,9 +34,9 @@ pub(crate) fn slot_label(index: usize) -> String {
 /// The tabs of the PRO's page.
 const TABS: [Tab; 5] = [
     Tab::Backups,
-    Tab::Library(Library::Irs),
     Tab::Library(Library::Amps),
     Tab::Library(Library::Drives),
+    Tab::Library(Library::Irs),
     Tab::Settings,
 ];
 
@@ -599,10 +599,14 @@ impl Panel {
                             dirty: self.dirty,
                             can_save,
                             save_refused: &refused,
+                            unlock: self.unlock_offer(),
                         },
                     );
                     if asked.save {
                         let _ = self.tx.send(Cmd::SavePreset(self.save_name.trim().into()));
+                    }
+                    if asked.unlock {
+                        self.back_up_here();
                     }
                     if asked.undo {
                         let _ = self.tx.send(Cmd::Undo);
@@ -755,7 +759,7 @@ impl Panel {
 
     /// The PRO's page: its name and firmware, then backups, the NAM and IR
     /// libraries and its settings, one tab each.
-    pub(crate) fn pedal_page(&mut self, root: &mut Ui) {
+    pub(crate) fn pedal_page(&mut self, root: &mut Ui, tier: Tier) {
         let snapshot = self.snapshot.clone();
         egui::Panel::top("pro-pedal-head")
             .exact_size(if snapshot.is_some() {
@@ -844,6 +848,18 @@ impl Panel {
                     }
                 });
             });
+        if let (Some(snapshot), Tab::Library(library)) = (&snapshot, self.tab) {
+            egui::Panel::right("pro-library-inspector")
+                .resizable(false)
+                .exact_size(tier.pick(300.0, 340.0, 380.0))
+                .frame(egui::Frame::new().fill(theme::bg()))
+                .show(root, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("pro-library-inspector", library.path()))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.library_inspector(ui, snapshot, library));
+                });
+        }
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -891,14 +907,23 @@ impl Panel {
                             });
                     }
                     Tab::Library(library) => {
-                        ui.add_enabled_ui(self.online && !self.busy, |ui| {
-                            self.library_ui(ui, snapshot, library);
-                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt(("pro-library", library.path()))
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.add_enabled_ui(self.online && !self.busy, |ui| {
+                                    self.library_page(ui, snapshot, library);
+                                });
+                            });
                     }
                     Tab::Settings => {
-                        ui.add_enabled_ui(self.online && !self.busy, |ui| {
-                            self.settings_ui(ui, snapshot);
-                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("pro-settings")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.set_max_width(ui.available_width().min(980.0));
+                                self.settings_page(ui, snapshot);
+                            });
                     }
                 }
             });
@@ -948,7 +973,19 @@ impl Panel {
         let mut backup = false;
         let mut restore = false;
         let mut existing = false;
+        let mut here = false;
+        let unlock = self.unlock_offer();
         theme::banner(ui, mood, icon, &title, &body, |ui| {
+            if let Some(ready) = unlock {
+                here = theme::Button::new("Back up to unlock saving")
+                    .small()
+                    .primary()
+                    .icon(Icon::Download)
+                    .enabled(ready)
+                    .show(ui)
+                    .on_hover_text("Read the whole pedal into a checked backup on this computer")
+                    .clicked();
+            }
             backup = theme::Button::new("Back up to a file…")
                 .small()
                 .icon(Icon::Download)
@@ -974,6 +1011,9 @@ impl Panel {
                     .clicked();
             }
         });
+        if here {
+            self.back_up_here();
+        }
         if backup {
             if let Some(path) = rfd::FileDialog::new()
                 .set_title("Where to put the backup")
@@ -1063,6 +1103,29 @@ mod tests {
             panel.write_refusal().as_deref(),
             Some("Connect the pedal first")
         );
+    }
+
+    /// Before a backup matches, the deck offers the one that unlocks
+    /// saving, ready only while nothing else is talking to the pedal, and
+    /// never for a pedal that is read only.
+    #[test]
+    fn the_backup_that_unlocks_saving_takes_saves_place() {
+        let mut panel = Panel::new(egui::Context::default());
+        assert_eq!(panel.unlock_offer(), None, "no pedal, nothing to back up");
+        panel.online = true;
+        panel.snapshot = Some(demo_snapshot());
+        assert_eq!(panel.unlock_offer(), Some(true));
+        panel.busy = true;
+        assert_eq!(panel.unlock_offer(), Some(false));
+        panel.busy = false;
+        panel.working = Some(("Reading presets".to_owned(), 0.4));
+        assert_eq!(panel.unlock_offer(), Some(false));
+        panel.working = None;
+        panel.rollback = Some(PathBuf::from("stompstation-pro-1.5.12.vxbundle"));
+        assert_eq!(panel.unlock_offer(), None, "protected: Save is back");
+        panel.rollback = None;
+        panel.read_only = Some("firmware 2.0.10 is not verified".to_owned());
+        assert_eq!(panel.unlock_offer(), None, "read only: nothing to unlock");
     }
 
     #[test]

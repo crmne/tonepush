@@ -32,23 +32,25 @@ can still be inspected without pretending its write behavior is unchanged.
 
 ## Edit with the same TonePush UI
 
-Select a chain tile to edit it. Numeric parameters use the same knobs as the HX
-editor, two-state parameters use the same switches, and enumerated parameters
-use the same selectors. Changes go to the live edit buffer and are audible
-immediately. The dot beside the preset name means the edit buffer differs from
-the saved preset; Save commits it.
-
-Tiles show the selected model rather than only the block type:
+The Edit page draws the PRO's chain on the same board as an HX's: its blocks
+as tiles between the input and output jacks, in the pedal's fixed order on
+firmware 1.5.12. A tile says what its block holds:
 
 - Compressor shows its `Dyn` or `Studio` mode.
 - Pitch, modulation, and reverb show their selected algorithms.
 - Drive and Amp show the selected NAM model.
-- Cab / IR shows the selected impulse response.
+- IR shows the selected impulse response.
 
-Selecting one of those tiles opens the same right-hand model shelf. For NAM and
-IR blocks the shelf is populated from the pedal's library; for compressor,
-modulation, pitch, and reverb it contains the choices advertised by the live
-schema.
+A dashed tile marked OFF is a block that is off. Click a tile, or a jack for
+the input and output settings, to edit it below the board. The block's on/off
+is drawn as the footswitch it is; a NAM model or an impulse response is a wide
+cell whose **Change** lists every one the pedal holds; every other control is a
+knob, a switch or a menu, as the pedal's live schema describes it. Drag a knob,
+or click its reading to type a value; double-click it for the default. Changes
+go to the live edit buffer and are audible immediately. The line under the
+preset's name says when the edit buffer differs from the saved preset; Save
+commits it. On a large window the pedal's protection and what your library
+knows of the preset sit beside the block.
 
 ## Local tones, setlists, and Cloud
 
@@ -88,17 +90,26 @@ cross-device tones as separate objects.
 ## NAM and impulse-response libraries
 
 The Pedal page holds the PRO-specific libraries and backup tools, a tab each.
-These are capabilities of the pedal, not a second preset UI:
+**NAM amps**, **NAM drives** and **Impulse responses** each list the library's
+slots with what each file says about itself (the gear a capture models, who
+captured it and its WaveNet size; an impulse response's length) and how many
+presets play it, read from the checked backup that guards the pedal. Choose a
+slot for its details, the presets that use it, and what can be done with it:
 
-- Import/export, rename, reorder, or clear NAM amp and NAM drive models.
-- Import/export mono 48 kHz WAV impulse responses.
-- Split one stereo 48 kHz WAV across a chosen left/right pair, or reconstruct a
-  stereo WAV from two slots.
+- Export it; rename or remove it; replace it with a file, or move it up or
+  down a slot, from its menu.
+- Import NAM models or mono 48 kHz WAV impulse responses into the first free
+  slot. Dropping a WAV on the window does the same; a stereo 48 kHz WAV takes
+  two free slots side by side, left then right.
+- A stereo pair (two adjacent slots TonePush named `… L` and `… R`) shows as
+  one row with both sides' shapes, and exports as one stereo WAV or either side
+  alone.
 
 TonePush validates NAM JSON, gzip size, WAV shape, sample rate, channel count,
-slot capacity, and every upload readback before reporting success. Renaming or
-removing a NAM/IR item scans the current preset library and refuses the change
-while any preset still names it.
+slot capacity, and every upload readback before reporting success. Presets find
+a model by its name, so renaming or removing a NAM/IR item scans the current
+preset library and refuses the change while any preset still names it; the
+page says so beside the buttons it disables.
 
 ## The rollback guard
 
@@ -113,12 +124,15 @@ CRC-32 covers the whole model. A preset saved over itself under the same name
 is therefore noticed and read again. Full reads batch several
 strictly identified chunks per protocol frame. A pedal with no prior bundle
 still opens immediately for live editing; only Save and other flash operations
-wait for you to choose a complete backup. The line under the preset's name says
-which it is ("Protected by the 14:02 backup", or "Saving waits for a backup of
-this pedal"), and the foot of the sidebar keeps saying it on every page.
+wait for a complete backup. The line under the preset's name says which it is
+("Protected by the 14:02 backup", or "Saving waits for a backup of this
+pedal"), and the foot of the sidebar keeps saying it on every page.
 
-On a new machine, open the Pedal page and choose **Back up to a file…** on its
-Backups tab, or **Use an existing backup…** for a bundle taken earlier. A
+On a new machine, **Back up to unlock saving** takes Save's place, under a
+strip that says why: it reads the whole pedal into a checked backup in
+TonePush's backups folder and arms it. **Use an existing backup…** beside it,
+or on the Pedal page's Backups tab, checks a bundle taken earlier against the
+pedal instead, and **Back up to a file…** there puts one where you choose. A
 bundle contains:
 
 - exact fixed-size bytes for all occupied presets, IRs, NAM amps, and NAM

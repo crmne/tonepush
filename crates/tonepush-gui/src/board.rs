@@ -26,7 +26,7 @@ use crate::theme::{self, Icon, Tier};
 use crate::{session, App, Cmd, Connection};
 
 /// The jack an endpoint is drawn as: its radius, and where its wire starts.
-const JACK: f32 = 15.0;
+pub(crate) const JACK: f32 = 15.0;
 
 /// The room a divided stretch with nothing on any lane still takes, so it can
 /// be clicked and dropped into.
@@ -70,6 +70,23 @@ impl Geometry {
             lane_gap: tier.pick(10.0, 10.0, 14.0),
             min_tile: tier.pick(72.0, 92.0, 136.0),
             max_tile: tier.pick(104.0, 124.0, 176.0),
+        }
+    }
+
+    /// A StompStation PRO's chain: narrower tiles and shorter wires, so the
+    /// pedal's whole chain fits beside the sidebar.
+    pub(crate) fn pro(tier: Tier) -> Geometry {
+        Geometry {
+            pad: 16.0,
+            top: tier.pick(34.0, 40.0, 46.0),
+            bottom: tier.pick(18.0, 22.0, 26.0),
+            endpoint: 34.0,
+            wire: tier.pick(6.0, 8.0, 14.0),
+            junction: tier.pick(20.0, 22.0, 30.0),
+            tile_height: tier.pick(84.0, 92.0, 128.0),
+            lane_gap: tier.pick(10.0, 10.0, 14.0),
+            min_tile: tier.pick(64.0, 68.0, 96.0),
+            max_tile: tier.pick(88.0, 112.0, 150.0),
         }
     }
 
@@ -433,6 +450,11 @@ pub(crate) struct TileLook<'a> {
     pub snapshot: bool,
     /// What drives it: a footswitch with the colour it lights, a pedal, MIDI.
     pub drivers: &'a [(String, Option<Color32>)],
+    /// The caption is a model's name in the quiet ink, as a StompStation
+    /// PRO's tiles say what they hold, rather than the category in capitals.
+    pub plain_caption: bool,
+    /// A lock on the left of the top edge: the block cannot move.
+    pub locked: bool,
 }
 
 /// One tile: the category's wash and border, its drawing, name and caption,
@@ -565,13 +587,27 @@ pub(crate) fn paint_tile(ui: &Ui, rect: Rect, look: &TileLook) {
         drawing.paint(ui, area, ink_drawing);
     }
     let mut bottom = rect.bottom() - pad_bottom;
-    if !look.compact {
-        let caption = ui.painter().layout_job(theme::paint::spaced(
-            &look.caption.to_uppercase(),
-            theme::bold(caption_size),
-            if look.on { cat } else { theme::faint() },
-            0.08,
-        ));
+    if !look.compact && !look.caption.is_empty() {
+        let caption = if look.plain_caption {
+            shell::elided(
+                ui,
+                look.caption,
+                theme::regular(if look.large { 12.0 } else { 11.0 }),
+                if look.on {
+                    theme::muted()
+                } else {
+                    theme::faint()
+                },
+                rect.width() - 10.0,
+            )
+        } else {
+            ui.painter().layout_job(theme::paint::spaced(
+                &look.caption.to_uppercase(),
+                theme::bold(caption_size),
+                if look.on { cat } else { theme::faint() },
+                0.08,
+            ))
+        };
         let width = caption.size().x;
         let height = caption.size().y;
         painter.galley(
@@ -636,8 +672,15 @@ pub(crate) fn paint_tile(ui: &Ui, rect: Rect, look: &TileLook) {
         tag.paint(ui, place);
         right = place.left() - 3.0;
     }
-    if look.snapshot {
-        let tag = theme::Tag::icon(Icon::Camera);
+    let left_mark = if look.snapshot {
+        Some(Icon::Camera)
+    } else if look.locked {
+        Some(Icon::Lock)
+    } else {
+        None
+    };
+    if let Some(mark) = left_mark {
+        let tag = theme::Tag::icon(mark);
         let size = tag.size(ui);
         tag.paint(
             ui,
@@ -646,8 +689,99 @@ pub(crate) fn paint_tile(ui: &Ui, rect: Rect, look: &TileLook) {
     }
 }
 
+/// An endpoint as a round jack: its drawing, IN or OUT under it and, when
+/// there is one, the short name of where it is routed.
+pub(crate) fn paint_jack(
+    ui: &Ui,
+    centre: Pos2,
+    input: bool,
+    selected: bool,
+    hovered: bool,
+    sub: Option<&str>,
+) {
+    if selected {
+        ui.painter()
+            .circle_filled(centre, JACK + 4.0, theme::alpha(theme::text(), 0.1));
+    }
+    ui.painter().circle(
+        centre,
+        JACK,
+        if hovered {
+            theme::raised()
+        } else {
+            theme::panel()
+        },
+        Stroke::new(
+            1.5,
+            if selected {
+                theme::text_soft()
+            } else {
+                theme::line_strong()
+            },
+        ),
+    );
+    if let Some(drawing) = theme::category_icon(if input { "Input" } else { "Output" }) {
+        drawing.paint(
+            ui,
+            Rect::from_center_size(centre, Vec2::splat(15.0)),
+            theme::text_soft(),
+        );
+    }
+    let label = ui.painter().layout_job(theme::paint::spaced(
+        if input { "IN" } else { "OUT" },
+        theme::bold(theme::CAPTION_TINY),
+        theme::muted(),
+        0.08,
+    ));
+    let width = label.size().x;
+    let label_top = centre.y + JACK + 5.0;
+    let label_height = label.size().y;
+    ui.painter().galley(
+        Pos2::new(centre.x - width / 2.0, label_top),
+        label,
+        Color32::PLACEHOLDER,
+    );
+    if let Some(sub) = sub {
+        let sub = shell::galley(ui, sub, theme::regular(10.5), theme::faint());
+        let width = sub.size().x;
+        ui.painter().galley(
+            Pos2::new(centre.x - width / 2.0, label_top + label_height - 1.0),
+            sub,
+            Color32::PLACEHOLDER,
+        );
+    }
+}
+
+/// The board's lower edge, with the notch under the selected tile cut into
+/// it, pointing at the pane.
+pub(crate) fn board_edge(root: &Ui, rect: Rect, notch: Option<f32>) {
+    let painter = root.painter();
+    let y = rect.bottom() - 0.5;
+    let line = Stroke::new(1.0, theme::line());
+    match notch.filter(|x| *x > rect.left() + 16.0 && *x < rect.right() - 16.0) {
+        Some(x) => {
+            painter.hline(rect.left()..=(x - 11.0), y, line);
+            painter.hline((x + 11.0)..=rect.right(), y, line);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(x - 11.0, rect.bottom()),
+                    Pos2::new(x, rect.bottom() - 11.0),
+                    Pos2::new(x + 11.0, rect.bottom()),
+                ],
+                theme::bg(),
+                Stroke::NONE,
+            ));
+            painter.line_segment([Pos2::new(x - 11.0, y), Pos2::new(x, y - 10.5)], line);
+            painter.line_segment([Pos2::new(x, y - 10.5), Pos2::new(x + 11.0, y)], line);
+        }
+        None => {
+            painter.hline(rect.x_range(), y, line);
+        }
+    }
+}
+
 /// A wire as the signal on it is: one line for mono, two for stereo.
-fn paint_wire(ui: &Ui, wire: Wire, stereo: bool, colour: Color32) {
+pub(crate) fn paint_wire(ui: &Ui, wire: Wire, stereo: bool, colour: Color32) {
     let painter = ui.painter();
     let offsets: &[f32] = if stereo { &[-1.8, 1.8] } else { &[0.0] };
     let width = if stereo { 1.5 } else { 2.0 };
@@ -855,32 +989,7 @@ impl App {
             .show(root, |ui| {
                 notch = self.board(ui, &g, tier);
             });
-        // The board's lower edge, with the notch under the selected tile cut
-        // into it, pointing at the pane.
-        let rect = panel.response.rect;
-        let painter = root.painter();
-        let y = rect.bottom() - 0.5;
-        let line = Stroke::new(1.0, theme::line());
-        match notch.filter(|x| *x > rect.left() + 16.0 && *x < rect.right() - 16.0) {
-            Some(x) => {
-                painter.hline(rect.left()..=(x - 11.0), y, line);
-                painter.hline((x + 11.0)..=rect.right(), y, line);
-                painter.add(egui::Shape::convex_polygon(
-                    vec![
-                        Pos2::new(x - 11.0, rect.bottom()),
-                        Pos2::new(x, rect.bottom() - 11.0),
-                        Pos2::new(x + 11.0, rect.bottom()),
-                    ],
-                    theme::bg(),
-                    Stroke::NONE,
-                ));
-                painter.line_segment([Pos2::new(x - 11.0, y), Pos2::new(x, y - 10.5)], line);
-                painter.line_segment([Pos2::new(x, y - 10.5), Pos2::new(x + 11.0, y)], line);
-            }
-            None => {
-                painter.hline(rect.x_range(), y, line);
-            }
-        }
+        board_edge(root, panel.response.rect, notch);
     }
 
     /// Draw the board into `ui`, returning where the notch goes.
@@ -1207,60 +1316,19 @@ impl App {
                     "The output: where the signal goes"
                 });
             let selected = index == self.selected;
-            if selected {
-                ui.painter()
-                    .circle_filled(*centre, JACK + 4.0, theme::alpha(theme::text(), 0.1));
-            }
-            ui.painter().circle(
+            // The short name under the jack: Multi, not every input it
+            // gathers, which the block's own head spells out.
+            let short = self
+                .routing_name(&block)
+                .map(|routing| routing.split(" (").next().unwrap_or_default().to_owned());
+            paint_jack(
+                ui,
                 *centre,
-                JACK,
-                if response.hovered() {
-                    theme::raised()
-                } else {
-                    theme::panel()
-                },
-                Stroke::new(
-                    1.5,
-                    if selected {
-                        theme::text_soft()
-                    } else {
-                        theme::line_strong()
-                    },
-                ),
+                *input,
+                selected,
+                response.hovered(),
+                short.as_deref(),
             );
-            if let Some(drawing) = theme::category_icon(if *input { "Input" } else { "Output" }) {
-                drawing.paint(
-                    ui,
-                    Rect::from_center_size(*centre, Vec2::splat(15.0)),
-                    theme::text_soft(),
-                );
-            }
-            let label = ui.painter().layout_job(theme::paint::spaced(
-                if *input { "IN" } else { "OUT" },
-                theme::bold(theme::CAPTION_TINY),
-                theme::muted(),
-                0.08,
-            ));
-            let width = label.size().x;
-            let label_top = centre.y + JACK + 5.0;
-            let label_height = label.size().y;
-            ui.painter().galley(
-                Pos2::new(centre.x - width / 2.0, label_top),
-                label,
-                Color32::PLACEHOLDER,
-            );
-            if let Some(routing) = self.routing_name(&block) {
-                // The short name under the jack: Multi, not every input it
-                // gathers, which the block's own head spells out.
-                let short = routing.split(" (").next().unwrap_or_default().to_owned();
-                let sub = shell::galley(ui, short, theme::regular(10.5), theme::faint());
-                let width = sub.size().x;
-                ui.painter().galley(
-                    Pos2::new(centre.x - width / 2.0, label_top + label_height - 1.0),
-                    sub,
-                    Color32::PLACEHOLDER,
-                );
-            }
             if response.clicked() {
                 pick = Some(index);
             }
@@ -1305,6 +1373,8 @@ impl App {
                     large,
                     snapshot: facts.snapshot,
                     drivers: &facts.drivers,
+                    plain_caption: false,
+                    locked: false,
                 },
             );
             if !live {
@@ -1698,7 +1768,7 @@ fn ghost_height(g: &Geometry) -> f32 {
 }
 
 /// A fade to the board's colour toward the right edge.
-fn horizontal_fade(ui: &Ui, rect: Rect) {
+pub(crate) fn horizontal_fade(ui: &Ui, rect: Rect) {
     let mut mesh = egui::epaint::Mesh::default();
     let clear = theme::alpha(theme::bg_deep(), 0.0);
     let solid = theme::bg_deep();

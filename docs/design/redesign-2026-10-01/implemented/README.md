@@ -237,3 +237,65 @@ spans its column as the design's banners do. Their `before/` is
   rather than dropping columns, and the columns are chosen from the header.
 - No mockup draws the Settings tab, the impulse responses, favourite blocks,
   the global EQ or the activity log; they use the stage 2 components.
+
+## Stage 5: the StompStation PRO
+
+The Edit page: the PRO's chain on the HX's board, its blocks as the same
+tiles between the input and output jacks, each saying what it holds (the
+compressor's mode, the pitch, modulation and reverb algorithms, the NAM model
+in Drive and Amp, the impulse response in IR). The chain is read from the
+pedal's schema rather than written down, so a firmware that lists other
+blocks gets them as ordinary tiles. The pane under it is an HX block's: the
+head with the block's drawing in its well and what it plays, then the face,
+the on/off drawn as the footswitch it is, a NAM capture or an impulse
+response as a wide cell whose Change lists every one the pedal holds, and the
+other controls as knobs (a reading can be typed), switches and menus in
+balanced rows of the largest knobs that fit. On a large window the pedal's
+protection and what the library knows of the preset sit beside the block.
+
+Before a backup of the pedal matches it (21), Back up to unlock saving takes
+Save's place under a strip that says why, with Use an existing backup beside
+it; it reads the whole pedal into a checked backup where TonePush keeps its
+own, and arms it.
+
+The Pedal page: NAM amps, NAM drives and Impulse responses (10, 11) are each a
+table of the library's slots, with what each file says about itself (the gear
+a capture models, its WaveNet size; an impulse response's length) and how many
+presets play it, and an inspector for the slot chosen: the file's facts, the
+presets that use it, Export, Rename and Remove, and a menu to replace it with a
+file or move it a slot. Stereo pairs are one row, bracketed across their two
+slots, with both sides' shapes. Settings is drawn as the HX's is.
+
+Scenes: `pro-edit`, `pro-unprotected` (new), `pro-nam` (new), `pro-irs` (new),
+`pro-settings` (new) and `pro-pedal`. Their `before/` is `before/pro-edit`
+and `before/pro-device-window`.
+
+- The design draws firmware 2.x: sixteen positions with free slots, fixed
+  blocks with locks, parallel lanes and the mono and stereo wires. TonePush
+  writes to firmware 1.5.12, whose chain is twelve blocks each always in its
+  place, and does not read 2.x's chain yet, so the board draws the twelve in
+  the pedal's order with no free positions, no locks and no legend; the header
+  says "12 blocks · in the pedal's fixed order". The tiles' short names
+  ("Comp", "Mod", "Pre Mod") keep every word whole in a tile.
+- There is no floor and no Quick controls or Controllers lens: the F1 to F4
+  quick controls and the controllers are 2.x's, and 1.5.12's controller
+  modules stay hidden as before. Copy settings is not built.
+- A 1.5.12 amp plays one capture, so its model cell is one, without Pan.
+- The right-hand model shelf beside the editor is gone: Change on the model
+  cell chooses a model, and managing the slots moved to the Pedal page. So is
+  the block's Filter parameters field: a PRO block has a handful of controls,
+  all on its face. The Settings tab keeps its filter.
+- What a file says about itself and which presets play it come from the
+  checked backup that guards the pedal, which holds every file and preset;
+  nothing extra is read from the pedal. A file imported since that backup
+  shows without facts until the next one, and the counts are as of that
+  backup: the worker still asks the pedal itself before renaming or removing
+  anything, as it always has.
+- Back up to unlock saving names the backup the way TonePush names the ones it
+  takes on its own, and gives no time estimate. The large pane's protection
+  card offers Back up now, which takes a fresh backup and guards the pedal
+  with it.
+- Dropping a WAV on the window while a PRO is the pedal now imports it into
+  the first free impulse-response slot (two, for a stereo WAV), and a `.nam`
+  into the NAM library open on the Pedal page.
+- The Firmware tab comes with stage 6.

@@ -71,7 +71,7 @@ fn list_row(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 /// A setting: its name at the left, its control at the right, 44 points,
 /// with a hairline under it unless it is the last. `control` is laid out
 /// right to left.
-fn setting_row(ui: &mut Ui, name: &str, line: bool, control: impl FnOnce(&mut Ui)) {
+pub(crate) fn setting_row(ui: &mut Ui, name: &str, line: bool, control: impl FnOnce(&mut Ui)) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::hover());
     if line {
         ui.painter().hline(
@@ -92,7 +92,7 @@ fn setting_row(ui: &mut Ui, name: &str, line: bool, control: impl FnOnce(&mut Ui
 
 /// A section's caption with something quieter beside it, and room at the
 /// right for its actions (laid out right to left).
-fn section_head(ui: &mut Ui, caption: &str, aside: &str, actions: impl FnOnce(&mut Ui)) {
+pub(crate) fn section_head(ui: &mut Ui, caption: &str, aside: &str, actions: impl FnOnce(&mut Ui)) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::hover());
     let used = ui
         .scope_builder(
