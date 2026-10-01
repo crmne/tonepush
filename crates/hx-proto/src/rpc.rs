@@ -458,6 +458,9 @@ pub struct StreamMessage {
 pub struct StreamReader {
     buf: Vec<u8>,
     overflowed: bool,
+    /// An error found after good messages, reported by the next call so
+    /// those messages are not lost with it.
+    pending: Option<StreamError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -482,14 +485,6 @@ impl std::error::Error for StreamError {}
 const MAX_STREAM_MESSAGE: usize = 16 * 1024 * 1024;
 
 impl StreamReader {
-    fn reset_with(&mut self, error: StreamError) -> Result<Vec<StreamMessage>, StreamError> {
-        self.buf.clear();
-        self.overflowed = false;
-        Err(error)
-    }
-}
-
-impl StreamReader {
     pub fn new() -> Self {
         Self::default()
     }
@@ -510,11 +505,24 @@ impl StreamReader {
     }
 
     /// Whole messages that have arrived, consuming them from the buffer.
+    ///
+    /// A body that is not MessagePack costs only that message: its declared
+    /// length is still trustworthy, so the reader steps over it and keeps
+    /// the messages around it. A length that cannot be trusted loses the
+    /// rest of the buffer, since there is no way to find the next message.
+    /// Either way, messages decoded before the problem are returned first
+    /// and the error comes from the next call.
     pub fn take_messages(&mut self) -> Result<Vec<StreamMessage>, StreamError> {
+        if let Some(error) = self.pending.take() {
+            return Err(error);
+        }
         if self.overflowed {
-            return self.reset_with(StreamError::BufferOverflow);
+            self.overflowed = false;
+            self.buf.clear();
+            return Err(StreamError::BufferOverflow);
         }
         let mut out = Vec::new();
+        let mut first_error = None;
         let mut pos = 0usize;
         while let Some(header_end) = pos.checked_add(8).filter(|end| *end <= self.buf.len()) {
             // Originator tag: 1 from the host, 0 from the device. Kept for
@@ -531,39 +539,44 @@ impl StreamReader {
                 self.buf[pos + 6],
                 self.buf[pos + 7],
             ]) as usize;
-            if len > MAX_STREAM_MESSAGE {
-                return self.reset_with(StreamError::TooLarge(len));
-            }
-            let Some(body_end) = header_end.checked_add(len) else {
-                return self.reset_with(StreamError::TooLarge(len));
+            let body_end = header_end
+                .checked_add(len)
+                .filter(|_| len <= MAX_STREAM_MESSAGE);
+            let Some(body_end) = body_end else {
+                // The stream is out of step: nothing after this header can
+                // be located, so all of it goes.
+                first_error.get_or_insert(StreamError::TooLarge(len));
+                pos = self.buf.len();
+                break;
             };
             if self.buf.len() < body_end {
                 break; // wait for more bytes
             }
             let body = &self.buf[header_end..body_end];
-            let decoded = {
-                let mut decoder = Decoder::new(body);
-                match decoder.value() {
-                    // Real replies carry an opaque 23-byte tail inside the
-                    // declared body on roughly every other fresh session. The
-                    // first MessagePack value is the payload; the remaining
-                    // bytes are not a second value and are not canonical.
-                    Ok(value) => Ok(value),
-                    Err(error) => Err(StreamError::InvalidBody(error.to_string())),
-                }
-            };
-            match decoded {
+            // Real replies carry an opaque 23-byte tail inside the declared
+            // body on roughly every other fresh session. The first
+            // MessagePack value is the payload; the remaining bytes are not
+            // a second value and are not canonical.
+            match Decoder::new(body).value() {
                 Ok(body) => out.push(StreamMessage {
                     flags,
                     service,
                     body,
                 }),
-                Err(error) => return self.reset_with(error),
+                Err(error) => {
+                    first_error.get_or_insert(StreamError::InvalidBody(error.to_string()));
+                }
             }
             pos = body_end;
         }
         self.buf.drain(..pos);
-        Ok(out)
+        match first_error {
+            Some(error) if out.is_empty() => Err(error),
+            error => {
+                self.pending = error;
+                Ok(out)
+            }
+        }
     }
 }
 
@@ -771,6 +784,58 @@ mod tests {
         // growing forever; the next well-formed message is usable.
         malformed.push(&[0, 0, 0, 0, 1, 0, 0, 0, 0xc0]);
         assert_eq!(malformed.take_messages().unwrap().len(), 1);
+    }
+
+    fn framed(body: &[u8]) -> Vec<u8> {
+        let mut framed = vec![0; 4];
+        framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        framed.extend_from_slice(body);
+        framed
+    }
+
+    #[test]
+    fn a_malformed_body_costs_only_its_own_message() {
+        let good = |txn| Encoder::encode(&crate::msgmap! { key::TXN => Value::Int(txn) });
+        let mut r = StreamReader::new();
+        r.push(&framed(&good(1)));
+        r.push(&framed(&[0xc1]));
+        r.push(&framed(&good(2)));
+        r.push(&framed(&[0xc1]));
+        let partial = framed(&good(3));
+        r.push(&partial[..5]);
+
+        // The messages on both sides of the bad body survive it.
+        let msgs = r.take_messages().unwrap();
+        let txns: Vec<_> = msgs
+            .iter()
+            .map(|m| m.body.get(key::TXN).unwrap().as_i64())
+            .collect();
+        assert_eq!(txns, [Some(1), Some(2)]);
+        // The error follows on the next call, and the partial message after
+        // it is still buffered.
+        assert!(matches!(
+            r.take_messages(),
+            Err(StreamError::InvalidBody(_))
+        ));
+        r.push(&partial[5..]);
+        let msgs = r.take_messages().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].body.get(key::TXN).unwrap().as_i64(), Some(3));
+    }
+
+    #[test]
+    fn an_untrustworthy_length_keeps_the_messages_before_it() {
+        let mut r = StreamReader::new();
+        r.push(&framed(&[0xc0]));
+        let mut header = vec![0; 8];
+        header[4..8].copy_from_slice(&((MAX_STREAM_MESSAGE as u32) + 1).to_le_bytes());
+        r.push(&header);
+        assert_eq!(r.take_messages().unwrap().len(), 1);
+        assert!(matches!(r.take_messages(), Err(StreamError::TooLarge(_))));
+        // Nothing after the bad header could be located, so it is gone and
+        // the next message starts clean.
+        r.push(&framed(&[0xc0]));
+        assert_eq!(r.take_messages().unwrap().len(), 1);
     }
 
     #[test]
