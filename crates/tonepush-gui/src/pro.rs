@@ -323,7 +323,20 @@ impl Panel {
     pub(crate) fn new(ctx: egui::Context) -> Self {
         let (tx, commands) = mpsc::channel();
         let (events, rx) = mpsc::channel();
-        std::thread::spawn(move || Worker::new(commands, events, ctx).run());
+        if cfg!(test) {
+            // A test builds an App, and an App builds this panel: nothing a
+            // test asks of it may reach a StompStation PRO that happens to
+            // be plugged into the machine running the tests. The commands
+            // are taken and dropped, and the events stay open, so the panel
+            // behaves as one whose pedal never answers.
+            std::thread::spawn(move || {
+                let _events = events;
+                let _ctx = ctx;
+                for _ in commands {}
+            });
+        } else {
+            std::thread::spawn(move || Worker::new(commands, events, ctx).run());
+        }
         let panel = Self {
             tx,
             rx,
