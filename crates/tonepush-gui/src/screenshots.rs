@@ -90,10 +90,12 @@ enum Scene {
     ProFirmwareFailed,
     /// Nothing found on USB, with the way to look again.
     ConnectNotFound,
+    /// A StompStation PRO, a tempo it does not take just typed.
+    ProTempoRefused,
 }
 
 impl Scene {
-    const ALL: [Scene; 26] = [
+    const ALL: [Scene; 27] = [
         Scene::HxEdit,
         Scene::ProEdit,
         Scene::NoDevice,
@@ -120,6 +122,7 @@ impl Scene {
         Scene::ProFirmwareRestart,
         Scene::ProFirmwareFailed,
         Scene::ConnectNotFound,
+        Scene::ProTempoRefused,
     ];
 
     fn name(self) -> &'static str {
@@ -150,6 +153,7 @@ impl Scene {
             Scene::ProFirmwareRestart => "pro-firmware-restart",
             Scene::ProFirmwareFailed => "pro-firmware-failed",
             Scene::ConnectNotFound => "connect-not-found",
+            Scene::ProTempoRefused => "pro-tempo-refused",
         }
     }
 
@@ -207,6 +211,10 @@ impl Scene {
                 pro(app);
                 app.page = shell::Page::Pedal;
                 app.pro.demo_library(self == Scene::ProIrs);
+            }
+            Scene::ProTempoRefused => {
+                pro(app);
+                app.pro.demo_tempo_refused();
             }
             Scene::ProUnprotected => {
                 pro(app);

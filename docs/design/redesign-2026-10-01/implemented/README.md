@@ -396,3 +396,8 @@ Fixes after the stages that change what the window shows, each before (in
   and a pedal let go of in TonePush is left alone until it is unplugged or
   Look again is pressed. The line beside Look again says so; the stage 7
   note that TonePush does not watch USB no longer holds.
+- `pro-tempo-refused` (new): 999 BPM typed into a StompStation PRO's tempo.
+  The deck says the tempo must be between the ends the pedal advertises for
+  its tempo node, and the reading stays where the pedal has it. Before, the
+  tempo was dropped without a word, so its `before/` is the editor as it was
+  left (`pro-edit`); a tempo the pedal took was shown before it answered.

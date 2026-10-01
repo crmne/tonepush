@@ -572,7 +572,7 @@ impl Panel {
     }
 
     /// The tempo node, when this firmware has one, and its value now.
-    fn tempo_node(&self) -> Option<(NodePath, NodeDescription, f32)> {
+    pub(super) fn tempo_node(&self) -> Option<(NodePath, NodeDescription, f32)> {
         let snapshot = self.snapshot.as_ref()?;
         let (path, description) = snapshot.app.iter().find(|(path, description)| {
             path.as_str().ends_with("\\tempo_bpm")
@@ -589,7 +589,7 @@ impl Panel {
     /// number at all) is answered here instead of being sent. The reading
     /// changes when the pedal says it has the value: shown at once, a refused
     /// tempo stayed on screen as though it had been set.
-    fn set_tempo(&mut self, path: NodePath, description: NodeDescription, bpm: f32) {
+    pub(super) fn set_tempo(&mut self, path: NodePath, description: NodeDescription, bpm: f32) {
         let value = Value::from(f64::from(bpm));
         if !bpm.is_finite() || description.validate_value(&value).is_err() {
             self.failed = true;

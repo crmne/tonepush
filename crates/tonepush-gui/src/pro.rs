@@ -3613,6 +3613,13 @@ pub(crate) mod demo {
             }
         }
 
+        /// A tempo typed that the pedal's tempo node does not take.
+        pub(crate) fn demo_tempo_refused(&mut self) {
+            if let Some((path, description, _)) = self.tempo_node() {
+                self.set_tempo(path, description, 999.0);
+            }
+        }
+
         /// No StompStation PRO answered.
         pub(crate) fn demo_not_found(&mut self) {
             self.failed = true;
