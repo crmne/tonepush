@@ -234,6 +234,11 @@ pub trait Wire: Send {
     fn recv(&mut self, timeout: Duration) -> Result<Vec<u8>>;
 }
 
+/// A write the device never took within [`Session::WRITE`].
+const WRITE_TIMED_OUT: &str = "write timed out";
+/// A write still in flight after being cancelled.
+const WRITE_STUCK: &str = "an earlier write never completed";
+
 /// The live USB transport. Exactly one read is kept posted so the device's
 /// unsolicited notifications are never dropped.
 struct UsbWire {
@@ -244,11 +249,26 @@ struct UsbWire {
 
 impl Wire for UsbWire {
     fn send(&mut self, bytes: &[u8]) -> Result<()> {
+        // A write that never came back is still the endpoint's next
+        // completion, and waiting on this one would reap that instead.
+        if self.ep_out.pending() > 0 {
+            return Err(Error::Usb(WRITE_STUCK.into()));
+        }
         self.ep_out.submit(Buffer::from(bytes.to_vec()));
-        let completion = self
-            .ep_out
-            .wait_next_complete(Session::WRITE)
-            .ok_or_else(|| Error::Usb("write timed out".into()))?;
+        let Some(completion) = self.ep_out.wait_next_complete(Session::WRITE) else {
+            // nusb leaves a timed-out transfer in flight, so the next send
+            // would have taken this one's completion for its own. Cancel it
+            // and collect what comes back, and say the write timed out: the
+            // frame may or may not have reached the device, which is why the
+            // session gives up on itself (see `Session::write`).
+            self.ep_out.cancel_all();
+            while self.ep_out.pending() > 0 {
+                if self.ep_out.wait_next_complete(Session::CANCEL).is_none() {
+                    break;
+                }
+            }
+            return Err(Error::Usb(WRITE_TIMED_OUT.into()));
+        };
         completion
             .into_result()
             .map_err(|e| Error::Usb(e.to_string()))?;
@@ -555,7 +575,21 @@ impl Session {
         if debug() {
             eprintln!("TX {:#06x}->{:#06x} {}", f.src, f.dst, hex(&bytes));
         }
-        self.wire.send(&bytes)
+        if let Some(why) = &self.poisoned {
+            return Err(Error::Protocol(why.clone()));
+        }
+        let sent = self.wire.send(&bytes);
+        // A write that timed out may or may not have reached the device, so
+        // neither its sequence numbers nor its idea of what we have sent can
+        // be trusted any more. Nothing further goes out on this session.
+        if let Err(Error::Usb(why)) = &sent {
+            if why == WRITE_TIMED_OUT || why == WRITE_STUCK {
+                self.poisoned = Some(format!(
+                    "a write to the device timed out ({why}); reconnect before trying again"
+                ));
+            }
+        }
+        sent
     }
 
     /// Read one USB transfer and route every frame it contains.
@@ -625,6 +659,8 @@ impl Session {
     const DRAIN_BUDGET: Duration = Duration::from_secs(3);
     /// How long a single bulk write may take.
     const WRITE: Duration = Duration::from_secs(2);
+    /// How long to wait for a cancelled write to come back.
+    const CANCEL: Duration = Duration::from_millis(500);
     /// How long to wait for a reply before giving up on a request.
     const REPLY_BUDGET: Duration = Duration::from_secs(6);
     /// Per-read timeout while waiting for a reply.
@@ -1471,6 +1507,34 @@ mod tests {
         assert_eq!(
             pedal.lock().unwrap().frames_in,
             received,
+            "nothing more sent"
+        );
+    }
+
+    /// A timed-out write may or may not have reached the device, even one
+    /// that was a whole message on its own. Nothing more goes out after it,
+    /// not even the acknowledgements a later request would start with.
+    #[test]
+    fn a_timed_out_write_ends_the_session() {
+        let pedal = fake::Pedal::new();
+        let mut session = fake::session(&pedal);
+        pedal.lock().unwrap().fail_next_send = Some(WRITE_TIMED_OUT.into());
+
+        assert!(matches!(
+            session.preset_info(),
+            Err(Error::Usb(ref why)) if why == WRITE_TIMED_OUT
+        ));
+
+        let sent = pedal.lock().unwrap().transfers_in;
+        pedal.lock().unwrap().notify(1, Value::Nil);
+        assert!(matches!(
+            session.preset_info(),
+            Err(Error::Protocol(ref why)) if why.contains("timed out")
+        ));
+        assert!(session.keepalive().is_err());
+        assert_eq!(
+            pedal.lock().unwrap().transfers_in,
+            sent,
             "nothing more sent"
         );
     }

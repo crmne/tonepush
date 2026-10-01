@@ -48,6 +48,8 @@ pub struct Pedal {
     pub fail_next_send: Option<String>,
     /// Data frames received, for telling whether anything reached the wire.
     pub frames_in: usize,
+    /// Every transfer received, data or not.
+    pub transfers_in: usize,
     inbox: BTreeMap<u16, StreamReader>,
     seq: BTreeMap<u16, u16>,
 }
@@ -67,6 +69,7 @@ impl Pedal {
             failing_reads: None,
             fail_next_send: None,
             frames_in: 0,
+            transfers_in: 0,
             inbox: BTreeMap::new(),
             seq: BTreeMap::new(),
         }))
@@ -77,6 +80,14 @@ impl Pedal {
             .iter()
             .map(|(_, _, opcode, _)| *opcode)
             .collect()
+    }
+
+    /// Say something unasked, on the events channel.
+    pub fn notify(&mut self, event: i64, args: Value) {
+        self.reply(
+            ChannelId::EVENTS.device,
+            &Message::Notification { event, args },
+        );
     }
 
     fn receive(&mut self, bytes: &[u8]) {
@@ -226,6 +237,7 @@ impl Wire for Cable {
         if let Some(why) = pedal.fail_next_send.take() {
             return Err(Error::Usb(why));
         }
+        pedal.transfers_in += 1;
         pedal.receive(bytes);
         Ok(())
     }
