@@ -120,16 +120,15 @@ pub fn inspect(json: &Value, catalog: &Catalog) -> Tone {
 
         // A cab is written under its own name - `cab0` - and carries no
         // position, because it belongs to an amp rather than to a place in the
-        // line. HX Edit reconstructs which one by order, and so does this: the
-        // Nth cab follows the Nth amp.
-        let mut cabs: Vec<(i64, &Value)> = entries
+        // line.
+        let mut cabs: Vec<(i64, &str, &Value)> = entries
             .iter()
             .filter_map(|(k, v)| {
                 let n = k.strip_prefix("cab")?.parse::<i64>().ok()?;
-                Some((n, v))
+                Some((n, k.as_str(), v))
             })
             .collect();
-        cabs.sort_by_key(|(n, _)| *n);
+        cabs.sort_by_key(|(n, _, _)| *n);
         if !cabs.is_empty() {
             let is_amp_node = |v: &Value| {
                 is_amp(
@@ -138,20 +137,7 @@ pub fn inspect(json: &Value, catalog: &Catalog) -> Tone {
                         .and_then(|id| catalog.category_of(id)),
                 )
             };
-            let mut merged = Vec::with_capacity(positioned.len() + cabs.len());
-            let mut cabs = cabs.into_iter();
-            for (n, block) in positioned {
-                let amp = is_amp_node(block);
-                merged.push((n, block));
-                if amp {
-                    if let Some((_, cab)) = cabs.next() {
-                        merged.push((n, cab));
-                    }
-                }
-            }
-            // A cab with no amp before it still belongs in the chain.
-            merged.extend(cabs);
-            positioned = merged;
+            positioned = pair_cabs(positioned, &cabs, is_amp_node);
         }
 
         for (position, block) in positioned {
@@ -197,6 +183,70 @@ pub fn inspect(json: &Value, catalog: &Catalog) -> Tone {
         output_target_guess,
         skipped,
     }
+}
+
+/// Put each cab in the chain right after the amp it belongs to.
+///
+/// Whose cab it is is said rather than guessed where the file says it, the
+/// same way the preset builder reads it: HX Edit has the amp name its cab
+/// node (`"@cab": "cab0"`), and ours has the cab name the amp's `@slot`.
+/// Only an amp that says neither falls back to order, taking the first cab
+/// no other amp has claimed. A cab no amp claims still belongs in the chain,
+/// after the rest.
+fn pair_cabs<'a>(
+    positioned: Vec<(i64, &'a Value)>,
+    cabs: &[(i64, &str, &'a Value)],
+    is_amp_node: impl Fn(&Value) -> bool,
+) -> Vec<(i64, &'a Value)> {
+    let amps: Vec<bool> = positioned.iter().map(|(_, v)| is_amp_node(v)).collect();
+    let mut claimed = vec![false; cabs.len()];
+    let mut cab_of: Vec<Option<usize>> = vec![None; positioned.len()];
+
+    // Said outright: the amp's `@cab`, then a cab carrying the amp's `@slot`.
+    for (i, (_, block)) in positioned.iter().enumerate() {
+        if !amps[i] {
+            continue;
+        }
+        let by_name = block.get("@cab").and_then(Value::as_str).and_then(|name| {
+            cabs.iter()
+                .position(|(_, key, _)| *key == name)
+                .filter(|c| !claimed[*c])
+        });
+        let by_slot = || {
+            let slot = block.get("@slot").and_then(Value::as_u64)?;
+            cabs.iter().enumerate().position(|(c, (_, _, cab))| {
+                !claimed[c] && cab.get("@slot").and_then(Value::as_u64) == Some(slot)
+            })
+        };
+        if let Some(c) = by_name.or_else(by_slot) {
+            claimed[c] = true;
+            cab_of[i] = Some(c);
+        }
+    }
+    // Guessed: the amps that said nothing take what is left, in order.
+    for (i, cab) in cab_of.iter_mut().enumerate() {
+        if amps[i] && cab.is_none() {
+            if let Some(c) = claimed.iter().position(|taken| !taken) {
+                claimed[c] = true;
+                *cab = Some(c);
+            }
+        }
+    }
+
+    let mut merged = Vec::with_capacity(positioned.len() + cabs.len());
+    for ((n, block), cab) in positioned.into_iter().zip(cab_of) {
+        merged.push((n, block));
+        if let Some(c) = cab {
+            merged.push((n, cabs[c].2));
+        }
+    }
+    merged.extend(
+        cabs.iter()
+            .zip(&claimed)
+            .filter(|(_, taken)| !**taken)
+            .map(|((n, _, cab), _)| (*n, *cab)),
+    );
+    merged
 }
 
 fn read_block(
@@ -485,6 +535,61 @@ mod tests {
             .find(|b| b.model_name.contains("Double"))
             .unwrap();
         assert_eq!(amp.category, Some(Category::AMP));
+    }
+
+    /// Pair cabs to amps by the file's own links, with an amp being any block
+    /// whose model starts with `Amp`, and report which cab follows which amp.
+    fn pairing(json: serde_json::Value) -> Vec<String> {
+        let entries = json.as_object().unwrap();
+        let mut positioned: Vec<(i64, &Value)> = entries
+            .iter()
+            .filter_map(|(k, v)| Some((k.strip_prefix("block")?.parse().ok()?, v)))
+            .collect();
+        positioned.sort_by_key(|(n, _)| *n);
+        let mut cabs: Vec<(i64, &str, &Value)> = entries
+            .iter()
+            .filter_map(|(k, v)| Some((k.strip_prefix("cab")?.parse().ok()?, k.as_str(), v)))
+            .collect();
+        cabs.sort_by_key(|(n, _, _)| *n);
+        pair_cabs(positioned, &cabs, |v| {
+            v["@model"].as_str().is_some_and(|m| m.starts_with("Amp"))
+        })
+        .into_iter()
+        .map(|(_, v)| v["@model"].as_str().unwrap().to_owned())
+        .collect()
+    }
+
+    #[test]
+    fn a_cab_follows_the_amp_that_names_it_not_the_amp_in_its_place() {
+        // HX Edit's link: the second amp names cab0, the first names cab1.
+        let linked = pairing(serde_json::json!({
+            "block0": { "@model": "AmpA", "@cab": "cab1" },
+            "block1": { "@model": "Drive" },
+            "block2": { "@model": "AmpB", "@cab": "cab0" },
+            "cab0": { "@model": "CabB" },
+            "cab1": { "@model": "CabA" }
+        }));
+        assert_eq!(linked, ["AmpA", "CabA", "Drive", "AmpB", "CabB"]);
+
+        // Ours: the cab names the amp's slot.
+        let by_slot = pairing(serde_json::json!({
+            "block0": { "@model": "AmpA", "@slot": 0 },
+            "block1": { "@model": "AmpB", "@slot": 3 },
+            "cab0": { "@model": "CabB", "@slot": 3 },
+            "cab1": { "@model": "CabA", "@slot": 0 }
+        }));
+        assert_eq!(by_slot, ["AmpA", "CabA", "AmpB", "CabB"]);
+
+        // An amp that says nothing takes the first cab nobody else named,
+        // and a cab nobody takes still lands in the chain.
+        let mixed = pairing(serde_json::json!({
+            "block0": { "@model": "AmpA" },
+            "block1": { "@model": "AmpB", "@cab": "cab0" },
+            "cab0": { "@model": "CabB" },
+            "cab1": { "@model": "CabA" },
+            "cab2": { "@model": "Spare" }
+        }));
+        assert_eq!(mixed, ["AmpA", "CabA", "AmpB", "CabB", "Spare"]);
     }
 
     #[test]
