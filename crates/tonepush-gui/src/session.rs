@@ -133,6 +133,16 @@ pub enum Cmd {
         name: String,
     },
     SelectPreset(i64),
+    /// Leave the loaded preset for another and, only once the device is
+    /// there, carry out what was waiting on the switch: a copy, a paste, a
+    /// load. With `save` the loaded preset is saved first, and a save that
+    /// fails switches nothing. A switch that fails runs nothing after it, so
+    /// what was meant for one preset cannot land on the one still loaded.
+    Switch {
+        index: i64,
+        save: bool,
+        then: Vec<Cmd>,
+    },
     SelectSetlist(i64),
     /// Load a preset document into a chosen preset's edit buffer: put the
     /// device there first, then write the bytes. Save is the user's call.
@@ -458,7 +468,7 @@ pub fn spawn_repainting() -> (Sender<Cmd>, Receiver<Evt>, RepaintSignal) {
         tx: evt_tx,
         repaint: repaint.clone(),
     };
-    std::thread::spawn(move || Worker::new(cmd_rx, events).run());
+    std::thread::spawn(move || Worker::new(cmd_rx, events, automatic_dir()).run());
     (cmd_tx, evt_rx, repaint)
 }
 
@@ -496,6 +506,9 @@ struct Worker {
     /// rather than copied: while a cloud Tone is sounding it is not an edit
     /// somebody can accidentally fold into their existing undo stack.
     audition: Option<Audition>,
+    /// Where the automatic backup lives. Held rather than looked up, so a
+    /// worker driven by tests cannot write a pretend pedal into the real one.
+    automatic: Option<std::path::PathBuf>,
 }
 
 /// Which preset the editor is showing, as the device named it.
@@ -518,10 +531,11 @@ struct Audition {
 }
 
 impl Worker {
-    fn new(cmds: Receiver<Cmd>, events: Events) -> Worker {
+    fn new(cmds: Receiver<Cmd>, events: Events, automatic: Option<std::path::PathBuf>) -> Worker {
         Worker {
             cmds,
             events,
+            automatic,
             device: None,
             setlist: 0,
             history: Vec::new(),
@@ -612,6 +626,18 @@ impl Worker {
             Cmd::Disconnect => self.let_go(),
             Cmd::SelectPreset(index) => {
                 self.select(index);
+            }
+            Cmd::Switch { index, save, then } => {
+                if save && !self.save() {
+                    // Nothing moved, but the editor moved its selection when
+                    // it asked; what is still loaded puts it back.
+                    return self.reload();
+                }
+                if self.select(index) {
+                    for cmd in then {
+                        self.handle(cmd);
+                    }
+                }
             }
             Cmd::SelectSetlist(index) => {
                 self.setlist = index;
@@ -894,27 +920,7 @@ impl Worker {
             Cmd::BackUp(dir) => self.back_up(&dir),
             Cmd::RestoreAll(dir) => self.restore_all(&dir),
             Cmd::SavePreset => {
-                let Some((setlist, index, name)) = self.try_on_device(|d| d.preset_info()) else {
-                    if self.device.is_some() {
-                        self.send(Evt::Failed("no preset loaded".into()));
-                    }
-                    return;
-                };
-                if self.run_on_device(|d| d.save_preset(setlist, index, &name)) {
-                    self.dirty = false;
-                    self.send(Evt::Activity(format!("saved {name}")));
-                    // The saved state is the new baseline to undo back to.
-                    self.snapshot_taken = false;
-                    // The automatic backup follows the save, so the copy on
-                    // disk is never older than the last thing you did. One
-                    // preset is milliseconds, which is why this can be silent.
-                    // It goes before the news of the save rather than after,
-                    // because the editor reads that bundle to know what the
-                    // pedal is holding, and a stale answer would show up as a
-                    // dot saying the opposite of the truth.
-                    self.back_up_one(index);
-                    self.send(Evt::Saved);
-                }
+                self.save();
             }
             Cmd::CopyPreset => {
                 if let Some(blob) = self.preset_bytes() {
@@ -1349,6 +1355,32 @@ impl Worker {
             .map(|preset| preset.encode())
     }
 
+    /// Commit the edit buffer to the loaded preset. Returns whether it did.
+    fn save(&mut self) -> bool {
+        let Some((setlist, index, name)) = self.try_on_device(|d| d.preset_info()) else {
+            if self.device.is_some() {
+                self.send(Evt::Failed("no preset loaded".into()));
+            }
+            return false;
+        };
+        if !self.run_on_device(|d| d.save_preset(setlist, index, &name)) {
+            return false;
+        }
+        self.dirty = false;
+        self.send(Evt::Activity(format!("saved {name}")));
+        // The saved state is the new baseline to undo back to.
+        self.snapshot_taken = false;
+        // The automatic backup follows the save, so the copy on disk is never
+        // older than the last thing you did. One preset is milliseconds, which
+        // is why this can be silent. It goes before the news of the save
+        // rather than after, because the editor reads that bundle to know
+        // what the pedal is holding, and a stale answer would show up as a
+        // dot saying the opposite of the truth.
+        self.back_up_one(index);
+        self.send(Evt::Saved);
+        true
+    }
+
     /// Load a preset, leaving the old one's edit buffer and history behind.
     ///
     /// The editor moves its selection when it asks, so a switch that does
@@ -1721,7 +1753,9 @@ impl Worker {
 
     /// Bring the automatic backup back in step with the pedal, if there is one.
     fn refresh_automatic(&mut self) {
-        let Some(dir) = automatic_dir() else { return };
+        let Some(dir) = self.automatic.clone() else {
+            return;
+        };
         if hx_usb::backup::exists(&dir) {
             self.back_up(&dir);
         }
@@ -1756,7 +1790,7 @@ impl Worker {
         // noticed later than it happens, and a single bundle that every
         // connection refreshes is always the pedal as it is now - which is no
         // use at all when what you need is the pedal as it was on Tuesday.
-        if Some(dir) == automatic_dir().as_deref() {
+        if Some(dir) == self.automatic.as_deref() {
             match hx_usb::backup::snapshot(dir, &datestamp(), KEEP_SNAPSHOTS) {
                 Ok(Some(_)) => {}
                 Ok(None) => {}
@@ -1808,7 +1842,9 @@ impl Worker {
     /// should not interrupt. A missing backup directory simply means automatic
     /// backups are not set up yet, which is not an error worth reporting.
     fn back_up_one(&mut self, index: i64) {
-        let Some(dir) = automatic_dir() else { return };
+        let Some(dir) = self.automatic.clone() else {
+            return;
+        };
         if !hx_usb::backup::exists(&dir) {
             return;
         }
@@ -2586,6 +2622,7 @@ mod tests {
                 tx,
                 repaint: RepaintSignal::default(),
             },
+            None,
         );
         worker.opened(session(pedal));
         let _ = events.try_iter().count();
@@ -3049,6 +3086,101 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// "Save, then load" is one request. A save that fails switches nothing
+    /// and says what is still loaded, so the edits it could not save are
+    /// still there to save, and what waited on the switch never runs.
+    #[test]
+    fn a_save_that_fails_switches_nothing() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::SetTempo(100.0));
+        pedal.lock().unwrap().refuse.insert(op::SAVE_PRESET, -3);
+        let _ = events.try_iter().count();
+
+        worker.handle(Cmd::Switch {
+            index: 5,
+            save: true,
+            then: vec![Cmd::CopyPreset],
+        });
+
+        {
+            let pedal = pedal.lock().unwrap();
+            assert!(!pedal.opcodes().contains(&op::SELECT_PRESET));
+            assert_eq!(pedal.loaded.1, 2);
+        }
+        assert!(worker.dirty);
+        let said: Vec<Evt> = events.try_iter().collect();
+        assert!(!said.iter().any(|e| matches!(e, Evt::Copied { .. })));
+        assert!(said.iter().any(|e| matches!(
+            e,
+            Evt::Loaded {
+                index: 2,
+                dirty: true,
+                ..
+            }
+        )));
+    }
+
+    /// A switch that fails runs nothing after it: a paste meant for another
+    /// preset must not land on the one still loaded, nor its name on that
+    /// preset's slot.
+    #[test]
+    fn a_switch_that_fails_runs_nothing_after_it() {
+        let pedal = Pedal::new();
+        let (mut worker, _events) = worker(&pedal);
+        pedal.lock().unwrap().refuse.insert(op::SELECT_PRESET, -3);
+
+        worker.handle(Cmd::Switch {
+            index: 5,
+            save: false,
+            then: vec![
+                Cmd::PastePreset(document(150.0)),
+                Cmd::Rename {
+                    index: 5,
+                    name: "Pasted".into(),
+                },
+            ],
+        });
+
+        let opcodes = pedal.lock().unwrap().opcodes();
+        assert!(!opcodes.contains(&op::WRITE_PRESET));
+        assert!(!opcodes.contains(&op::RENAME_PRESET));
+    }
+
+    /// When both work, the save lands in the preset that was loaded, and
+    /// what waited runs on the one asked for.
+    #[test]
+    fn save_then_switch_saves_the_old_preset_and_works_on_the_new() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::SetTempo(100.0));
+        let _ = events.try_iter().count();
+
+        worker.handle(Cmd::Switch {
+            index: 5,
+            save: true,
+            then: vec![Cmd::CopyPreset],
+        });
+
+        let tempo = |bytes: &[u8]| hx_proto::Preset::parse(bytes).unwrap().tempo();
+        {
+            let pedal = pedal.lock().unwrap();
+            assert_eq!(
+                tempo(&pedal.stored[&2].1),
+                Some(100.0),
+                "the edit was saved"
+            );
+            assert_eq!(pedal.loaded.1, 5);
+        }
+        let copied = events.try_iter().find_map(|e| match e {
+            Evt::Copied { name, blob } => Some((name, blob)),
+            _ => None,
+        });
+        let (name, blob) = copied.expect("the copy ran after the switch");
+        assert_eq!(name, "Lead");
+        assert_eq!(tempo(&blob), Some(90.0));
     }
 
     /// The other side of that rule: a failure on the wire still ends the

@@ -503,9 +503,10 @@ pub struct App {
     /// The device's favourite blocks, as (index, name).
     favourites: Vec<(i64, String)>,
     current_snapshot: usize,
-    /// A preset the list wants to load while the edit buffer has changes that
-    /// are not saved. Loading discards them, so it asks.
-    confirm_switch: Option<i64>,
+    /// A switch that would throw away the edit buffer's unsaved changes,
+    /// waiting for an answer: a row, an arrow key, a menu action or a
+    /// previewed tone's Load asked for it.
+    confirm_switch: Option<PendingSwitch>,
     /// Renaming from the header, kept apart from the list's own rename state.
     /// Sharing one made both draw a field for the same preset, and two fields
     /// fighting over the keyboard is neither of them working.
@@ -820,6 +821,34 @@ enum RowAction {
     Import,
     Keep,
     Remove,
+}
+
+/// A switch to another preset waiting on an answer about unsaved changes:
+/// where to, and what to do once the pedal is there.
+struct PendingSwitch {
+    index: i64,
+    then: AfterSwitch,
+}
+
+/// What a switch to a preset is for.
+enum AfterSwitch {
+    /// Showing it: it was picked to be played or edited.
+    Load,
+    /// Reading its document, for the clipboard, a file or the library.
+    Copy(CopyTarget),
+    /// Writing the copied preset over it, under the copied name.
+    Paste(String, Vec<u8>),
+    /// Loading a previewed tone into it. The whole preview rides along, so
+    /// that Cancel can put the window back as it was.
+    Tone(Box<Preview>),
+}
+
+/// The three answers to "discard the unsaved changes?".
+#[derive(Clone, Copy)]
+enum SwitchAnswer {
+    Cancel,
+    Discard,
+    Save,
 }
 
 #[derive(Debug, PartialEq)]
@@ -2017,27 +2046,15 @@ impl App {
     /// Carry out what the right-click menu asked for.
     ///
     /// Each of these acts on one preset. Anything that needs the device's own
-    /// document - copy, export - selects the preset first, because the device
-    /// hands back the loaded one; the rest are local.
+    /// document - copy, paste, export - goes to the preset first, because the
+    /// device hands back and takes the loaded one, and asks first when that
+    /// would throw unsaved changes away; the rest are local.
     fn row_action(&mut self, index: i64, action: RowAction) {
         match action {
-            RowAction::Copy => {
-                self.select_for_action(index);
-                self.pending_copy = CopyTarget::Clipboard;
-                self.send(Cmd::CopyPreset);
-            }
+            RowAction::Copy => self.on_preset(index, AfterSwitch::Copy(CopyTarget::Clipboard)),
             RowAction::Paste => {
                 if let Some((name, blob)) = self.clipboard.clone() {
-                    self.select_for_action(index);
-                    self.note(format!("pasting {name}"));
-                    self.send(Cmd::PastePreset(blob));
-                    // The name travels with the tone. A document does not carry
-                    // one - the slot's label is a separate thing in flash - so
-                    // pasting without this left the new tone under the old
-                    // one's name. The label changes now and the chain follows
-                    // when you save, which is the same bargain every other edit
-                    // on this bar makes.
-                    self.send(Cmd::Rename { index, name });
+                    self.on_preset(index, AfterSwitch::Paste(name, blob));
                 }
             }
             RowAction::Export => {
@@ -2051,9 +2068,7 @@ impl App {
                     .add_filter("HX preset", &["hxpreset"])
                     .save_file()
                 {
-                    self.select_for_action(index);
-                    self.pending_copy = CopyTarget::File(path);
-                    self.send(Cmd::CopyPreset);
+                    self.on_preset(index, AfterSwitch::Copy(CopyTarget::File(path)));
                 }
             }
             RowAction::Import => {
@@ -2061,8 +2076,9 @@ impl App {
                     .add_filter("HX tone", &["hxpreset", "hlx"])
                     .pick_file()
                 {
-                    self.select_for_action(index);
-                    self.open_tone_file(&path);
+                    // Looking at a file switches nothing. The preview opens
+                    // aimed at this row, and its Load is what goes there.
+                    self.open_tone_file_for(&path, index);
                 }
             }
             // The bytes are already on this machine - the automatic backup
@@ -2071,11 +2087,7 @@ impl App {
             // save a preset the person was not even looking at.
             RowAction::Keep => match self.slot_document(index) {
                 Some((name, bytes)) => self.keep_tone(&name, "hxpreset", &bytes),
-                None => {
-                    self.select_for_action(index);
-                    self.pending_copy = CopyTarget::Library;
-                    self.send(Cmd::CopyPreset);
-                }
+                None => self.on_preset(index, AfterSwitch::Copy(CopyTarget::Library)),
             },
             // The directed version, for when the library already has this name
             // holding something else: no question, because the dot has already
@@ -2146,69 +2158,139 @@ impl App {
     }
 
     /// Select a preset through the same unsaved-changes gate whether the
-    /// request came from a mouse click or an arrow key.
+    /// request came from a mouse click or an arrow key. The preset already
+    /// loaded goes through it too: loading it again reloads it from the
+    /// pedal, which throws the changes away all the same.
     fn request_preset(&mut self, index: i64) {
-        if self.dirty && index != self.preset_index {
-            self.confirm_switch = Some(index);
+        self.on_preset(index, AfterSwitch::Load);
+    }
+
+    /// Go to a preset and do something there.
+    ///
+    /// Going to another preset throws away the loaded one's unsaved changes,
+    /// so it asks first, whatever asked for it. On the preset already loaded
+    /// nothing is lost - a copy reads the edit buffer as it is, a paste or a
+    /// load is one more edit that undo can take back - so those go at once.
+    fn on_preset(&mut self, index: i64, then: AfterSwitch) {
+        if index == self.preset_index && !matches!(then, AfterSwitch::Load) {
+            for cmd in self.commands_for(index, then) {
+                self.send(cmd);
+            }
+        } else if self.dirty {
+            self.confirm_switch = Some(PendingSwitch { index, then });
         } else {
-            self.load_preset(index);
+            self.switch_to(PendingSwitch { index, then }, false);
         }
+    }
+
+    /// What to send to carry `then` out on `index`, once the pedal is there.
+    fn commands_for(&mut self, index: i64, then: AfterSwitch) -> Vec<Cmd> {
+        match then {
+            AfterSwitch::Load => Vec::new(),
+            AfterSwitch::Copy(target) => {
+                self.pending_copy = target;
+                vec![Cmd::CopyPreset]
+            }
+            AfterSwitch::Paste(name, blob) => {
+                self.note(format!("pasting {name}"));
+                // The name travels with the tone. A document does not carry
+                // one - the slot's label is a separate thing in flash - so
+                // pasting without this left the new tone under the old one's
+                // name. The label changes now and the chain follows when you
+                // save, which is the same bargain every other edit on this bar
+                // makes.
+                vec![Cmd::PastePreset(blob), Cmd::Rename { index, name }]
+            }
+            AfterSwitch::Tone(preview) => {
+                self.loading = true;
+                let slot = self.active_slot_label(index);
+                self.note(format!("loading {} into {slot}", preview.name));
+                let Preview { name, load, .. } = *preview;
+                vec![match load {
+                    LoadKind::Document(bytes) => Cmd::LoadDocument { dest: index, bytes },
+                    LoadKind::Steps(blocks) => Cmd::LoadSteps {
+                        dest: index,
+                        name,
+                        blocks,
+                    },
+                }]
+            }
+        }
+    }
+
+    /// Switch to a preset, with what waits on it, as one request: the worker
+    /// runs the rest only once the switch has worked, and with `save` only
+    /// switches once the save has. As separate requests, a save that failed
+    /// was followed by the switch that threw the changes away, and a refused
+    /// switch by a paste onto the preset still loaded.
+    fn switch_to(&mut self, switch: PendingSwitch, save: bool) {
+        let index = switch.index;
+        let then = self.commands_for(index, switch.then);
+        if !save && then.is_empty() {
+            // A plain switch stays one, which the worker can collapse while
+            // somebody rides the list with the arrow keys.
+            return self.load_preset(index);
+        }
+        self.loading = true;
+        self.preset_index = index;
+        self.send(Cmd::Switch { index, save, then });
     }
 
     /// Ask before a preset switch throws away unsaved changes.
     fn confirm_switch_window(&mut self, ctx: &egui::Context) {
-        let Some(index) = self.confirm_switch else {
+        let Some(index) = self.confirm_switch.as_ref().map(|switch| switch.index) else {
             return;
         };
-        let going_to = self
-            .presets
-            .get(index as usize)
-            .filter(|n| !n.is_empty())
-            .cloned()
-            .unwrap_or_else(|| self.active_slot_label(index));
-        let mut decided = None;
+        let consequence = if index == self.preset_index {
+            "Loading it again from the pedal discards them.".to_owned()
+        } else {
+            let going_to = self
+                .presets
+                .get(index as usize)
+                .filter(|n| !n.is_empty())
+                .cloned()
+                .unwrap_or_else(|| self.active_slot_label(index));
+            format!("Loading {going_to} discards them.")
+        };
+        let mut answer = None;
         theme::modal("Unsaved changes").show(ctx, |ui| {
             ui.set_max_width(340.0);
             ui.label(format!(
-                "“{}” has changes you have not saved. Loading {going_to} discards them.",
+                "“{}” has changes you have not saved. {consequence}",
                 self.preset_name
             ));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Cancel").clicked() {
-                    decided = Some(0);
+                    answer = Some(SwitchAnswer::Cancel);
                 }
                 if ui.button("Discard and load").clicked() {
-                    decided = Some(1);
+                    answer = Some(SwitchAnswer::Discard);
                 }
                 if ui.button("Save, then load").clicked() {
-                    decided = Some(2);
+                    answer = Some(SwitchAnswer::Save);
                 }
             });
         });
-        match decided {
-            Some(0) => self.confirm_switch = None,
-            Some(1) => {
-                self.confirm_switch = None;
-                self.load_preset(index);
-            }
-            Some(2) => {
-                self.confirm_switch = None;
-                // Save first; the worker runs them in order, so the load lands
-                // on a preset that has just been written.
-                self.send(Cmd::SavePreset);
-                self.load_preset(index);
-            }
-            _ => {}
+        if let Some(answer) = answer {
+            self.answer_switch(answer);
         }
     }
 
-    /// Put the device on a preset a menu action is about to work on.
-    fn select_for_action(&mut self, index: i64) {
-        if self.preset_index != index {
-            self.loading = true;
-            self.preset_index = index;
-            self.send(Cmd::SelectPreset(index));
+    /// Carry out the answer about unsaved changes.
+    fn answer_switch(&mut self, answer: SwitchAnswer) {
+        let Some(switch) = self.confirm_switch.take() else {
+            return;
+        };
+        match answer {
+            // A previewed tone goes back on screen, still waiting for Load.
+            SwitchAnswer::Cancel => {
+                if let AfterSwitch::Tone(preview) = switch.then {
+                    self.preview = Some(*preview);
+                }
+            }
+            SwitchAnswer::Discard => self.switch_to(switch, false),
+            SwitchAnswer::Save => self.switch_to(switch, true),
         }
     }
 
@@ -7178,6 +7260,17 @@ impl App {
         }
     }
 
+    /// Open a tone file aimed at one preset: the row whose menu asked.
+    fn open_tone_file_for(&mut self, path: &std::path::Path, dest: i64) {
+        let before = self.preview.take();
+        self.open_tone_file(path);
+        match self.preview.as_mut() {
+            Some(preview) => preview.dest = dest,
+            // A file that would not open leaves the preview that was there.
+            None => self.preview = before,
+        }
+    }
+
     /// Open a tone file of either kind for a look. The extension decides the
     /// reader; both end at the same preview window.
     fn open_tone_file(&mut self, path: &std::path::Path) {
@@ -7550,26 +7643,16 @@ impl App {
         }
 
         if load {
-            self.loading = true;
-            self.note(format!(
-                "loading {} into {}",
-                preview.name,
-                self.active_slot_label(preview.dest)
-            ));
-            match preview.load {
-                LoadKind::Document(bytes) => self.send(Cmd::LoadDocument {
-                    dest: preview.dest,
-                    bytes,
-                }),
-                LoadKind::Steps(blocks) => self.send(Cmd::LoadSteps {
-                    dest: preview.dest,
-                    name: preview.name,
-                    blocks,
-                }),
-            }
+            self.load_preview(preview);
         } else if open && !cancel {
             self.preview = Some(preview);
         }
+    }
+
+    /// Load a previewed tone into the preset it is aimed at, through the same
+    /// question as any other switch when that is not the preset loaded.
+    fn load_preview(&mut self, preview: Preview) {
+        self.on_preset(preview.dest, AfterSwitch::Tone(Box::new(preview)));
     }
 
     fn activity(&mut self, root_ui: &mut egui::Ui) {
@@ -11513,6 +11596,175 @@ mod tests {
         assert!(!app.loading);
         assert!(app.dirty, "the edits the pedal kept are still unsaved");
         assert_eq!(app.current_snapshot, 1);
+    }
+
+    /// Loading the preset already loaded reloads it from the pedal, which
+    /// throws its changes away like loading any other, so it asks too.
+    #[test]
+    fn loading_the_loaded_preset_again_asks_about_unsaved_changes() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), true)).unwrap();
+        app.drain_events();
+        let _ = cmds.try_iter().count();
+
+        app.request_preset(2);
+
+        assert!(app.confirm_switch.is_some());
+        assert!(cmds.try_recv().is_err(), "nothing goes before the answer");
+    }
+
+    /// A menu action that has to go to another preset asks before it throws
+    /// unsaved changes away, as a click on the row does, and then goes as one
+    /// request that runs only once the switch has worked.
+    #[test]
+    fn a_menu_action_on_another_preset_asks_before_discarding() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), true)).unwrap();
+        app.drain_events();
+        let _ = cmds.try_iter().count();
+        app.clipboard = Some(("Crunch".into(), vec![1, 2, 3]));
+
+        app.row_action(5, RowAction::Paste);
+        assert!(app.confirm_switch.is_some());
+        assert!(cmds.try_recv().is_err());
+
+        app.answer_switch(SwitchAnswer::Discard);
+        match cmds.try_recv() {
+            Ok(Cmd::Switch {
+                index: 5,
+                save: false,
+                then,
+            }) => assert!(matches!(
+                then.as_slice(),
+                [Cmd::PastePreset(blob), Cmd::Rename { index: 5, name }]
+                    if blob == &[1, 2, 3] && name == "Crunch"
+            )),
+            _ => panic!("the paste goes as one request with its switch"),
+        }
+        assert_eq!(app.preset_index, 5);
+        assert!(app.loading);
+
+        // A copy of another preset asks the same way, and Cancel sends nothing.
+        events.send(loaded(5, Some(0), true)).unwrap();
+        app.drain_events();
+        app.row_action(2, RowAction::Copy);
+        assert!(app.confirm_switch.is_some());
+        app.answer_switch(SwitchAnswer::Cancel);
+        assert!(app.confirm_switch.is_none());
+        assert!(cmds.try_recv().is_err());
+    }
+
+    /// On the preset already loaded nothing is thrown away: a copy reads the
+    /// edit buffer as it is, so it goes at once.
+    #[test]
+    fn a_menu_action_on_the_loaded_preset_goes_at_once() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), true)).unwrap();
+        app.drain_events();
+        let _ = cmds.try_iter().count();
+
+        app.row_action(2, RowAction::Copy);
+
+        assert!(app.confirm_switch.is_none());
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::CopyPreset)));
+        assert!(matches!(app.pending_copy, CopyTarget::Clipboard));
+    }
+
+    /// "Save, then load" is one request, so a save that fails is never
+    /// followed by the switch that throws the changes away.
+    #[test]
+    fn save_then_load_switches_only_after_the_save() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), true)).unwrap();
+        app.drain_events();
+        let _ = cmds.try_iter().count();
+
+        app.request_preset(5);
+        app.answer_switch(SwitchAnswer::Save);
+
+        let sent: Vec<Cmd> = cmds.try_iter().collect();
+        assert!(matches!(
+            sent.as_slice(),
+            [Cmd::Switch { index: 5, save: true, then }] if then.is_empty()
+        ));
+    }
+
+    /// A previewed tone, as Load gets it.
+    fn previewed(dest: i64) -> Preview {
+        Preview {
+            name: "From a file".into(),
+            line: String::new(),
+            chain: Vec::new(),
+            layout: hx_proto::preset::Layout::default(),
+            skipped: Vec::new(),
+            load: LoadKind::Document(vec![9, 9]),
+            dest,
+            source: ("hxpreset".into(), vec![9, 9]),
+        }
+    }
+
+    /// A previewed tone loaded into another preset asks first. Cancel puts
+    /// the preview back; the load goes as one request with its switch. Into
+    /// the preset already loaded it is one more edit, and goes at once.
+    #[test]
+    fn loading_a_tone_into_another_preset_asks_first() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), true)).unwrap();
+        app.drain_events();
+        let _ = cmds.try_iter().count();
+
+        app.load_preview(previewed(5));
+        assert!(app.confirm_switch.is_some());
+        assert!(cmds.try_recv().is_err());
+        app.answer_switch(SwitchAnswer::Cancel);
+        assert_eq!(app.preview.as_ref().map(|p| p.dest), Some(5));
+
+        let preview = app.preview.take().unwrap();
+        app.load_preview(preview);
+        app.answer_switch(SwitchAnswer::Discard);
+        match cmds.try_recv() {
+            Ok(Cmd::Switch {
+                index: 5,
+                save: false,
+                then,
+            }) => assert!(matches!(
+                then.as_slice(),
+                [Cmd::LoadDocument { dest: 5, bytes }] if bytes == &[9, 9]
+            )),
+            _ => panic!("the load goes as one request with its switch"),
+        }
+
+        events.send(loaded(2, Some(0), true)).unwrap();
+        app.drain_events();
+        app.load_preview(previewed(2));
+        assert!(app.confirm_switch.is_none());
+        assert!(matches!(
+            cmds.try_recv(),
+            Ok(Cmd::LoadDocument { dest: 2, .. })
+        ));
+    }
+
+    /// Loading from a file switches nothing to look at it: the preview opens
+    /// aimed at the row, and only its Load goes there.
+    #[test]
+    fn a_file_for_a_row_opens_aimed_at_it_without_switching() {
+        let (mut app, events, cmds) = app();
+        if app.catalog.is_none() {
+            eprintln!("SKIPPED: HX Edit is not installed, so tones cannot be read");
+            return;
+        }
+        events.send(loaded(2, Some(0), true)).unwrap();
+        app.drain_events();
+        let _ = cmds.try_iter().count();
+        let file = std::env::temp_dir().join("tonepush-row-import-test.hxpreset");
+        std::fs::write(&file, include_bytes!("../../hx-proto/tests/preset.bin")).unwrap();
+
+        app.open_tone_file_for(&file, 5);
+
+        assert_eq!(app.preview.as_ref().map(|p| p.dest), Some(5));
+        assert_eq!(app.preset_index, 2, "nothing switched");
+        assert!(cmds.try_recv().is_err());
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]
