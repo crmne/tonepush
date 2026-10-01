@@ -1,21 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <!-- A stompbox in the chain: the wire runs through it, the way the app
-       draws a preset. Colours are the app's own theme. -->
-  <rect x="0" y="0" width="128" height="128" rx="28" fill="#121418"/>
-  <!-- the wire, entering and leaving -->
-  <path d="M 4 64 H 24 M 104 64 H 124" stroke="#4a505c" stroke-width="7" stroke-linecap="round"/>
-  <!-- the pedal -->
-  <rect x="24" y="20" width="80" height="88" rx="12" fill="#2a2e36" stroke="#d8a83b" stroke-width="5"/>
-  <!-- knobs -->
-  <g stroke="#d8a83b" stroke-width="4" fill="#121418">
-    <circle cx="46" cy="44" r="9"/>
-    <circle cx="82" cy="44" r="9"/>
-  </g>
-  <g stroke="#d6d9df" stroke-width="3.5" stroke-linecap="round">
-    <path d="M 46 44 L 41 37"/>
-    <path d="M 82 44 L 87 37"/>
-  </g>
-  <!-- the footswitch -->
-  <circle cx="64" cy="84" r="13" fill="#d8a83b"/>
-  <circle cx="64" cy="84" r="6" fill="#121418"/>
+  <!-- A stompbox on the wire, lit amber, the way the editor draws a block.
+       Filled rather than outlined so it still reads at 16 and 32 pixels.
+       The website (tonepush.rocks) uses the same mark. -->
+  <defs>
+    <linearGradient id="amber" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f3c45c"/><stop offset="1" stop-color="#d89a2b"/></linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1e2229"/><stop offset="1" stop-color="#121418"/></linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#panel)"/>
+  <path d="M0 70h28M100 70h28" stroke="#4a505c" stroke-width="8"/>
+  <rect x="28" y="18" width="72" height="94" rx="14" fill="url(#amber)"/>
+  <circle cx="48" cy="40" r="9" fill="#121418"/>
+  <circle cx="80" cy="40" r="9" fill="#121418"/>
+  <path d="M48 40l-4-6M80 40l4-6" stroke="#f3c45c" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="64" cy="84" r="15" fill="#121418"/>
+  <circle cx="64" cy="84" r="7" fill="#3a404b"/>
 </svg>
