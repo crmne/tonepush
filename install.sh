@@ -11,6 +11,11 @@
 # and on PATH.
 set -euo pipefail
 
+# Everything below is relative to the checkout: Cargo.toml, target/,
+# packaging/ and tools/. Run from anywhere, it works from here.
+SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+cd "$(dirname "$SCRIPT")"
+
 APP_NAME="TonePush"
 APP_SLUG="tonepush"
 # Read from the workspace rather than written down here, because a version kept
@@ -194,7 +199,7 @@ main() {
     --uninstall) uninstall ;;
     --cli-only) cli_only=1 ;;
     --help | -h)
-        sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,9p' "$SCRIPT" | sed 's/^# \{0,1\}//'
         exit 0
         ;;
     esac
