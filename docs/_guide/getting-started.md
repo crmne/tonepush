@@ -42,7 +42,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 ### Model names and pictures
 
-Names, parameter ranges, value formatting, and artwork come from HX Edit's own data files, which are Line 6's and are **not** redistributed here. The editor walks you through this the first time it opens: if HX Edit is installed on the machine it copies the data by itself, and otherwise it takes the HX Edit installer you download from [line6.com/software](https://line6.com/software/), either the Mac .dmg or the Windows .exe, on any OS.
+Names, parameter ranges, value formatting, and artwork come from HX Edit's own data files, which are Line 6's and are **not** redistributed here. If HX Edit is installed on the machine, the editor copies the data by itself. Otherwise the page it shows with no pedal connected offers it as a step: **Download HX Edit** opens [line6.com/software](https://line6.com/software/), and **Find the installer** looks for the installer in your Downloads folder, or lets you choose it, either the Mac .dmg or the Windows .exe, on any OS. Dropping the installer on the window works too, except on Wayland, which does not pass dropped files on yet. The StompStation PRO needs none of this.
 
 Reading an installer needs 7-Zip on Linux and Windows; on most distros that is the `p7zip` package, and the AUR package already suggests it. On Windows, install [7-Zip](https://www.7-zip.org/) the ordinary way and the editor finds it where the installer left it. There is nothing to add to PATH. macOS needs nothing extra.
 
@@ -57,7 +57,12 @@ Plug in the pedal and start the editor:
 tonepush-gui
 ```
 
-It connects on launch. The sidebar on the left is the pedal: its name and
+It connects on launch. Until a pedal answers, the window says to plug one in,
+shows both families it looks for, and checks what it can on this computer: the
+USB access rule, and HX Edit's data. **Look again** looks once more after you
+plug a pedal in, and your library is one click away.
+
+Once a pedal is connected, the sidebar on the left is the pedal: its name and
 firmware at the top, then its presets in its own banks. Across the top runs the
 loaded preset, with what state it is in, its snapshots, the tempo, undo, redo
 and Save. The switch at the top of the sidebar turns the rest of the window

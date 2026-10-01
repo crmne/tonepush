@@ -14,10 +14,6 @@
 //! drawing they share. [`legacy`] is the editor's earlier widget set, drawn
 //! in the same tokens until the pages that use it are redrawn.
 
-// The redesigned pages adopt these components stage by stage; until the last
-// of them lands, some are defined before their first use.
-#![allow(dead_code)]
-
 use std::cell::Cell;
 
 use egui::{Color32, Stroke, Vec2};
@@ -281,7 +277,6 @@ tokens!(
     panel,
     raised,
     hover,
-    pressed,
     tile_off,
     line_soft,
     line,
@@ -470,12 +465,8 @@ pub const BLOCK_NAME: f32 = 17.0;
 pub const PRESET_NAME: f32 = 20.0;
 /// Page titles.
 pub const PAGE_TITLE: f32 = 22.0;
-/// The welcome screen, the only display size.
-pub const DISPLAY: f32 = 30.0;
 
 // Shape.
-/// The spacing grid.
-pub const GRID: f32 = 4.0;
 pub const RADIUS_CHIP: u8 = 5;
 pub const RADIUS_CONTROL: u8 = 8;
 pub const RADIUS_MENU: u8 = 10;
@@ -911,12 +902,6 @@ impl Icon {
             .find(|(icon, _, _)| *icon == self)
             .map(|(_, uri, _)| *uri)
             .unwrap_or_default()
-    }
-
-    /// The icon as a picture to paint.
-    #[must_use]
-    pub fn art(self) -> Art {
-        Art::whole(self.uri().to_owned())
     }
 }
 

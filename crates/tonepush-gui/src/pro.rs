@@ -645,8 +645,17 @@ impl Panel {
         std::mem::take(&mut self.page_request)
     }
 
-    pub(crate) fn reconnect(&self) {
+    pub(crate) fn reconnect(&mut self) {
+        if !self.online && !self.updating() {
+            self.failed = false;
+            self.status = "Looking for a StompStation PRO…".into();
+        }
         let _ = self.tx.send(Cmd::Connect);
+    }
+
+    /// Whether TonePush is still looking for a StompStation PRO.
+    pub(crate) fn looking(&self) -> bool {
+        !self.online && !self.failed && !self.updating()
     }
 
     pub(crate) fn send_tone(&self, index: usize, name: String, bytes: Vec<u8>) {
@@ -3516,6 +3525,12 @@ pub(crate) mod demo {
             }
         }
 
+        /// No StompStation PRO answered.
+        pub(crate) fn demo_not_found(&mut self) {
+            self.failed = true;
+            self.status = "No StompStation PRO found".to_owned();
+        }
+
         /// Open the pedal's page on its settings.
         pub(crate) fn demo_settings(&mut self) {
             self.tab = Tab::Settings;
@@ -3586,9 +3601,18 @@ pub(crate) mod demo {
                     flow.stage = Stage::SwitchedOff;
                     flow.sent = (5_128_192, 5_128_192);
                     flow.written_at = now.checked_sub(Duration::from_secs(6 * 60 + 3));
+                    // Switched off at 14:38, three seconds ago as the
+                    // countdown has it.
+                    let twenty_to_three = jiff::Zoned::now()
+                        .with()
+                        .hour(14)
+                        .minute(38)
+                        .second(0)
+                        .build()
+                        .map_or(SystemTime::now(), |time| SystemTime::from(time.timestamp()));
                     flow.off_at = now
                         .checked_sub(Duration::from_secs(3))
-                        .map(|off| (off, SystemTime::now() - Duration::from_secs(3)));
+                        .map(|off| (off, twenty_to_three));
                     self.online = false;
                 }
                 _ => {

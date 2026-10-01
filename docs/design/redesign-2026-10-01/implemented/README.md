@@ -352,3 +352,32 @@ update in 0.7.0, so there is no `before/`.
   pedal normally first.
 - "Sonulab support" opens Sonulab's StompStation PRO page, the one address
   the guide already names.
+
+## Stage 7: connect, and the first run
+
+With no pedal, the Edit page is one calm page (18) instead of an empty chain
+and an empty pane: the mark, "Plug in your pedal", both families with what
+they cover and whether TonePush is still looking for one, what is already
+fine on this computer, what to do first, and Line 6's model data as a step,
+with Find the installer and Download HX Edit and a plain note that the
+StompStation PRO needs nothing. The library is one click away at the foot,
+beside the guide and what is new.
+
+The window that blocked the first run until HX Edit's data was in place is
+gone: the step is on this page, and on an HX pedal's block pane when the data
+is missing. Machines with HX Edit installed still get its data copied without
+asking, and an installer dropped on the window is still read.
+
+Scenes: `no-device` (looking for both families) and `connect-not-found`
+(new: nothing found, and no HX Edit data, as on a first run). Their `before/`
+is `before/no-device`.
+
+- TonePush looks for a pedal when it starts and when asked; it does not watch
+  USB. Once the first look finds nothing, the cards say "Not found" and Look
+  again looks once more, where the design shows "Looking on USB" throughout.
+- "This computer can talk to USB pedals" checks for the access rule where
+  `install.sh` and the packages put it, and shows only on Linux, the one
+  system that needs it; without the rule it says how to get it.
+- The welcome window's credits line is not carried over; the page keeps its
+  licence and the note that TonePush is not affiliated with Yamaha Guitar
+  Group. "What's new" opens the latest release.

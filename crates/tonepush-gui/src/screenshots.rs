@@ -42,7 +42,7 @@ enum Scene {
     HxEdit,
     /// A StompStation PRO with 03B Velvet Drive loaded.
     ProEdit,
-    /// Nothing plugged in.
+    /// Nothing plugged in yet: TonePush looking for either family.
     NoDevice,
     /// The HX Stomp with a setlist about to be written, asking first.
     SetlistConfirm,
@@ -88,10 +88,12 @@ enum Scene {
     ProFirmwareRestart,
     /// A firmware update that stopped.
     ProFirmwareFailed,
+    /// Nothing found on USB, with the way to look again.
+    ConnectNotFound,
 }
 
 impl Scene {
-    const ALL: [Scene; 25] = [
+    const ALL: [Scene; 26] = [
         Scene::HxEdit,
         Scene::ProEdit,
         Scene::NoDevice,
@@ -117,6 +119,7 @@ impl Scene {
         Scene::ProFirmwareWriting,
         Scene::ProFirmwareRestart,
         Scene::ProFirmwareFailed,
+        Scene::ConnectNotFound,
     ];
 
     fn name(self) -> &'static str {
@@ -146,6 +149,7 @@ impl Scene {
             Scene::ProFirmwareWriting => "pro-firmware-writing",
             Scene::ProFirmwareRestart => "pro-firmware-restart",
             Scene::ProFirmwareFailed => "pro-firmware-failed",
+            Scene::ConnectNotFound => "connect-not-found",
         }
     }
 
@@ -248,10 +252,17 @@ impl Scene {
                 app.lens = crate::pane::Lens::Snapshots;
             }
             Scene::NoDevice => {
+                app.connection = Connection::Connecting;
+                app.status.clear();
+            }
+            Scene::ConnectNotFound => {
                 app.connection = Connection::Offline;
                 app.status =
                     "No supported pedal found. Check USB and close any other pedal editor."
                         .to_owned();
+                app.pro.demo_not_found();
+                // Without HX Edit's data, as on a first run.
+                app.catalog = None;
             }
         }
     }

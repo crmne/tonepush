@@ -43,8 +43,6 @@ pub enum Size {
     Small,
     /// 30 points.
     Medium,
-    /// 36 points.
-    Large,
 }
 
 impl Size {
@@ -52,7 +50,6 @@ impl Size {
         match self {
             Size::Small => 26.0,
             Size::Medium => 30.0,
-            Size::Large => 36.0,
         }
     }
 
@@ -60,7 +57,6 @@ impl Size {
         match self {
             Size::Small => 9.0,
             Size::Medium => 12.0,
-            Size::Large => 16.0,
         }
     }
 
@@ -68,7 +64,6 @@ impl Size {
         match self {
             Size::Small => 12.0,
             Size::Medium => 13.0,
-            Size::Large => 13.5,
         }
     }
 
@@ -131,10 +126,6 @@ impl<'a> Button<'a> {
 
     pub fn small(self) -> Self {
         self.size(Size::Small)
-    }
-
-    pub fn large(self) -> Self {
-        self.size(Size::Large)
     }
 
     pub fn icon(mut self, icon: Icon) -> Self {
@@ -468,11 +459,6 @@ impl IconButton {
         }
         response
     }
-}
-
-/// The ordinary 28-point icon button.
-pub fn icon_button(ui: &mut Ui, icon: Icon, enabled: bool) -> Response {
-    IconButton::new(icon).enabled(enabled).show(ui)
 }
 
 // ---------------------------------------------------------------------------
@@ -949,15 +935,6 @@ impl<'a> Tag<'a> {
         if let Some(galley) = galley {
             centred_galley(ui, galley, x, y);
         }
-    }
-
-    /// Set it in the row being laid out.
-    pub fn show(&self, ui: &mut Ui) -> Response {
-        let (rect, response) = ui.allocate_exact_size(self.size(ui), Sense::click());
-        if ui.is_rect_visible(rect) {
-            self.paint(ui, rect);
-        }
-        response
     }
 }
 

@@ -319,13 +319,12 @@ impl App {
     pub(crate) fn face(&mut self, ui: &mut Ui, block: &session::Block, fit: &Fit) -> f32 {
         let position = block.position;
         if self.catalog.is_none() {
-            theme::label(
-                ui,
-                "The knobs need HX Edit's data for their names and ranges.",
-                theme::regular(theme::SECONDARY),
-                theme::muted(),
-            );
-            return 0.0;
+            // The knobs need HX Edit's data for their names and ranges.
+            ui.scope(|ui| {
+                ui.set_max_width(fit.width.min(560.0));
+                self.model_data_step(ui);
+            });
+            return fit.width.min(560.0);
         }
         let effect = self.is_effect(block);
         let colour = self.block_colour(block);
