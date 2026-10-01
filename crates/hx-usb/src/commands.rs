@@ -1173,7 +1173,15 @@ impl Session {
     }
 
     /// Rename a snapshot, by zero-based index.
+    ///
+    /// An empty name is refused before anything is sent. The document has
+    /// nowhere to put one, and finding that out after reading the preset
+    /// reported it as a missing snapshot - and, with traffic already on the
+    /// wire, cost the editor its connection over a typo.
     pub fn rename_snapshot(&mut self, index: usize, name: &str) -> Result<()> {
+        if name.is_empty() {
+            return Err(Error::Protocol("a snapshot name cannot be empty".into()));
+        }
         let mut preset = self.read_preset()?;
         if !preset.set_snapshot_name(index, name) {
             return Err(Error::Protocol(format!("no snapshot {}", index + 1)));
@@ -1745,6 +1753,25 @@ mod pedal_tests {
 
         pedal.lock().unwrap().applies_writes = false;
         assert!(session.rename_snapshot(0, "Chorus").is_err());
+    }
+
+    /// An empty snapshot name is its own error, raised before anything
+    /// reaches the wire, so the editor can say so and keep the pedal.
+    #[test]
+    fn an_empty_snapshot_name_is_refused_before_any_traffic() {
+        let pedal = Pedal::new();
+        let mut session = fake::session(&pedal);
+        let before = session.channel_stats();
+        let sent = pedal.lock().unwrap().requests.len();
+
+        let result = session.rename_snapshot(0, "");
+
+        assert!(
+            matches!(result, Err(Error::Protocol(ref why)) if why.contains("empty")),
+            "{result:?}"
+        );
+        assert_eq!(session.channel_stats(), before, "nothing was sent");
+        assert_eq!(pedal.lock().unwrap().requests.len(), sent);
     }
 
     /// The device keeps the active snapshot's tempo in step with the
