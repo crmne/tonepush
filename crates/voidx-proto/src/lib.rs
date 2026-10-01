@@ -10,6 +10,7 @@ pub mod command;
 pub mod frame;
 pub mod node;
 pub mod preset;
+pub mod update;
 
 pub use command::{Command, CommandError, NodePath};
 pub use frame::{DecodeError, Decoder, Frame, Record};

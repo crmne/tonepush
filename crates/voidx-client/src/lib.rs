@@ -6,6 +6,7 @@
 
 pub mod backup;
 mod device;
+pub mod firmware;
 pub mod ir;
 pub mod nam;
 mod session;

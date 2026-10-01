@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Subcommand, ValueEnum};
 use voidx_client::backup::VerifiedBundle;
 use voidx_client::backup::{self, Step};
-use voidx_client::{Device, SerialLink, UploadStep};
+use voidx_client::{firmware, Device, SerialLink, UploadStep};
 use voidx_proto::{NodeDescription, NodeKind, NodePath, Preset};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -160,6 +160,22 @@ pub(crate) enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Check a firmware .zip or .upd from Sonulab without touching the pedal.
+    FirmwareInspect { file: PathBuf },
+    /// Install firmware on a PRO started in update mode (hold UPD while it
+    /// starts). The pedal is never restarted for you.
+    FirmwareUpdate {
+        file: PathBuf,
+        /// A verified backup of the pedal taken in the last 24 hours, before
+        /// it was started in update mode.
+        #[arg(long)]
+        backup: PathBuf,
+        /// The version you mean to install, which the file must contain.
+        #[arg(long)]
+        expect_version: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 pub(crate) fn run(command: Command) -> Result<()> {
@@ -177,6 +193,22 @@ pub(crate) fn run(command: Command) -> Result<()> {
             "verified {}: {occupied} occupied slots, firmware {}",
             directory.display(),
             bundle.manifest().identity.version
+        );
+        return Ok(());
+    }
+    if let Command::FirmwareInspect { file } = &command {
+        let image =
+            firmware::Image::load(file).with_context(|| format!("checking {}", file.display()))?;
+        println!("StompStation PRO firmware {}", image.version);
+        println!("size: {} bytes", image.len());
+        println!("sha256: {}", image.sha256);
+        println!(
+            "{}",
+            if image.official {
+                "an official Sonulab release"
+            } else {
+                "not a release TonePush knows; its version comes from its file name"
+            }
         );
         return Ok(());
     }
@@ -480,7 +512,55 @@ pub(crate) fn run(command: Command) -> Result<()> {
                 rollback.display()
             );
         }
-        Command::VerifyBackup { .. } => unreachable!("handled without opening hardware"),
+        Command::FirmwareUpdate {
+            file,
+            backup: bundle,
+            expect_version,
+            yes: _,
+        } => {
+            let image = firmware::Image::load(&file)
+                .with_context(|| format!("checking {}", file.display()))?;
+            if image.version != expect_version {
+                bail!(
+                    "{} is firmware {}, not {expect_version}",
+                    file.display(),
+                    image.version
+                );
+            }
+            require_recent_backup(&bundle)?;
+            if !firmware::is_update_mode(device.identity()) {
+                bail!(
+                    "the pedal is running firmware {}; turn it off, then hold UPD while it starts so it shows Update Mode",
+                    device.identity().version
+                );
+            }
+            println!(
+                "sending firmware {} ({} bytes) to {}",
+                image.version,
+                image.len(),
+                device.transport()
+            );
+            let mut last = 0;
+            firmware::flash(device, &image, |step| match step {
+                firmware::Step::Started { batch } => {
+                    println!("update started, {batch} bytes at a time")
+                }
+                firmware::Step::Sent { bytes, total } => {
+                    let percent = bytes * 100 / total;
+                    if percent >= last + 5 || bytes == total {
+                        last = percent;
+                        println!("{percent:>3}% ({bytes} of {total} bytes)");
+                    }
+                }
+            })?;
+            println!(
+                "The pedal has all of firmware {}. Leave it switched on for 5 minutes while it finishes writing, then turn it off, wait 10 seconds, and turn it on without holding UPD.",
+                image.version
+            );
+        }
+        Command::VerifyBackup { .. } | Command::FirmwareInspect { .. } => {
+            unreachable!("handled without opening hardware")
+        }
     }
     Ok(())
 }
@@ -493,7 +573,8 @@ fn needs_confirmation(command: &Command) -> bool {
         | Command::Rename { yes, .. }
         | Command::Move { yes, .. }
         | Command::Clear { yes, .. }
-        | Command::Restore { yes, .. } => !yes,
+        | Command::Restore { yes, .. }
+        | Command::FirmwareUpdate { yes, .. } => !yes,
         Command::Set {
             path,
             rollback,
@@ -502,6 +583,34 @@ fn needs_confirmation(command: &Command) -> bool {
         } => !path.starts_with("root\\app\\") && (!yes || rollback.is_none()),
         _ => false,
     }
+}
+
+/// Update mode cannot read the libraries, so the backup is checked on its
+/// own: complete, verified, of a StompStation PRO, and taken today.
+fn require_recent_backup(path: &Path) -> Result<()> {
+    let bundle = backup::open_verified(path)
+        .with_context(|| format!("verifying backup {}", path.display()))?;
+    let manifest = bundle.manifest();
+    if manifest.identity.name != "StompStation PRO" {
+        bail!(
+            "{} is a backup of a {}",
+            path.display(),
+            manifest.identity.name
+        );
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    if now.saturating_sub(manifest.captured_unix_seconds) > 24 * 60 * 60 {
+        bail!(
+            "{} is more than a day old; back up the pedal again before updating it",
+            path.display()
+        );
+    }
+    println!(
+        "backup {} verified: firmware {}",
+        path.display(),
+        manifest.identity.version
+    );
+    Ok(())
 }
 
 fn authorize(device: &mut Device<SerialLink>, rollback: &Path) -> Result<VerifiedBundle> {

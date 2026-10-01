@@ -158,3 +158,36 @@ tonepush pro restore old-rig.vxbundle \
 
 Run `tonepush pro --help` or `tonepush pro <command> --help` for the complete
 argument list.
+
+## Firmware updates
+
+TonePush installs Sonulab's firmware the way VoidX Control does, from the
+`.zip` on the [StompStation PRO page](https://sonulab.com/stompstationpro/)
+or the `.upd` inside it. The pedal checks nothing it receives, so TonePush
+checks the file first: it must be a 64-bit ARM program and either an official
+release TonePush lists by its SHA-256, or a release whose file name
+(`s_pro_2_2_6.upd`) and contents agree on its version.
+
+```sh
+tonepush pro firmware-inspect s_pro_2_2_6.zip
+tonepush pro backup before-2.2.6.vxbundle
+# Turn the pedal off, wait ten seconds, and hold UPD while it starts.
+tonepush pro info        # firmware: Update Mode
+tonepush pro firmware-update s_pro_2_2_6.zip \
+  --backup before-2.2.6.vxbundle --expect-version 2.2.6 --yes
+```
+
+In update mode the pedal cannot show its libraries, so the update asks for a
+complete, verified backup taken in the last 24 hours. Every batch must be
+confirmed by the pedal with the exact number of bytes sent; the pedal writes
+the new program only when the last byte arrives, so an update that stops
+early changes nothing. TonePush never restarts the pedal. When it reports
+that the pedal has the whole file, leave it on for five minutes, turn it off,
+wait ten seconds, and turn it on without holding UPD.
+
+Holding UPD always starts the pedal's built-in updater, even when the
+installed program does not start, so an update can be repeated, or 1.5.12
+installed again. Firmware 2.x keeps presets in larger slots: back up again
+after updating, and restore a 1.5.12 backup only to a pedal on 1.5.12.
+TonePush opens a pedal on firmware it has not been verified against read
+only.
