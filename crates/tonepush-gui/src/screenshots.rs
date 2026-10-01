@@ -60,10 +60,16 @@ enum Scene {
     HxPedalEq,
     /// The HX Stomp's page, on its settings.
     HxPedalSettings,
+    /// The model browser on the drive's block, another drive being tried.
+    HxBrowser,
+    /// The Footswitches lens, on the switch that carries two things.
+    HxFootswitches,
+    /// The Snapshots lens.
+    HxSnapshots,
 }
 
 impl Scene {
-    const ALL: [Scene; 11] = [
+    const ALL: [Scene; 14] = [
         Scene::HxEdit,
         Scene::ProEdit,
         Scene::NoDevice,
@@ -75,6 +81,9 @@ impl Scene {
         Scene::HxPedalIrs,
         Scene::HxPedalEq,
         Scene::HxPedalSettings,
+        Scene::HxBrowser,
+        Scene::HxFootswitches,
+        Scene::HxSnapshots,
     ];
 
     fn name(self) -> &'static str {
@@ -90,6 +99,9 @@ impl Scene {
             Scene::HxPedalIrs => "hx-pedal-irs",
             Scene::HxPedalEq => "hx-pedal-eq",
             Scene::HxPedalSettings => "hx-pedal-settings",
+            Scene::HxBrowser => "hx-browser",
+            Scene::HxFootswitches => "hx-footswitches",
+            Scene::HxSnapshots => "hx-snapshots",
         }
     }
 
@@ -140,6 +152,19 @@ impl Scene {
                 app.page = shell::Page::Pedal;
                 app.pro.demo_page();
             }
+            Scene::HxBrowser => {
+                hx_stomp(app);
+                trying(app);
+            }
+            Scene::HxFootswitches => {
+                hx_stomp(app);
+                app.lens = crate::pane::Lens::Footswitches;
+                app.focused_source = Some(hx_proto::rpc::Source::Footswitch(2));
+            }
+            Scene::HxSnapshots => {
+                hx_stomp(app);
+                app.lens = crate::pane::Lens::Snapshots;
+            }
             Scene::NoDevice => {
                 app.connection = Connection::Offline;
                 app.status =
@@ -147,6 +172,52 @@ impl Scene {
                         .to_owned();
             }
         }
+    }
+}
+
+/// The model browser open on Minotaur's block, with Teemah! playing in its
+/// place, and a few models already in Recent.
+fn trying(app: &mut App) {
+    app.selected = 2;
+    app.open_browser_swap();
+    let Some(catalog) = app.catalog.as_ref() else {
+        return;
+    };
+    let named = |name: &str| {
+        catalog
+            .models()
+            .find(|model| model.name == name)
+            .map(|model| model.id.clone())
+    };
+    app.config.recent_models = [
+        "Teemah!",
+        "Plateaux",
+        "Transistor Tape",
+        "US Double Nrm",
+        "Heir Apparent",
+        "Minotaur",
+    ]
+    .iter()
+    .filter_map(|name| named(name))
+    .collect();
+    let Some(id) = named("Teemah!") else {
+        return;
+    };
+    let Some(model) = catalog.model(&id) else {
+        return;
+    };
+    let number = crate::number_of(catalog, &id);
+    let values: Vec<f32> = catalog
+        .ordered_params(model)
+        .iter()
+        .map(|param| param.default)
+        .collect();
+    if let (Some(number), Some(block)) = (number, app.chain.iter_mut().find(|b| b.position == 2)) {
+        block.model = number;
+        block.values = values;
+    }
+    if let Some(browser) = app.browser.as_mut() {
+        browser.playing = Some((id, "Teemah!".to_owned()));
     }
 }
 
@@ -756,6 +827,37 @@ fn hx_stomp(app: &mut App) {
         }],
     };
     app.selected = 3;
+    // The input on Multi and the output on Main L/R, as the design shows.
+    for (position, symbol, wanted) in [
+        (0, "HelixStomp_AppDSPFlowInput", "Multi"),
+        (9, "HelixStomp_AppDSPFlowOutputMain", "Main"),
+    ] {
+        let routing = catalog
+            .model(symbol)
+            .and_then(|model| {
+                model
+                    .params
+                    .iter()
+                    .find(|p| p.id == "@input" || p.id == "@output")
+            })
+            .and_then(|param| catalog.choices(param))
+            .and_then(|choices| {
+                choices
+                    .iter()
+                    .position(|choice| choice.starts_with(wanted))
+                    .or_else(|| {
+                        choices
+                            .iter()
+                            .position(|choice| choice.starts_with("Multi"))
+                    })
+            });
+        if let (Some(routing), Some(block)) = (
+            routing,
+            app.chain.iter_mut().find(|b| b.position == position),
+        ) {
+            block.routing = Some(routing as i64);
+        }
+    }
     let param = |model: u32, name: &str| -> i64 {
         catalog
             .model_number(model)
@@ -789,15 +891,15 @@ fn hx_stomp(app: &mut App) {
             source: Source::Snapshots,
             target: Target::Param(param(amp, "Drive")),
             min: 0.0,
-            max: 10.0,
+            max: 1.0,
             cc: None,
         },
         Assignment {
             block: 3,
             source: Source::Footswitch(2),
             target: Target::Param(param(amp, "Ch Vol")),
-            min: 7.5,
-            max: 8.6,
+            min: 0.75,
+            max: 0.86,
             cc: None,
         },
         Assignment {
@@ -852,7 +954,7 @@ fn hx_stomp(app: &mut App) {
             colour: led("Green"),
             carries: vec![
                 carried(5, "Transistor Tape", 0x00cc00, false),
-                carried(3, "US Double Nrm", 0xdd1111, true),
+                carried(3, "US Double Nrm", 0xdd1111, false),
             ],
         },
         hx_usb::Switch {
@@ -863,4 +965,27 @@ fn hx_stomp(app: &mut App) {
             carries: vec![carried(6, "Plateaux", 0xff5c00, true)],
         },
     ];
+    // Which blocks each snapshot turns on, by slot: the drive comes in for
+    // Chorus and the delay for Solo.
+    let slots = [1, 2, 3, 4, 11, 5, 6];
+    app.snapshot_details = [
+        ("Verse", [false, false, true, true, true, false, true]),
+        ("Chorus", [false, true, true, true, true, false, true]),
+        ("Solo", [false, true, true, true, true, true, true]),
+    ]
+    .into_iter()
+    .map(|(name, states)| {
+        let mut enabled = vec![None; 20];
+        for (slot, on) in slots.iter().zip(states) {
+            enabled[*slot] = Some(on);
+        }
+        hx_proto::preset::Snapshot {
+            name: name.to_owned(),
+            tempo: None,
+            valid: true,
+            named: true,
+            enabled,
+        }
+    })
+    .collect();
 }

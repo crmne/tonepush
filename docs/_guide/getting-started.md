@@ -64,7 +64,8 @@ and Save. The switch at the top of the sidebar turns the rest of the window
 into one of three pages:
 
 - **Edit**, the loaded preset: the signal chain across the top, the selected
-  block's knobs in the middle and the model browser on the right.
+  block's knobs under it, and the pedal's footswitches and expression pedals
+  along the bottom.
 - **Library**, your tones, setlists and the TonePush Cloud.
 - **Pedal**, the pedal itself: its backups, impulse responses, favourite
   blocks, global EQ, settings and an activity log.
@@ -79,7 +80,10 @@ ranges, choices, NAM models, and IR names through its own schema. See the
 A few things worth knowing on day one:
 
 - **Edits are live but not saved.** The device edits a scratch copy: a changed parameter is audible immediately but vanishes on reload unless you press Save. When there is something to save, the line under the preset's name says **Changes not saved**, the preset's row has an orange dot, and Save turns amber.
-- **Add a block** by clicking any gap in the wire, then picking a pedal. Type to search; the picker opens ready for it.
+- **Add a block** by clicking any gap in the wire. The model browser opens in place of the knobs, ready for you to type; one click puts the model in the gap.
+- **Try other models** with **Change model**, or by clicking the block's name. Each model you click plays on the pedal at once, its knobs at their defaults. **Keep** (Enter) keeps the one playing, as one step undo can take back; **Put back** (Esc) returns the block exactly as it was. The browser remembers what you chose under **Recent**.
+- **Give a knob a control** by right-clicking it, or clicking its name: a footswitch, an expression pedal, MIDI or the snapshots. Click a reading to type a value; double-click a knob for its default.
+- **Footswitches and Snapshots** sit beside **Block** at the right of the block's head, and a click on a switch along the bottom opens it. The first shows every switch and pedal with what it carries, and lets you name a switch, choose its light, make it hold or toggle, and set where each control it carries starts and ends. The second shows which blocks each snapshot turns on and the tempo each keeps. On a large window all of it is on screen at once.
 - **Make a parallel branch** by dragging a block onto the dashed branch below the line, or by clicking the + on it.
 - **Move the fork and merge** by dragging their dots along the line.
 - **Undo, redo, save** are Ctrl+Z, Ctrl+Shift+Z, and Ctrl+S (Cmd on macOS).

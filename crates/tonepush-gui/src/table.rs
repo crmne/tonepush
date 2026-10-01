@@ -60,39 +60,6 @@ pub enum Cell {
     /// first pedal backup has finished), so actionability cannot be inferred
     /// from the sync state alone.
     Places(Vec<(theme::Icon, theme::Sync, &'static str, bool)>),
-    /// The same small chip the chain paints on a block: FS1, EXP2, MIDI. The
-    /// long name is on hover, because the short one is the one you learn.
-    Tag {
-        text: String,
-        colour: egui::Color32,
-        hover: String,
-    },
-    /// A number, drawn as the pedal draws one. Same widget, same gestures:
-    /// drag to turn, click the reading to type it. A row of these needs a
-    /// taller row than a row of words, which is what `Grid::row_height` is for.
-    Knob {
-        value: f32,
-        range: std::ops::RangeInclusive<f32>,
-        /// The reading, formatted the way that parameter is formatted
-        /// everywhere else.
-        text: String,
-        /// What this end is, in the row's own words. A column header can only
-        /// say one thing for every row under it, and what these two ends are
-        /// called depends on what moves them.
-        hover: String,
-    },
-    /// A whole number that is an address rather than a quantity: a MIDI CC.
-    ///
-    /// Drag it or click to type it, like a knob, but written to the device
-    /// once at the end rather than streamed as it moves. A knob's value is a
-    /// sound you are listening to while you turn it; every number a CC passes
-    /// through on the way to 42 is meaningless, and each one costs a document
-    /// read.
-    Number {
-        value: i64,
-        range: std::ops::RangeInclusive<i64>,
-        hover: &'static str,
-    },
 }
 
 impl Cell {
@@ -100,14 +67,8 @@ impl Cell {
     /// header gathers everything that needs doing.
     fn key(&self) -> SortKey {
         match self {
-            Cell::Text(t) | Cell::Dim(t) | Cell::Tag { text: t, .. } => {
-                SortKey::Text(t.to_lowercase())
-            }
+            Cell::Text(t) | Cell::Dim(t) => SortKey::Text(t.to_lowercase()),
             Cell::Value { key, .. } => SortKey::Text(key.clone()),
-            // As numbers, so 9 sorts before 10 and -5 before -3, which no
-            // padded string manages for both.
-            Cell::Knob { value, .. } => SortKey::Real(*value),
-            Cell::Number { value, .. } => SortKey::Whole(*value),
             // Sorted so everything with something to do gathers at the top.
             Cell::Places(places) => SortKey::Text(
                 places
@@ -125,42 +86,10 @@ impl Cell {
     }
 }
 
-/// What a cell sorts on. A column holds one kind of cell, so the order between
-/// kinds only has to be consistent, not meaningful.
-#[derive(Debug, Clone, PartialEq)]
+/// What a cell sorts on: its words, or its state written as a rank.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum SortKey {
-    Whole(i64),
-    Real(f32),
     Text(String),
-}
-
-impl Eq for SortKey {}
-
-impl PartialOrd for SortKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for SortKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match (self, other) {
-            (SortKey::Whole(a), SortKey::Whole(b)) => a.cmp(b),
-            (SortKey::Real(a), SortKey::Real(b)) => a.total_cmp(b),
-            (SortKey::Text(a), SortKey::Text(b)) => a.cmp(b),
-            _ => self.rank().cmp(&other.rank()),
-        }
-    }
-}
-
-impl SortKey {
-    fn rank(&self) -> u8 {
-        match self {
-            SortKey::Whole(_) => 0,
-            SortKey::Real(_) => 1,
-            SortKey::Text(_) => 2,
-        }
-    }
 }
 
 /// A column: what it is called, how wide, and whether its cells can be typed
@@ -297,13 +226,6 @@ pub struct Did {
     /// A right-click, and which item of the menu it ended on.
     pub context: Option<usize>,
     pub chose: Option<(usize, usize)>,
-    /// A knob cell was turned: which cell, and what it now reads.
-    pub turned: Option<(usize, usize, f32)>,
-    /// A number cell was changed: which cell, what it now reads, and whether
-    /// the person has finished with it - let go of the drag, or left the field.
-    /// Every step is reported so the cell can be redrawn where it has been
-    /// dragged to; only a finished one is worth sending anywhere.
-    pub numbered: Option<(usize, usize, i64, bool)>,
     /// Furthest row the virtual table actually painted this frame. Callers
     /// with paged backing data use this to prefetch shortly before the reader
     /// reaches the rows they have not loaded yet.
@@ -651,88 +573,6 @@ impl egui_table::TableDelegate for Delegate<'_> {
                 })
                 .response
             }
-            Cell::Knob {
-                value,
-                range,
-                text,
-                hover,
-            } => {
-                // The pedal's own knob, with the pedal's own gestures: drag to
-                // turn, click the reading to type it. A number that behaves one
-                // way under the knobs and another way in a table is two things
-                // to learn for one job.
-                let (mut turned, range) = (*value, range.clone());
-                let (text, hover) = (text.clone(), hover.clone());
-                let mut moved = None;
-                // Exactly as tall as the knob and its reading, so the row's own
-                // centre alignment places it: a cell drawn from the top of a
-                // row tall enough for a knob floats above the words in the
-                // columns either side of it.
-                let tall = theme::KNOB
-                    + ui.spacing().item_spacing.y
-                    + ui.text_style_height(&egui::TextStyle::Monospace);
-                // The reading is the cell's click target, exactly as it is
-                // under the knobs: the knob takes the drag, the number under it
-                // takes the click that starts typing.
-                let reading = ui
-                    .allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), tall),
-                        egui::Layout::top_down(egui::Align::Center),
-                        |ui| {
-                            let knob = theme::knob(ui, &mut turned, range)
-                                .on_hover_text("drag to turn; Shift-drag for fine adjustment");
-                            if knob.changed() {
-                                moved = Some(turned);
-                            }
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(text).monospace().color(theme::accent()),
-                                )
-                                .selectable(false)
-                                .sense(egui::Sense::click()),
-                            )
-                        },
-                    )
-                    .inner;
-                if let Some(turned) = moved {
-                    self.did.turned = Some((row, col, turned));
-                }
-                reading.on_hover_text(format!(
-                    "{hover}\ndrag the knob; Shift-drag for fine adjustment\nclick to type it"
-                ))
-            }
-            Cell::Tag {
-                text,
-                colour,
-                hover,
-            } => {
-                let (text, colour, hover) = (text.clone(), *colour, hover.clone());
-                theme::tag(ui, &text, colour).on_hover_text(hover)
-            }
-            Cell::Number {
-                value,
-                range,
-                hover,
-            } => {
-                let (mut number, range, hover) = (*value, range.clone(), *hover);
-                // The field is the cell. A click here is for the number, never
-                // for the row.
-                claimed = true;
-                let field = ui.add(
-                    egui::DragValue::new(&mut number)
-                        .speed(0.15)
-                        .range(range)
-                        .clamp_existing_to_range(true),
-                );
-                // Every step while it is being dragged, so the cell follows the
-                // pointer, and the end of the drag as the one worth sending.
-                if field.changed() {
-                    self.did.numbered = Some((row, col, number, !field.dragged()));
-                } else if field.drag_stopped() {
-                    self.did.numbered = Some((row, col, number, true));
-                }
-                field.on_hover_text(hover)
-            }
             Cell::Text(text) | Cell::Dim(text) => {
                 let rich = if matches!(content, Cell::Dim(_)) {
                     RichText::new(text).color(theme::muted())
@@ -869,41 +709,5 @@ mod tests {
         assert_eq!(grid.selected, Some(1));
         assert_eq!(grid.editing, Some((2, 0)));
         assert_eq!(grid.chosen, vec![false, false, true]);
-    }
-
-    fn knob(value: f32) -> Vec<Cell> {
-        vec![Cell::Knob {
-            value,
-            range: -120.0..=20.0,
-            text: String::new(),
-            hover: String::new(),
-        }]
-    }
-
-    #[test]
-    fn knob_columns_sort_negative_values_numerically() {
-        let mut grid = Grid {
-            rows: [-3.0, 10.0, -50.5, 0.0, 9.0, -5.0].map(knob).into(),
-            sort: (0, true),
-            ..Default::default()
-        };
-        assert_eq!(grid.sort_rows(), vec![2, 5, 0, 3, 4, 1]);
-    }
-
-    #[test]
-    fn number_columns_sort_negative_values_numerically() {
-        let number = |value| {
-            vec![Cell::Number {
-                value,
-                range: -100..=100,
-                hover: "",
-            }]
-        };
-        let mut grid = Grid {
-            rows: [-3, 10, -50, 9].map(number).into(),
-            sort: (0, true),
-            ..Default::default()
-        };
-        assert_eq!(grid.sort_rows(), vec![2, 0, 3, 1]);
     }
 }

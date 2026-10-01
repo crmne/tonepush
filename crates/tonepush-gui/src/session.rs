@@ -188,6 +188,19 @@ pub enum Cmd {
     /// Leave the audition in the edit buffer as an ordinary unsaved edit.
     /// Save remains the person's explicit choice.
     KeepAudition,
+    /// Play a model in a block's place, from the model browser. The first try
+    /// puts the preset as it stands aside, with its undo state, so the tries
+    /// can be put back exactly or kept as one step.
+    TryModel {
+        block: i64,
+        model: u32,
+        /// The cab that rides along, for an Amp+Cab. `None` for everything else.
+        paired: Option<u32>,
+    },
+    /// Put the preset back as it was before the first try.
+    PutBack,
+    /// Keep what is being tried as an ordinary edit, one undo step.
+    KeepTry,
     SelectBlock(i64),
     SetParam {
         block: i64,
@@ -304,6 +317,9 @@ pub enum Evt {
         /// the pedal's footswitches or by loading a preset, this is the one
         /// the bar should light.
         snapshot: Option<usize>,
+        /// Every snapshot in full: which blocks each turns on and its tempo,
+        /// for the snapshot matrix.
+        snapshot_details: Vec<hx_proto::preset::Snapshot>,
         chain: Vec<Block>,
         layout: hx_proto::preset::Layout,
         /// Everything a controller drives in this preset, every block at once.
@@ -524,6 +540,9 @@ struct Worker {
     /// rather than copied: while a cloud Tone is sounding it is not an edit
     /// somebody can accidentally fold into their existing undo stack.
     audition: Option<Audition>,
+    /// The preset as it was before the first model tried in the browser, with
+    /// its undo state: what Put back restores and Keep makes one step of.
+    trial: Option<Audition>,
     /// Where the automatic backup lives. Held rather than looked up, so a
     /// worker driven by tests cannot write a pretend pedal into the real one.
     automatic: Option<std::path::PathBuf>,
@@ -575,6 +594,7 @@ impl Worker {
             },
             recheck: false,
             audition: None,
+            trial: None,
         }
     }
 
@@ -633,6 +653,18 @@ impl Worker {
     }
 
     fn handle(&mut self, cmd: Cmd) {
+        // Anything else done while models are being tried keeps the one
+        // playing, as the shelf always did: what you hear is the edit. Only
+        // Put back undoes the tries. ReadSwitches follows every presented
+        // document and is not something done.
+        if self.trial.is_some()
+            && !matches!(
+                &cmd,
+                Cmd::TryModel { .. } | Cmd::PutBack | Cmd::KeepTry | Cmd::ReadSwitches
+            )
+        {
+            self.keep_try();
+        }
         // Any ordinary device action means the person has moved on from the
         // cloud browser. Restore first, then perform the requested action on
         // the real preset. ReadSwitches is the one automatic follow-up to a
@@ -694,6 +726,13 @@ impl Worker {
             Cmd::AuditionSteps { key, name, blocks } => self.audition_steps(key, &name, &blocks),
             Cmd::EndAudition => self.end_audition(),
             Cmd::KeepAudition => self.keep_audition(),
+            Cmd::TryModel {
+                block,
+                model,
+                paired,
+            } => self.try_model(block, model, paired),
+            Cmd::PutBack => self.put_back(),
+            Cmd::KeepTry => self.keep_try(),
             Cmd::SelectBlock(block) => {
                 self.run_on_device(|d| d.select_block(block));
             }
@@ -1197,6 +1236,7 @@ impl Worker {
         // audition was kept belongs to whatever was connected before.
         self.forget_history();
         self.forget_audition();
+        self.trial = None;
         self.dirty = false;
         self.send(Evt::Connected {
             device: profile.name.to_owned(),
@@ -1234,6 +1274,7 @@ impl Worker {
     fn let_go(&mut self) {
         self.device = None;
         self.forget_audition();
+        self.trial = None;
         // A block from this pedal may not fit the next one.
         self.copied_block = None;
         self.send(Evt::Disconnected);
@@ -1647,6 +1688,76 @@ impl Worker {
         ));
     }
 
+    /// Play a model in a block's place. The first try puts the preset as it
+    /// stands aside with its undo state, so Put back can restore it byte for
+    /// byte and Keep can make all the tries one step.
+    fn try_model(&mut self, block: i64, model: u32, paired: Option<u32>) {
+        if self.trial.is_none() {
+            let Some(original) = self.preset_bytes() else {
+                return;
+            };
+            self.trial = Some(Audition {
+                key: -1,
+                original,
+                dirty: self.dirty,
+                history: std::mem::take(&mut self.history),
+                future: std::mem::take(&mut self.future),
+                snapshot_taken: self.snapshot_taken,
+            });
+            self.report_history();
+        }
+        if self.run_on_device(|d| place(d, block, model, paired)) {
+            self.dirty = true;
+            self.reload();
+        }
+    }
+
+    /// Restore the preset from before the first try, and its undo state.
+    fn put_back(&mut self) {
+        let Some(trial) = self.trial.take() else {
+            return;
+        };
+        let Some(original) = hx_proto::Preset::parse(&trial.original) else {
+            // Nothing to restore from: what is playing stays, as a kept try.
+            self.trial = Some(trial);
+            self.keep_try();
+            return self.send(Evt::Failed(
+                "the preset from before the tries is unreadable".into(),
+            ));
+        };
+        if !self.run_on_device(|device| device.write_preset(&original)) {
+            // Kept to try again, unless the session went with it.
+            if self.device.is_some() {
+                self.trial = Some(trial);
+            }
+            return;
+        }
+        self.dirty = trial.dirty;
+        self.history = trial.history;
+        self.future = trial.future;
+        let snapshot_taken = trial.snapshot_taken;
+        self.report_history();
+        self.present(&original);
+        self.snapshot_taken = snapshot_taken;
+        self.send(Evt::Activity("put the block back".into()));
+    }
+
+    /// Keep what is being tried: the preset from before the first try is the
+    /// next undo step, so even this stays reversible.
+    fn keep_try(&mut self) {
+        let Some(trial) = self.trial.take() else {
+            return;
+        };
+        self.history = trial.history;
+        self.future.clear();
+        self.history.push(trial.original);
+        if self.history.len() > 32 {
+            self.history.remove(0);
+        }
+        self.snapshot_taken = false;
+        self.report_history();
+    }
+
     /// Clear every block, then set each of the tone's blocks into the run of
     /// slots after the endpoints, with its parameters and bypass state.
     fn apply_steps(&mut self, blocks: &[ApplyBlock]) -> Result<(), String> {
@@ -1945,6 +2056,7 @@ impl Worker {
     fn adopt(&mut self, (setlist, index, name): (i64, i64, String)) {
         if (setlist, index) != (self.shown.setlist, self.shown.index) {
             self.forget_audition();
+            self.trial = None;
             self.forget_history();
             self.dirty = false;
         }
@@ -2004,6 +2116,7 @@ impl Worker {
             tempo: preset.tempo(),
             snapshots: preset.snapshots(),
             snapshot: self.shown.snapshot,
+            snapshot_details: preset.snapshot_details(),
             chain,
             layout: preset.layout(),
             assignments: preset.assignments(),
@@ -2854,6 +2967,100 @@ mod tests {
         worker.opened(session(&next));
         worker.handle(Cmd::SelectBlock(1));
         assert!(!next.lock().unwrap().opcodes().contains(&op::WRITE_PRESET));
+    }
+
+    /// Trying models in the browser puts the preset as it was aside. Put
+    /// back writes it back, with the undo state it had: the tries are not
+    /// steps of their own.
+    #[test]
+    fn tried_models_are_put_back_as_they_were() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::SetTempo(96.0));
+        assert_eq!(worker.history.len(), 1);
+
+        worker.handle(Cmd::TryModel {
+            block: 1,
+            model: 7,
+            paired: None,
+        });
+        // The pretend pedal takes a model without changing its buffer; this
+        // stands in for what a real one does.
+        pedal.lock().unwrap().buffer = document(150.0);
+        worker.handle(Cmd::TryModel {
+            block: 1,
+            model: 8,
+            paired: None,
+        });
+        assert!(worker.history.is_empty(), "the tries are not undo steps");
+        assert!(worker.dirty);
+        let _ = events.try_iter().count();
+
+        worker.handle(Cmd::PutBack);
+        let buffer = hx_proto::Preset::parse(&pedal.lock().unwrap().buffer).unwrap();
+        assert_eq!(buffer.tempo(), Some(96.0), "the preset is back as it was");
+        assert_eq!(worker.history.len(), 1, "and so is its undo stack");
+        assert!(worker.trial.is_none());
+        assert!(events.try_iter().any(|e| matches!(e, Evt::Loaded { .. })));
+    }
+
+    /// Keeping what is being tried makes every try one undo step.
+    #[test]
+    fn kept_tries_are_one_undo_step() {
+        let pedal = Pedal::new();
+        let (mut worker, _events) = worker(&pedal);
+        for model in [7, 8, 9] {
+            worker.handle(Cmd::TryModel {
+                block: 1,
+                model,
+                paired: None,
+            });
+        }
+        worker.handle(Cmd::KeepTry);
+        assert!(worker.trial.is_none());
+        assert_eq!(worker.history.len(), 1);
+        assert!(worker.dirty, "a kept try is an edit to save");
+    }
+
+    /// Doing anything else while a model is being tried keeps it, as the
+    /// shelf always did; a Put back that arrives after has nothing to undo.
+    #[test]
+    fn doing_something_else_keeps_the_model_being_tried() {
+        let pedal = Pedal::new();
+        let (mut worker, _events) = worker(&pedal);
+        worker.handle(Cmd::TryModel {
+            block: 1,
+            model: 7,
+            paired: None,
+        });
+        pedal.lock().unwrap().buffer = document(150.0);
+        worker.handle(Cmd::SetTempo(96.0));
+        assert!(worker.trial.is_none());
+        assert_eq!(
+            worker.history.len(),
+            2,
+            "one step for the try, one for the tempo"
+        );
+        worker.handle(Cmd::PutBack);
+        let buffer = hx_proto::Preset::parse(&pedal.lock().unwrap().buffer).unwrap();
+        assert_eq!(buffer.tempo(), Some(96.0), "nothing is put back once kept");
+    }
+
+    /// A try belongs to the session it began in.
+    #[test]
+    fn a_try_ends_with_the_session_that_held_it() {
+        let pedal = Pedal::new();
+        let (mut worker, _events) = worker(&pedal);
+        worker.handle(Cmd::TryModel {
+            block: 1,
+            model: 7,
+            paired: None,
+        });
+        assert!(worker.trial.is_some());
+        pedal.lock().unwrap().unplugged = true;
+        worker.poll();
+        assert!(worker.device.is_none());
+        assert!(worker.trial.is_none());
     }
 
     /// The shapes are the ones the captures hold, argument for argument.

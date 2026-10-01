@@ -796,7 +796,7 @@ pub(crate) fn spin(ui: &Ui, centre: Pos2, radius: f32) {
         centre,
         radius,
         start,
-        start + std::f32::consts::PI * 1.2,
+        std::f32::consts::PI * 1.2,
         Stroke::new(1.6, theme::accent()),
     );
 }
@@ -1455,9 +1455,8 @@ impl App {
         if page == self.page {
             return;
         }
-        if self.inserting_at.is_some() {
-            self.close_picker();
-        }
+        // Leaving the Edit page keeps whatever the model browser was playing.
+        self.close_browser(true);
         self.page = page;
         if page == Page::Pedal {
             self.read_pedal_page();
@@ -2051,7 +2050,9 @@ impl App {
         if self.dirty {
             parts.push(State::Unsaved("Changes not saved".to_owned()));
         }
-        if parts.len() < 2 || tier != Tier::S {
+        // A small window says one thing: the library's word only when there
+        // is nothing more pressing.
+        if parts.is_empty() || tier != Tier::S {
             if let Some(note) = self.library_note() {
                 parts.push(note);
             }

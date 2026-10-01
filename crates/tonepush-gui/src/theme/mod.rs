@@ -703,6 +703,30 @@ impl Category {
     pub fn colour(self) -> Color32 {
         palette().categories[self as usize]
     }
+
+    /// The short name a tile's caption uses.
+    #[must_use]
+    pub fn short(self) -> &'static str {
+        match self {
+            Category::Distortion => "Dist",
+            Category::Dynamics => "Dyn",
+            Category::Eq => "EQ",
+            Category::Modulation => "Mod",
+            Category::Delay => "Delay",
+            Category::Reverb => "Reverb",
+            Category::PitchSynth => "Pitch",
+            Category::Filter => "Filter",
+            Category::Wah => "Wah",
+            Category::Amp => "Amp",
+            Category::Preamp => "Preamp",
+            Category::Cab => "Cab",
+            Category::Ir => "IR",
+            Category::VolumePan => "Volume",
+            Category::SendReturn => "Send",
+            Category::Looper => "Looper",
+            Category::Io => "I/O",
+        }
+    }
 }
 
 /// A category's colour by name, in the palette in use.
@@ -849,6 +873,7 @@ icons! {
     Keyboard => "keyboard",
     Replace => "replace",
     SquareDashed => "square-dashed",
+    Volume => "volume-2",
 }
 
 impl Icon {

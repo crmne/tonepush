@@ -8,13 +8,17 @@ use std::time::Duration;
 use egui::RichText;
 use hx_catalog::{Catalog, Kind};
 
+mod board;
+mod browser;
 pub mod cloud;
 mod config;
 mod eq;
+mod floor;
 /// Public so the desktop entry point can bring an older library across before
 /// the first window opens. Nothing else here needs to be.
 pub mod library;
 mod pages;
+mod pane;
 mod pro;
 mod processor;
 #[cfg(test)]
@@ -243,8 +247,6 @@ pub struct App {
     snapshots: Vec<String>,
     chain: Vec<session::Block>,
     layout: hx_proto::preset::Layout,
-    /// Filter for the model browser. Empty means "show the chosen category".
-    search: String,
     /// Whether a block has been copied, so Paste has something to put down.
     /// The block itself is held by the worker, whole, so it pastes as it was
     /// copied into this preset or another; remembering only the slot pasted
@@ -275,15 +277,6 @@ pub struct App {
     /// How many steps the worker can undo and redo, for enabling the buttons.
     undo_depth: usize,
     redo_depth: usize,
-    /// Where a click on a `+` in the chain wants to add a block, and where on
-    /// screen to put the picker.
-    inserting_at: Option<usize>,
-    insert_pos: Option<egui::Pos2>,
-    /// When the picker opened. The click that opens it is still in the input
-    /// egui reports, and egui may run several passes for one frame, so a frame
-    /// counter is not enough to tell "the opening click" from "a click
-    /// somewhere else" - a moment of grace is.
-    insert_opened: Option<std::time::Instant>,
     /// Set while the device is fetching a preset. Loading one takes about a
     /// second, and a window that does not change for a second looks broken.
     loading: bool,
@@ -326,20 +319,23 @@ pub struct App {
     /// so loses people's work quietly, so this drives a dot in the title.
     dirty: bool,
     selected: usize,
-    /// Category chosen in the browser, or none to follow the current block.
-    browsing: Option<u32>,
-    /// Subcategory chosen under it, by name. Cleared when the category
-    /// changes, because "Mono" means a different set in every category that
-    /// has one.
-    browsing_shelf: Option<String>,
-    /// Whether the model browser occupies its right-hand dock. Collapsing it
-    /// gives the selected pedal the full editor width without losing the
-    /// browser's familiar home or its current filters.
-    shelf_open: bool,
-    /// Forget the chain panel's manually dragged height on the next frame.
-    /// Set only when a different topology arrives, not for ordinary parameter
-    /// reloads, so each chain initially fits while subsequent resizing sticks.
-    fit_chain_on_next_frame: bool,
+    /// What the pane under the board shows: the block, the footswitches or
+    /// the snapshots.
+    lens: pane::Lens,
+    /// The model browser, while it is open in the pane.
+    browser: Option<browser::Browser>,
+    /// The category last looked at in the browser, where adding a block
+    /// opens it next.
+    browsed_category: Option<u32>,
+    /// The footswitch, pedal or MIDI the Footswitches lens is editing.
+    focused_source: Option<hx_proto::rpc::Source>,
+    /// Every snapshot of the loaded preset in full, for the snapshot matrix.
+    snapshot_details: Vec<hx_proto::preset::Snapshot>,
+    /// A slot to select once the preset next arrives: a block just added.
+    pending_select: Option<i64>,
+    /// Set when something is sent while a model is being tried: the worker
+    /// keeps the try, and the browser closes on its next frame.
+    trial_kept: std::cell::Cell<bool>,
     /// Scroll the preset list to the selection on the next frame - set when a
     /// different preset loads, so following along from the pedal's own
     /// front panel keeps the list in view without fighting manual scrolling.
@@ -456,14 +452,11 @@ pub struct App {
     param_draft: Option<(i64, i64, String)>,
     /// Snapshot being renamed, with its draft name.
     snapshot_draft: Option<(usize, String)>,
-    /// The row of Controlled by the pointer last landed on. A cell is only
-    /// typed into on a second click, the same rule the library table follows.
-    assign_selected: Option<hx_proto::preset::Target>,
-    /// The end of a controller's travel being typed: which assignment, whether
-    /// it is the high end, and the text so far.
-    assign_editing: Option<(hx_proto::preset::Target, bool, String)>,
     /// A footswitch's name being typed, and which switch it belongs to.
     switch_draft: Option<(u8, String)>,
+    /// An end of a control's travel being typed: which assignment, whether it
+    /// is the high end, and the text so far.
+    travel_draft: Option<(i64, hx_proto::preset::Target, bool, String)>,
     /// A sign-in waiting to be approved, somewhere else.
     signing_in: Option<Signing>,
     /// A tone being published, and the answer when the site gives one.
@@ -476,10 +469,6 @@ pub struct App {
     /// pointer. Emptied whenever a preset arrives, which is the document
     /// catching up.
     cc_drafts: std::collections::BTreeMap<(i64, hx_proto::preset::Target), i64>,
-    /// Which block is waiting for a control to be picked, after Assign control
-    /// was pressed. Right-clicking a control does the same thing; this is the
-    /// way you find without being told.
-    assigning: Option<i64>,
     /// Every footswitch and what it carries, as the pedal reports it. Read on
     /// load and after every assignment, so what is on screen is what is on the
     /// pedal rather than what was asked for.
@@ -1021,7 +1010,6 @@ impl App {
             snapshots: Vec::new(),
             chain: Vec::new(),
             layout: hx_proto::preset::Layout::default(),
-            search: String::new(),
             copied_block: false,
             clipboard: None,
             pending_copy: CopyTarget::Clipboard,
@@ -1034,9 +1022,6 @@ impl App {
             global_eq: false,
             undo_depth: 0,
             redo_depth: 0,
-            inserting_at: None,
-            insert_pos: None,
-            insert_opened: None,
             loading: false,
             busy_since: None,
             extracting: None,
@@ -1049,10 +1034,13 @@ impl App {
             block_rects: Vec::new(),
             ghost_target: None,
             selected: 0,
-            browsing: None,
-            browsing_shelf: None,
-            shelf_open: true,
-            fit_chain_on_next_frame: true,
+            lens: pane::Lens::default(),
+            browser: None,
+            browsed_category: None,
+            focused_source: None,
+            snapshot_details: Vec::new(),
+            pending_select: None,
+            trial_kept: std::cell::Cell::new(false),
             reveal_preset: false,
             irs: Vec::new(),
             setlists: Vec::new(),
@@ -1116,14 +1104,12 @@ impl App {
             tempo_draft: None,
             param_draft: None,
             snapshot_draft: None,
-            assign_selected: None,
-            assign_editing: None,
             switch_draft: None,
+            travel_draft: None,
             signing_in: None,
             publishing: None,
             cc_drafts: Default::default(),
             switches: Vec::new(),
-            assigning: None,
             assignments: Vec::new(),
             renaming: None,
             log: Vec::new(),
@@ -1166,6 +1152,16 @@ impl App {
     }
 
     fn send(&self, cmd: Cmd) {
+        // The worker keeps a model being tried when anything else arrives;
+        // the browser follows on its next frame.
+        if self.browser.as_ref().is_some_and(|b| b.playing.is_some())
+            && !matches!(
+                cmd,
+                Cmd::TryModel { .. } | Cmd::PutBack | Cmd::KeepTry | Cmd::ReadSwitches
+            )
+        {
+            self.trial_kept.set(true);
+        }
         let _ = self.to_device.send(cmd);
     }
 
@@ -1181,16 +1177,15 @@ impl App {
     /// preset that position is a different block.
     fn forget_drafts(&mut self) {
         self.param_draft = None;
-        self.assign_editing = None;
-        self.assign_selected = None;
-        self.assigning = None;
         self.switch_draft = None;
+        self.travel_draft = None;
         self.renaming_header = None;
         self.dragging = None;
         self.dragging_junction = None;
-        if self.inserting_at.is_some() {
-            self.close_picker();
-        }
+        // The worker has kept or dropped any try with the preset it was on.
+        self.browser = None;
+        self.trial_kept.set(false);
+        self.pending_select = None;
     }
 
     fn drain_events(&mut self) {
@@ -1226,6 +1221,9 @@ impl App {
                 Ok(Evt::Disconnected) => {
                     self.connection = Connection::Offline;
                     self.auditioning = None;
+                    self.browser = None;
+                    self.trial_kept.set(false);
+                    self.snapshot_details.clear();
                     self.loading = false;
                     self.dirty = false;
                     self.preset_count = 0;
@@ -1292,6 +1290,7 @@ impl App {
                     tempo,
                     snapshots,
                     snapshot,
+                    snapshot_details,
                     chain,
                     layout,
                     assignments,
@@ -1302,9 +1301,6 @@ impl App {
                     // the pedal loaded by itself, or the one still loaded
                     // after a switch was refused.
                     let moved = index != self.preset_index;
-                    if moved || layout != self.layout {
-                        self.fit_chain_on_next_frame = true;
-                    }
                     if moved {
                         self.forget_drafts();
                     }
@@ -1323,6 +1319,7 @@ impl App {
                     self.firmware = firmware;
                     self.tempo = tempo;
                     self.snapshots = snapshots;
+                    self.snapshot_details = snapshot_details;
                     // The pedal's word for which snapshot is active, whether
                     // it was picked here, on its footswitches, or came with
                     // the preset. A click's own guess does not outlive it.
@@ -1349,10 +1346,15 @@ impl App {
                             .unwrap_or(0);
                     }
                     self.selected = self.selected.min(self.chain.len().saturating_sub(1));
+                    // A block just added is the one to look at.
+                    if let Some(slot) = self.pending_select.take() {
+                        if let Some(index) = self.chain.iter().position(|b| b.position == slot) {
+                            self.selected = index;
+                        }
+                    }
                     // The assignments came with the document; what a switch is
                     // called and what colour it lights did not.
                     self.read_switches();
-                    self.browsing = None;
                     self.renaming = None;
                     self.tempo_draft = None;
                     self.snapshot_draft = None;
@@ -1549,15 +1551,6 @@ impl App {
         block.kind == hx_proto::preset::Kind::Block
     }
 
-    /// The same question by position, for the places that have one and not the
-    /// block itself.
-    fn is_effect_at(&self, position: i64) -> bool {
-        self.chain
-            .iter()
-            .find(|b| b.position == position)
-            .is_some_and(|b| self.is_effect(b))
-    }
-
     /// The catalog entry describing a slot's controls.
     ///
     /// Effects, splits and joins carry a model number the symbol table
@@ -1681,12 +1674,10 @@ impl App {
                     self.pro.body(ui);
                 } else {
                     self.signal_chain(ui);
-                    // The shelf sits beside the pedal being edited rather
-                    // than under it, so choosing a different model is plainly
-                    // a secondary action.
-                    self.shelf(ui);
-                    self.editor(ui);
-                    self.insert_picker(&ctx);
+                    if self.shows_floor(tier) {
+                        self.floor(ui, tier);
+                    }
+                    self.pane(ui, tier);
                 }
             }
             shell::Page::Library => {
@@ -5645,10 +5636,9 @@ impl App {
     }
 
     /// One footswitch's own settings, gathered for the panel that draws them.
-    fn switch_view(&self, switch: u8, tint: egui::Color32) -> Option<SwitchView> {
+    fn switch_view(&self, switch: u8) -> Option<SwitchView> {
         let found = self.switches.iter().find(|s| s.switch == switch)?;
         Some(SwitchView {
-            switch,
             label: self
                 .switch_draft
                 .as_ref()
@@ -5657,9 +5647,7 @@ impl App {
                 .unwrap_or_else(|| found.label.clone().unwrap_or_default()),
             carries: found.carries.first().map(|c| c.name.clone()),
             colour: found.colour,
-            lit: self.led_colour(found.lit()),
             momentary: found.momentary,
-            tint,
         })
     }
 
@@ -6452,34 +6440,6 @@ impl App {
         });
     }
 
-    /// How wide a chain draws, by the renderer's own arithmetic: the space
-    /// before the input, a column per block, the junctions and the padded
-    /// stretch when a path splits, and the wire into the output.
-    fn chain_width(&self, layout: &hx_proto::preset::Layout) -> f32 {
-        let mut widest = 0.0f32;
-        for path in &layout.paths {
-            let mut width = 6.0;
-            if path.input.is_some() {
-                width += theme::BLOCK_WIDTH;
-            }
-            width += path.head.len() as f32 * theme::COLUMN;
-            if !path.lanes.is_empty() {
-                let stretch = path
-                    .lanes
-                    .iter()
-                    .map(|lane| self.lane_width(lane))
-                    .fold(0.0, f32::max);
-                width += 2.0 * theme::JUNCTION_WIDTH + stretch;
-            }
-            width += path.tail.len() as f32 * theme::COLUMN;
-            if path.output.is_some() {
-                width += theme::WIRE_WIDTH + theme::BLOCK_WIDTH;
-            }
-            widest = widest.max(width);
-        }
-        widest
-    }
-
     /// A tone file, shown the way the app always shows a tone: by the chain
     /// renderer itself, in display mode. Load asks where it should land, so
     /// nothing is overwritten by surprise; nothing touches the device before.
@@ -6490,7 +6450,7 @@ impl App {
         let live = matches!(self.connection, Connection::Online);
         // The window opens at the chain's full width, and narrower only when
         // the screen cannot hold it - then the chain scrolls inside.
-        let natural = self.chain_width(&preview.layout) + 24.0;
+        let natural = self.preview_width(&preview.layout, theme::Tier::now(ctx)) + 24.0;
         let width = natural.min(ctx.content_rect().width() - 48.0);
         let mut open = true;
         let mut load = false;
@@ -6518,21 +6478,7 @@ impl App {
                 ui.add_space(6.0);
                 egui::ScrollArea::horizontal()
                     .id_salt("tone-preview")
-                    .show(ui, |ui| {
-                        let paths = self.layout.paths.clone();
-                        ui.vertical(|ui| {
-                            for (n, path) in paths.iter().enumerate() {
-                                if paths.len() > 1 {
-                                    ui.label(
-                                        RichText::new(format!("PATH {}", n + 1))
-                                            .small()
-                                            .color(theme::muted()),
-                                    );
-                                }
-                                let _ = self.path_row(ui, path);
-                            }
-                        });
-                    });
+                    .show(ui, |ui| self.board_preview(ui));
                 for skipped in &preview.skipped {
                     ui.label(RichText::new(skipped).small().color(theme::muted()));
                 }
@@ -6613,271 +6559,6 @@ impl App {
         self.on_preset(preview.dest, AfterSwitch::Tone(Box::new(preview)));
     }
 
-    /// The signal path, drawn the way it is wired.
-    ///
-    /// The slot array is a fixed topology rather than a running order: the
-    /// split sits after the output in it even though the signal reaches it
-    /// first. Read as a list it puts the split and join on the end of the
-    /// chain, which is where they used to be drawn.
-    ///
-    /// The main line never changes height: input, output and everything the
-    /// undivided signal passes through sit on one row, and a parallel branch
-    /// hangs *below* the stretch it parallels, the way HX Edit draws it.
-    /// Splits and joins are not blocks in the line either - they are drawn as
-    /// the wiring forking and merging, still clickable for their own
-    /// parameters.
-    ///
-    /// The number of lanes is not fixed at two: Helix and Helix LT carry two
-    /// independent signal paths, so a preset that splits both has four.
-    fn signal_chain(&mut self, root_ui: &mut egui::Ui) {
-        let mut height = 40.0;
-        for path in &self.layout.paths {
-            height += theme::BLOCK_HEIGHT;
-            height += path.lanes.len().saturating_sub(1) as f32 * theme::LANE_HEIGHT;
-            if self.can_offer_branch(path) {
-                height += 4.0 + theme::GHOST_HEIGHT;
-            }
-            if self.layout.paths.len() > 1 {
-                height += 20.0;
-            }
-        }
-
-        // The topology determines a useful first height, but the musician
-        // decides how much of the window the chain needs right now. Keep a
-        // small editor visible at the largest setting so the splitter cannot
-        // strand the selected block completely off-screen.
-        let min_height = 126.0;
-        let max_height = (root_ui.available_height() - 96.0).max(min_height);
-        let default_height = height.clamp(min_height, max_height);
-        if std::mem::take(&mut self.fit_chain_on_next_frame) {
-            root_ui.ctx().data_mut(|data| {
-                data.remove::<egui::containers::panel::PanelState>(egui::Id::new("chain"));
-            });
-        }
-
-        processor::chain_panel(
-            root_ui,
-            "chain",
-            default_height,
-            min_height..=max_height,
-            |ui| {
-                ui.add_space(6.0);
-                if self.chain.is_empty() {
-                    ui.centered_and_justified(|ui| {
-                        if self.loading {
-                            ui.horizontal(|ui| {
-                                theme::spinner(ui);
-                                ui.label(RichText::new("loading…").color(theme::muted()));
-                            });
-                        } else {
-                            ui.label(RichText::new("No preset loaded").color(theme::muted()));
-                        }
-                    });
-                    return;
-                }
-
-                let mut pick = None;
-                // Drag-to-scroll off: it claims the pointer press, so a
-                // click-only widget like an insert point never completes its
-                // click - and it would fight dragging a block along the chain,
-                // which is the same gesture.
-                egui::ScrollArea::both()
-                    // The scroll area must occupy the dragged panel height;
-                    // otherwise its content's natural height pulls the panel
-                    // back and makes the resize handle feel inert.
-                    .auto_shrink([false, false])
-                    .scroll_source(egui::scroll_area::ScrollSource {
-                        drag: egui::scroll_area::DragScroll::Never,
-                        ..Default::default()
-                    })
-                    .show(ui, |ui| {
-                        self.gap_rects.clear();
-                        self.block_rects.clear();
-                        self.ghost_target = None;
-                        let paths = self.layout.paths.clone();
-                        ui.vertical(|ui| {
-                            for (n, path) in paths.iter().enumerate() {
-                                if paths.len() > 1 {
-                                    ui.label(
-                                        RichText::new(format!("PATH {}", n + 1))
-                                            .small()
-                                            .color(theme::muted()),
-                                    );
-                                }
-                                pick = self.path_row(ui, path).or(pick);
-                            }
-                        });
-                        self.block_drag(ui);
-                    });
-
-                if let Some(i) = pick {
-                    // Purely a local view change. Mirroring the selection onto
-                    // the device's own screen meant every click was a round
-                    // trip, and clicking through a chain quickly wedged it.
-                    self.selected = i;
-                    self.browsing = None;
-                    self.browsing_shelf = None;
-                }
-            },
-        );
-    }
-
-    /// One signal path: the main line straight across, branches hanging below.
-    ///
-    /// A split divides a *stretch* of the path, not all of it - the split
-    /// records the slot it attaches before, and the blocks on either side of
-    /// that stretch carry the undivided signal. The first lane of the divided
-    /// stretch *is* the main line, so it stays in the row; the other branches
-    /// are drawn beneath it between the fork and the merge.
-    fn path_row(&mut self, ui: &mut egui::Ui, path: &hx_proto::preset::Path) -> Option<usize> {
-        let mut pick = None;
-        let below = path.lanes.len().saturating_sub(1);
-        // Every lane spans the same stretch, so they are padded to the widest
-        // and the merge lands where all of them end.
-        let stretch = path
-            .lanes
-            .iter()
-            .map(|l| self.lane_width(l))
-            .fold(0.0, f32::max);
-
-        // Captured while the main row is drawn, to place what hangs below it:
-        // the branch rows start under the fork, and the ghost of an offered
-        // branch runs from the input's edge to the output's.
-        let mut fork_end = None;
-        let mut input_rect = None;
-        let mut output_rect = None;
-
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.add_space(6.0);
-
-                if let Some(input) = path.input {
-                    let (hit, rect) = self.endpoint(ui, input);
-                    pick = hit.or(pick);
-                    input_rect = Some(rect);
-                }
-                // A gap before each block, so a chain can be built anywhere.
-                for slot in &path.head {
-                    self.insert_point(ui, *slot);
-                    pick = self.block_at(ui, *slot).or(pick);
-                }
-
-                if !path.lanes.is_empty() {
-                    if let Some(split) = path.split {
-                        let (hit, rect) = self.junction(ui, split, below, true);
-                        pick = hit.or(pick);
-                        fork_end = Some(rect.right());
-                    }
-                    pick = self.lane_row(ui, &path.lanes[0], stretch).or(pick);
-                    if let Some(join) = path.join {
-                        let (hit, _) = self.junction(ui, join, below, false);
-                        pick = hit.or(pick);
-                    }
-                }
-
-                // And everything the recombined signal passes through.
-                for slot in &path.tail {
-                    self.insert_point(ui, *slot);
-                    pick = self.block_at(ui, *slot).or(pick);
-                }
-                if let Some(output) = path.output {
-                    self.insert_point(ui, output);
-                    let (hit, rect) = self.endpoint(ui, output);
-                    pick = hit.or(pick);
-                    output_rect = Some(rect);
-                }
-            });
-
-            // The branches, aligned column for column under the stretch they
-            // parallel.
-            for lane in path.lanes.iter().skip(1) {
-                ui.add_space(theme::LANE_HEIGHT - theme::BLOCK_HEIGHT);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    if let Some(x) = fork_end {
-                        let indent = x - ui.cursor().min.x;
-                        ui.add_space(indent.max(0.0));
-                    }
-                    pick = self.lane_row(ui, lane, stretch).or(pick);
-                });
-            }
-
-            self.junction_drag(ui, path);
-
-            // The offer of a parallel branch, where it would actually run.
-            if self.can_offer_branch(path) {
-                if let (Some(input), Some(output)) = (input_rect, output_rect) {
-                    self.ghost_branch(ui, path, input, output.left());
-                }
-            }
-        });
-        pick
-    }
-
-    /// Follow a fork or merge being dragged along the main line.
-    ///
-    /// Every gap it can land in shows a dot while the drag lasts, the one
-    /// nearest the pointer takes the accent, and releasing commits the move.
-    /// A fork can go anywhere between the input and the merge; a merge,
-    /// anywhere between the fork and the output. Escape lets go.
-    fn junction_drag(&mut self, ui: &mut egui::Ui, path: &hx_proto::preset::Path) {
-        if self.display_only {
-            return;
-        }
-        let Some((slot, opening)) = self.dragging_junction else {
-            return;
-        };
-        let dragged = if opening { path.split } else { path.join };
-        if dragged != Some(slot) {
-            return;
-        }
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.dragging_junction = None;
-            return;
-        }
-        let Some((lowest, highest, current)) = attach_range(path, opening) else {
-            return;
-        };
-
-        let candidates: Vec<(usize, egui::Rect)> = self
-            .gap_rects
-            .iter()
-            .filter(|(before, _)| (lowest..=highest).contains(before))
-            .copied()
-            .collect();
-        let pointer = ui.input(|i| i.pointer.interact_pos());
-        let nearest = pointer.and_then(|p| {
-            candidates
-                .iter()
-                .min_by(|a, b| {
-                    let da = (a.1.center().x - p.x).abs();
-                    let db = (b.1.center().x - p.x).abs();
-                    da.total_cmp(&db)
-                })
-                .copied()
-        });
-
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        for (before, rect) in &candidates {
-            let hot = nearest.is_some_and(|(n, _)| n == *before);
-            theme::attach_marker(ui, rect.center(), hot);
-        }
-
-        if ui.input(|i| i.pointer.any_released()) {
-            if let Some((before, _)) = nearest {
-                if before != current {
-                    self.edit(Cmd::MoveJunction {
-                        junction: slot,
-                        before,
-                    });
-                }
-            }
-            self.dragging_junction = None;
-        }
-    }
-
     /// Whether to offer a parallel branch: the path has somewhere to put one,
     /// something to parallel, and nothing on the branch yet.
     fn can_offer_branch(&self, path: &hx_proto::preset::Path) -> bool {
@@ -6885,37 +6566,6 @@ impl App {
             && path.lanes.is_empty()
             && !path.head.is_empty()
             && self.free_on_branch(path).is_some()
-    }
-
-    /// The dashed preview of the branch a click would create: it forks after
-    /// the input, runs under the whole line, and merges before the output -
-    /// which is exactly where the real one will go.
-    fn ghost_branch(
-        &mut self,
-        ui: &mut egui::Ui,
-        path: &hx_proto::preset::Path,
-        input: egui::Rect,
-        right: f32,
-    ) {
-        let Some(at) = self.free_on_branch(path) else {
-            return;
-        };
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            let indent = input.right() - ui.cursor().min.x;
-            ui.add_space(indent.max(0.0));
-            let hit = theme::ghost_branch(ui, (right - input.right()).max(90.0), input.center().y)
-                .on_hover_text("add a block on a parallel branch\nor drag one down here");
-            self.ghost_target = Some((at, hit.rect));
-            if hit.clicked() {
-                self.inserting_at = Some(at);
-                self.insert_pos = Some(hit.rect.center_bottom() + egui::vec2(-260.0, 8.0));
-                self.insert_opened = Some(std::time::Instant::now());
-                self.browsing = None;
-                self.search.clear();
-            }
-        });
     }
 
     /// Whether two positions sit in the same lane - the main line between the
@@ -6932,143 +6582,6 @@ impl App {
         })
     }
 
-    /// Follow a block being dragged along the chain, resolved fresh from the
-    /// pointer every frame - never from what was hovered some frames ago,
-    /// which is how a release over nothing came to move a block anyway.
-    ///
-    /// A ghost of the block rides the pointer. Every gap shows a dot;
-    /// dropping into the nearest one slides the block in there, marked by a
-    /// bar filling the gap. Dropping onto a block in *another* lane trades
-    /// places with it, marked by outlining that block - the lanes are not
-    /// contiguous, so between them a move is a trade. Escape lets go.
-    fn block_drag(&mut self, ui: &mut egui::Ui) {
-        if self.display_only {
-            return;
-        }
-        let Some(from) = self.dragging else {
-            return;
-        };
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.dragging = None;
-            return;
-        }
-        let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) else {
-            return;
-        };
-
-        // A drop means one of three things: onto the offered branch to run
-        // the block in parallel, onto a block in the other lane to trade
-        // places with it, or into the nearest gap within reach to slide in.
-        let ghost = self
-            .ghost_target
-            .filter(|(_, rect)| rect.expand(6.0).contains(pointer));
-        let swap = if ghost.is_some() {
-            None
-        } else {
-            self.block_rects
-                .iter()
-                .find(|(slot, rect)| {
-                    *slot != from && rect.contains(pointer) && !self.same_lane(from, *slot)
-                })
-                .map(|(slot, rect)| (*slot, *rect))
-        };
-        let gap = if ghost.is_some() || swap.is_some() {
-            None
-        } else {
-            let candidates = self
-                .gap_rects
-                .iter()
-                // The gaps either side of the block itself go nowhere.
-                .filter(|(before, _)| *before != from && *before != from + 1);
-            // A gap under the pointer wins outright; otherwise the nearest
-            // one within reach - half a row vertically, so the main line and
-            // a branch never compete for a drop between them, and a column
-            // horizontally, so a drop far from any gap means nothing.
-            candidates
-                .clone()
-                .find(|(_, rect)| rect.contains(pointer))
-                .or_else(|| {
-                    candidates
-                        .filter(|(_, rect)| {
-                            (pointer.y - rect.center().y).abs() < theme::LANE_HEIGHT * 0.5
-                                && (pointer.x - rect.center().x).abs() < theme::COLUMN
-                        })
-                        .min_by(|a, b| {
-                            let da = (a.1.center().x - pointer.x).abs();
-                            let db = (b.1.center().x - pointer.x).abs();
-                            da.total_cmp(&db)
-                        })
-                })
-                .map(|(before, rect)| (*before, *rect))
-        };
-
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        for (before, rect) in &self.gap_rects {
-            if *before == from || *before == from + 1 {
-                continue;
-            }
-            let hot = gap.is_some_and(|(g, _)| g == *before);
-            if hot {
-                theme::insert_marker(ui, *rect);
-            } else {
-                theme::attach_marker(ui, rect.center(), false);
-            }
-        }
-        if let Some((_, rect)) = swap {
-            theme::swap_marker(ui, rect);
-        }
-        if let Some((_, rect)) = ghost {
-            // The branch lights the way the + does when it is the drop.
-            theme::attach_marker(ui, egui::pos2(rect.center().x, rect.bottom() - 12.0), true);
-        }
-        if let Some(i) = self.index_of(from) {
-            let block = &self.chain[i];
-            theme::drag_ghost(
-                ui.ctx(),
-                pointer,
-                &self.slot_label(block),
-                self.block_colour(block),
-            );
-        }
-
-        if ui.input(|i| i.pointer.any_released()) {
-            if let Some((before, _)) = ghost {
-                self.edit(Cmd::MoveBlockBefore { from, before });
-            } else if let Some((slot, _)) = swap {
-                self.edit(Cmd::MoveBlock { from, to: slot });
-            } else if let Some((before, _)) = gap {
-                self.edit(Cmd::MoveBlockBefore { from, before });
-            }
-            self.dragging = None;
-        }
-    }
-
-    /// A gap you can add a block to, at `before`.
-    ///
-    /// One click opens the picker at the gap, and the model chosen there goes
-    /// in here. Adding a pedal used to mean finding an empty slot and changing
-    /// its model, which required knowing the slot topology - this puts the
-    /// action where the pedal goes.
-    fn insert_point(&mut self, ui: &mut egui::Ui, before: usize) {
-        // In display mode the gap is just wire: same width, nothing to click.
-        if self.display_only {
-            theme::wire_run(ui, theme::WIRE_WIDTH, theme::BLOCK_HEIGHT);
-            return;
-        }
-        let response =
-            theme::insert_point(ui, theme::BLOCK_HEIGHT).on_hover_text("add a block here");
-        self.gap_rects.push((before, response.rect));
-        if response.clicked() {
-            self.inserting_at = Some(before);
-            // Anchored under the gap, so the choosing happens where the
-            // pedal will go.
-            self.insert_pos = Some(response.rect.center_bottom() + egui::vec2(-260.0, 6.0));
-            self.insert_opened = Some(std::time::Instant::now());
-            self.browsing = None;
-            self.search.clear();
-        }
-    }
-
     /// The first free slot on a path's branch, if it can carry one.
     fn free_on_branch(&self, path: &hx_proto::preset::Path) -> Option<usize> {
         let split = path.split?;
@@ -7077,255 +6590,8 @@ impl App {
         (split + 1..join).find(|p| !self.chain.iter().any(|b| b.position == *p as i64))
     }
 
-    /// One block in the line: clickable to edit, draggable to move.
-    fn block_at(&mut self, ui: &mut egui::Ui, slot: usize) -> Option<usize> {
-        let i = self.index_of(slot)?;
-        let block = self.chain[i].clone();
-        let art = self.artwork(&block);
-        let colour = self.block_colour(&block);
-        let hit = theme::block_button_tinted(
-            ui,
-            &self.slot_label(&block),
-            self.block_category(&block).as_deref(),
-            art.as_ref(),
-            i == self.selected,
-            block.enabled,
-            colour,
-        );
-        // A block something reaches wears a small tag saying what. An
-        // assignment you cannot see is one you find out about on stage, and the
-        // chain is the only place you see every block at once.
-        if !self.display_only {
-            if let Some(marks) = self.control_marks().get(&block.position) {
-                // One tag per source, however many things that source drives on
-                // this block: two entries reading "EXP1 EXP1" say nothing the
-                // one says, and the room is four characters wide.
-                let mut shown: Vec<String> = Vec::new();
-                for (source, _) in marks {
-                    let short = source.short();
-                    if !shown.contains(&short) {
-                        shown.push(short);
-                    }
-                }
-                theme::block_tag(ui, hit.rect, &shown.join(" "), colour);
-                let listed: Vec<String> = marks
-                    .iter()
-                    .map(|(source, what)| match what.as_str() {
-                        "Auto-engage" => format!(
-                            "{} engages this on its own when you move it",
-                            source.label()
-                        ),
-                        what => format!("{} controls {what}", source.label()),
-                    })
-                    .collect();
-                hit.clone().on_hover_text(listed.join("\n"));
-            }
-            self.block_rects.push((slot, hit.rect));
-            if hit.drag_started() {
-                self.dragging = Some(slot);
-            }
-            // The same three actions the block's own header offers, on the
-            // block itself - which is where a hand goes when the block it wants
-            // is not the one being edited.
-            if self.is_effect(&block) {
-                let copied = self.copied_block;
-                let mut action = None;
-                hit.context_menu(|ui| {
-                    if ui.button("Copy").clicked() {
-                        action = Some(RowAction::Copy);
-                        ui.close();
-                    }
-                    if ui.add_enabled(copied, egui::Button::new("Paste")).clicked() {
-                        action = Some(RowAction::Paste);
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Remove").clicked() {
-                        action = Some(RowAction::Remove);
-                        ui.close();
-                    }
-                });
-                match action {
-                    Some(RowAction::Copy) => self.copy_block(slot, &block),
-                    Some(RowAction::Paste) => self.paste_block(slot),
-                    Some(RowAction::Remove) => self.edit(Cmd::ClearBlock(block.position)),
-                    _ => {}
-                }
-            }
-        }
-        hit.clicked().then_some(i)
-    }
-
-    /// One lane of the divided stretch: a gap before every block, one after
-    /// the last while the lane has room, and plain wire out to the merge so
-    /// every lane ends where the branches meet.
-    fn lane_row(
-        &mut self,
-        ui: &mut egui::Ui,
-        lane: &hx_proto::preset::Lane,
-        stretch: f32,
-    ) -> Option<usize> {
-        let mut pick = None;
-        let mut used = 0.0;
-        if lane.blocks.is_empty() && !lane.span.is_empty() {
-            // An empty stretch is a plain wire, but it still takes a block.
-            self.insert_point(ui, lane.span.start);
-            used += theme::WIRE_WIDTH;
-        }
-        for slot in &lane.blocks {
-            self.insert_point(ui, *slot);
-            pick = self.block_at(ui, *slot).or(pick);
-            used += theme::COLUMN;
-        }
-        if let Some(last) = lane.blocks.last() {
-            if lane.blocks.len() < lane.span.len() {
-                self.insert_point(ui, *last + 1);
-                used += theme::WIRE_WIDTH;
-            }
-        }
-        if stretch > used {
-            theme::wire_run(ui, stretch - used, theme::BLOCK_HEIGHT);
-        }
-        pick
-    }
-
-    /// How much room a lane's blocks and gaps ask for; see [`Self::lane_row`].
-    fn lane_width(&self, lane: &hx_proto::preset::Lane) -> f32 {
-        if lane.blocks.is_empty() {
-            return if lane.span.is_empty() {
-                0.0
-            } else {
-                theme::WIRE_WIDTH
-            };
-        }
-        let mut width = lane.blocks.len() as f32 * theme::COLUMN;
-        if lane.blocks.len() < lane.span.len() {
-            width += theme::WIRE_WIDTH;
-        }
-        width
-    }
-
-    /// An input or output tile. Not draggable: the endpoints are fixtures of
-    /// the topology, not blocks to reorder.
-    fn endpoint(&mut self, ui: &mut egui::Ui, slot: usize) -> (Option<usize>, egui::Rect) {
-        let Some(i) = self.index_of(slot) else {
-            return (None, ui.cursor());
-        };
-        let block = self.chain[i].clone();
-        let art = self.artwork(&block);
-        let colour = self.block_colour(&block);
-        let hit = theme::block_button_tinted(
-            ui,
-            &self.slot_label(&block),
-            self.block_category(&block).as_deref(),
-            art.as_ref(),
-            i == self.selected,
-            block.enabled,
-            colour,
-        );
-        (hit.clicked().then_some(i), hit.rect)
-    }
-
-    /// The fork or merge itself, drawn as wiring: draggable along the line,
-    /// clickable for its own parameters - a split's mode, a join's levels.
-    fn junction(
-        &mut self,
-        ui: &mut egui::Ui,
-        slot: usize,
-        below: usize,
-        opening: bool,
-    ) -> (Option<usize>, egui::Rect) {
-        let Some(i) = self.index_of(slot) else {
-            return (None, ui.cursor());
-        };
-        let what = if opening {
-            "the signal forks here\ndrag to move it, click for how it divides"
-        } else {
-            "the branches rejoin here\ndrag to move it, click for levels"
-        };
-        let label = self.slot_label(&self.chain[i]);
-        let tag = if opening { split_tag(&label) } else { None };
-        let held = self.dragging_junction == Some((slot, opening));
-        let hit = theme::junction(ui, below, opening, i == self.selected || held, tag)
-            .on_hover_cursor(egui::CursorIcon::Grab)
-            .on_hover_text(format!("{label}\n{what}"));
-        if hit.drag_started() && !self.display_only {
-            self.dragging_junction = Some((slot, opening));
-        }
-        (hit.clicked().then_some(i), hit.rect)
-    }
-
     fn index_of(&self, slot: usize) -> Option<usize> {
         self.chain.iter().position(|b| b.position == slot as i64)
-    }
-
-    /// The block being edited, given the whole middle of the window.
-    ///
-    /// This used to share a column with the model list, which made choosing a
-    /// different pedal look as important as adjusting the one you have. The
-    /// pedal is the work; the shelf is a side trip, so it is a panel of its
-    /// own beside this one.
-    fn editor(&mut self, root_ui: &mut egui::Ui) {
-        processor::editor(root_ui, |ui| {
-            let Some(block) = self.chain.get(self.selected).cloned() else {
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("Connect a device to begin").color(theme::muted()));
-                });
-                return;
-            };
-
-            self.pedal_header(ui, &block);
-            ui.separator();
-
-            if !self.is_effect(&block) {
-                self.endpoint_editor(ui, &block);
-                return;
-            }
-
-            let Some(model) = self.slot_model(&block).cloned() else {
-                ui.label(RichText::new("Install HX Edit for model names").color(theme::muted()));
-                return;
-            };
-            egui::ScrollArea::vertical()
-                .id_salt("pedal")
-                .show(ui, |ui| {
-                    ui.add_space(6.0);
-                    let art = self.artwork(&block);
-                    self.pedal(
-                        ui,
-                        &model,
-                        &block.values.clone(),
-                        block.position,
-                        false,
-                        art.as_ref(),
-                    );
-
-                    // An Amp+Cab is two models sharing a block; the cab has its own
-                    // controls and its own name.
-                    if let Some(cab) = block.paired.and_then(|m| {
-                        self.catalog
-                            .as_ref()
-                            .and_then(|c| c.model_number(m))
-                            .cloned()
-                    }) {
-                        ui.add_space(14.0);
-                        ui.separator();
-                        let cab_art = self
-                            .catalog
-                            .as_ref()
-                            .and_then(|c| c.artwork(&cab))
-                            .map(|p| theme::Art::whole(format!("file://{}", p.display())));
-                        self.pedal(
-                            ui,
-                            &cab,
-                            &block.paired_values.clone(),
-                            block.position,
-                            true,
-                            cab_art.as_ref(),
-                        );
-                    }
-                });
-        });
     }
 
     /// The first-run welcome, as a modal over everything: how to give the
@@ -7526,60 +6792,6 @@ impl App {
             });
     }
 
-    /// The pedal's name and the things you do to the block itself.
-    ///
-    /// Wrapping rather than right-aligned: at a narrow window the right-to-left
-    /// layout ran these buttons back across the block's own name.
-    fn pedal_header(&mut self, ui: &mut egui::Ui, block: &session::Block) {
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            let colour = self.block_colour(block);
-            theme::category_swatch(ui, colour);
-            ui.heading(self.slot_label(block));
-
-            if !self.is_effect(block) {
-                return;
-            }
-            ui.add_space(12.0);
-
-            // The way in that does not need to be discovered. Right-clicking a
-            // control does the same thing and is faster once you know; nobody
-            // finds a right-click on a knob by looking at it.
-            let picking = self.assigning == Some(block.position);
-            if ui
-                .selectable_label(picking, "Assign control")
-                .on_hover_text(
-                    "put a knob or the on/off switch under a footswitch, \
-                     an expression pedal or MIDI",
-                )
-                .clicked()
-            {
-                self.assigning = (!picking).then_some(block.position);
-            }
-            ui.add_space(8.0);
-
-            if theme::icon_button(ui, theme::Icon::Copy, true)
-                .on_hover_text("Copy this block")
-                .clicked()
-            {
-                self.copy_block(block.position as usize, block);
-            }
-            if theme::icon_button(ui, theme::Icon::Paste, self.copied_block)
-                .on_hover_text("Paste - put the copied block here")
-                .on_disabled_hover_text("Paste - no block copied yet")
-                .clicked()
-            {
-                self.paste_block(block.position as usize);
-            }
-            if theme::icon_button(ui, theme::Icon::Remove, true)
-                .on_hover_text("Remove - take this block out of the chain")
-                .clicked()
-            {
-                self.edit(Cmd::ClearBlock(block.position));
-            }
-        });
-    }
-
     /// Copy the block in a slot. The worker reads it out of the document and
     /// keeps it whole, for pasting into this preset or another.
     fn copy_block(&mut self, slot: usize, block: &session::Block) {
@@ -7630,20 +6842,6 @@ impl App {
             .collect()
     }
 
-    /// What to call the two ends of a travel, which depends on what moves it.
-    ///
-    /// An expression pedal sweeps between them, so they are a minimum and a
-    /// maximum. A footswitch has two positions, and those two numbers are the
-    /// value when it is up and the value when it is down: `Gain | Footswitch 2
-    /// | 0.0 | 10.0` under "Min" and "Max" reads like something has gone wrong,
-    /// and it is an ordinary clean boost.
-    fn travel_words(source: hx_proto::rpc::Source) -> (&'static str, &'static str) {
-        match source {
-            hx_proto::rpc::Source::Footswitch(_) => ("Off", "On"),
-            _ => ("Min", "Max"),
-        }
-    }
-
     /// The same thing said in full, for the cell itself. A header speaks for a
     /// whole column; this speaks for one row, which is what you want when the
     /// two rows disagree.
@@ -7664,277 +6862,6 @@ impl App {
                 false => "the low end of what a snapshot can set".to_owned(),
                 true => "the high end of what a snapshot can set".to_owned(),
             },
-        }
-    }
-
-    /// Every assignment on this block, as the table everything else uses.
-    ///
-    /// The markers on the controls say *that* something is assigned; this says
-    /// what, all of it in one place, which is the thing you want when you are
-    /// working out why a switch does two things at once. The ends of the travel
-    /// are the other half of an assignment, so they are columns here - drawn as
-    /// the pedal's own knobs, in the parameter's own units, because that is what
-    /// they are. The document knows them; opcode 36 reports the defaults however
-    /// far they have been dragged.
-    fn assignment_list(&mut self, ui: &mut egui::Ui, position: i64) {
-        use hx_proto::preset::Target;
-        let listed: Vec<Row> = self
-            .assignments_on(position)
-            .into_iter()
-            .map(|a| {
-                let travel = self.travel_of(position, a.target);
-                let reading = |value: f32| match (&travel, self.catalog.as_ref()) {
-                    (Some(travel), Some(catalog)) => catalog.format(&travel.param, value),
-                    _ => format!("{value:.2}"),
-                };
-                Row {
-                    target: a.target,
-                    // A wah's bypass under EXP 1 is auto-engage, and the row
-                    // should say the thing it does rather than the thing it is.
-                    name: match Self::auto_engage(a.source, a.target) {
-                        true => "Auto-engage".to_owned(),
-                        false => self.target_name(position, a.target),
-                    },
-                    source: a.source,
-                    // Where a number is being dragged, that is the number: the
-                    // document does not hear about it until the drag stops, and
-                    // a cell drawn from the document until then cannot be
-                    // dragged anywhere at all.
-                    cc: self.cc_drafts.get(&(position, a.target)).copied().or(a.cc),
-                    min: a.min,
-                    max: a.max,
-                    min_text: reading(a.min),
-                    max_text: reading(a.max),
-                    travel,
-                }
-            })
-            .collect();
-        if listed.is_empty() {
-            return;
-        }
-
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(4.0);
-        ui.label(RichText::new("ASSIGNMENTS").small().color(theme::muted()));
-        ui.add_space(2.0);
-
-        // One header covers every row under it, so it can only follow the
-        // source while the rows agree about what the ends are. They usually do:
-        // a block is driven by one thing. Where they do not, Min and Max are
-        // the words that are true of both, and each cell says which end it is
-        // in its own row's terms anyway.
-        //
-        // The rows that have a travel decide it, because they are the ones with
-        // numbers under the heading. A table of nothing but bypasses has no
-        // numbers at all, and then every row gets a say rather than none.
-        let words = |rows: &mut dyn Iterator<Item = &Row>| {
-            rows.map(|row| Self::travel_words(row.source))
-                .reduce(|a, b| if a == b { a } else { ("Min", "Max") })
-        };
-        let ends = words(&mut listed.iter().filter(|row| row.travel.is_some()))
-            .or_else(|| words(&mut listed.iter()))
-            .unwrap_or(("Min", "Max"));
-
-        // The block's colour, which is what its badges are painted in wherever
-        // they appear.
-        let tint = self
-            .chain
-            .iter()
-            .find(|b| b.position == position)
-            .map(|b| self.block_colour(b))
-            .unwrap_or(theme::accent());
-
-        // Nothing fills. This table has five narrow columns and lives in a panel
-        // as wide as the window; a column that took the slack put half a screen
-        // of nothing between what a control is and what drives it.
-        let mut grid = table::Grid {
-            columns: vec![
-                table::Column::new("Control", 150.0),
-                table::Column::new("Source", 74.0),
-                table::Column::new("CC", 56.0),
-                table::Column::new(ends.0, 70.0).editable(),
-                table::Column::new(ends.1, 70.0).editable(),
-            ],
-            sticky: 1,
-            menu: vec!["Remove".to_owned()],
-            row_height: 74.0,
-            ..Default::default()
-        };
-        for row in &listed {
-            // A switch has no travel to move: it is on or off. A parameter's
-            // ends are values of that parameter, so they wear its own knob.
-            let end = |value: f32, text: &str, high: bool| match &row.travel {
-                Some(travel) => table::Cell::Knob {
-                    value,
-                    range: travel.range.clone(),
-                    text: text.to_owned(),
-                    hover: Self::end_meaning(row.source, high),
-                },
-                None => table::Cell::Dim("-".to_owned()),
-            };
-            grid.rows.push(vec![
-                table::Cell::Text(row.name.clone()),
-                // The chain's own badge, in the block's own colour. FS1 on the
-                // block, FS1 beside the on/off switch, FS1 here: one thing,
-                // written the same way, wherever you meet it.
-                table::Cell::Tag {
-                    text: row.source.short(),
-                    colour: tint,
-                    hover: row.source.label(),
-                },
-                // The number, beside the source that uses it. It used to be in
-                // the assign popup, two right-clicks deep and invisible until
-                // you were already there; the menu is for choosing what drives
-                // a control, and this adjusts one that already exists.
-                match row.source {
-                    hx_proto::rpc::Source::MidiCc => table::Cell::Number {
-                        value: row.cc.unwrap_or(DEFAULT_CC),
-                        range: 0..=127,
-                        hover: "which MIDI CC drives this\ndrag, or click to type",
-                    },
-                    _ => table::Cell::Dim("-".to_owned()),
-                },
-                end(row.min, &row.min_text, false),
-                end(row.max, &row.max_text, true),
-            ]);
-        }
-        let row_of = |target: Target| listed.iter().position(|row| row.target == target);
-        grid.selected = self.assign_selected.and_then(row_of);
-        if let Some((target, high, draft)) = self.assign_editing.clone() {
-            grid.editing = row_of(target).map(|row| (row, if high { HIGH_END } else { LOW_END }));
-            grid.draft = draft;
-        }
-
-        // Bounded to its own rows: it sits inside the panel's scroll area, and
-        // a virtualised table handed the rest of the page would take it.
-        let height = 74.0 * listed.len() as f32 + table::ROW_HEIGHT + 4.0;
-        let did = ui
-            .allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
-                // Claimed in full, not just where the table happens to have
-                // painted. A virtualised table lays its rows out itself and
-                // leaves the ui it was given no taller than a header, so
-                // anything drawn after it landed on top of the first row.
-                ui.set_min_height(height);
-                table::show(ui, "assignments", &mut grid)
-            })
-            .inner;
-
-        if let Some((row, ..)) = did.clicked {
-            self.assign_selected = listed.get(row).map(|row| row.target);
-        }
-        // Turning a knob writes as it turns, the way the pedal's own do.
-        if let Some((row, col, value)) = did.turned {
-            if let Some((row, travel)) = listed
-                .get(row)
-                .and_then(|row| Some((row, row.travel.as_ref()?)))
-            {
-                self.move_travel(position, row.target, col == HIGH_END, value, &travel.range);
-            }
-        }
-        // A CC is an address, not a sweep. Every step is kept so the field
-        // follows the pointer; only the one it comes to rest on is sent, which
-        // is what stops a drag from ordering a document read per pixel.
-        if let Some((row, _, cc, settled)) = did.numbered {
-            if let Some(row) = listed.get(row) {
-                self.cc_drafts.insert((position, row.target), cc);
-                if settled {
-                    self.assign_action(position, row.target, AssignAction::Cc(cc));
-                }
-            }
-        }
-        if let Some((row, col)) = did.edit {
-            match listed.get(row) {
-                Some(row) if row.travel.is_some() => {
-                    let high = col == HIGH_END;
-                    let text = if high { &row.max_text } else { &row.min_text };
-                    self.assign_editing = Some((row.target, high, text.clone()));
-                }
-                // A switch answers a click by selecting, as it did before.
-                _ => self.assign_selected = listed.get(row).map(|row| row.target),
-            }
-        } else {
-            // The draft lives in the app, not the table, so it survives the
-            // frame.
-            if let Some((_, _, draft)) = self.assign_editing.as_mut() {
-                draft.clone_from(&grid.draft);
-            }
-            if did.cancelled {
-                self.assign_editing = None;
-            }
-            if did.committed {
-                if let Some((target, high, draft)) = self.assign_editing.take() {
-                    let typed = listed
-                        .iter()
-                        .find(|row| row.target == target)
-                        .and_then(|row| row.travel.as_ref())
-                        .and_then(|travel| {
-                            let value = match self.catalog.as_ref() {
-                                Some(catalog) => catalog.parse(&travel.param, draft.trim()),
-                                None => draft.trim().parse().ok(),
-                            }?;
-                            let value = value.clamp(*travel.range.start(), *travel.range.end());
-                            Some((value, travel.range.clone()))
-                        });
-                    if let Some((value, range)) = typed {
-                        self.move_travel(position, target, high, value, &range);
-                    }
-                }
-            }
-        }
-        if let Some((row, _)) = did.chose {
-            if let Some(row) = listed.get(row) {
-                self.assign_action(position, row.target, AssignAction::To(None));
-            }
-        }
-
-        let switches = listed
-            .iter()
-            .filter_map(|row| match row.source {
-                hx_proto::rpc::Source::Footswitch(n) => Some(n),
-                _ => None,
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        self.switch_settings(ui, switches, tint);
-    }
-
-    /// The footswitches this block's assignments land on, with the settings
-    /// that belong to the switch rather than to what it drives.
-    ///
-    /// A switch is four things: what it carries, what is written under it, what
-    /// colour it lights and whether it holds or toggles. Only the first is a
-    /// choice, and the assign menu is where a choice is made. The other three
-    /// are adjustments to something that already exists, which is what this
-    /// panel is for - they were in that popup because that is where the code
-    /// was, and it took two right-clicks and a bypass to find them.
-    fn switch_settings(
-        &mut self,
-        ui: &mut egui::Ui,
-        switches: std::collections::BTreeSet<u8>,
-        tint: egui::Color32,
-    ) {
-        let views: Vec<SwitchView> = switches
-            .into_iter()
-            .filter_map(|switch| self.switch_view(switch, tint))
-            .collect();
-        if views.is_empty() {
-            return;
-        }
-        let colours = self
-            .catalog
-            .as_ref()
-            .and_then(|c| c.menu(hx_catalog::FOOTSWITCH_LED))
-            .map(<[String]>::to_vec)
-            .unwrap_or_default();
-        let mut change = None;
-        for view in &views {
-            ui.add_space(6.0);
-            if let Some(chose) = switch_settings(ui, view, &colours) {
-                change = Some(chose);
-            }
-        }
-        if let Some(change) = change {
-            self.switch_action(change);
         }
     }
 
@@ -8013,21 +6940,10 @@ impl App {
     fn bypass_view(&self, position: i64) -> BypassView {
         use hx_proto::preset::Target;
         let block = self.chain.iter().find(|b| b.position == position);
-        let carried = self.carrying_switch(position);
         let menu = self.assign_view(position, Target::Bypass, "On/Off".to_owned());
         BypassView {
             position,
             enabled: block.is_some_and(|b| b.enabled),
-            lit: carried
-                .as_ref()
-                .map(|s| self.led_colour(s.lit()))
-                .or_else(|| block.map(|b| self.block_colour(b)))
-                .unwrap_or(theme::accent()),
-            driven: menu.under.map(|source| source.short()),
-            tint: block
-                .map(|b| self.block_colour(b))
-                .unwrap_or(theme::accent()),
-            on_a_switch: carried.is_some(),
             auto_engage: menu
                 .under
                 .is_some_and(|source| Self::auto_engage(source, Target::Bypass)),
@@ -8051,14 +6967,6 @@ impl App {
                 self.assign_action(position, hx_proto::preset::Target::Bypass, chose)
             }
         }
-    }
-
-    /// The footswitch carrying this block's bypass, if one is.
-    fn carrying_switch(&self, block: i64) -> Option<hx_usb::Switch> {
-        self.switches
-            .iter()
-            .find(|s| s.carries.iter().any(|c| c.block == block))
-            .cloned()
     }
 
     /// How many footswitches to offer, from the device's own profile.
@@ -8105,29 +7013,6 @@ impl App {
         }
     }
 
-    /// Inputs, outputs, splits and joins: routing, and their own parameters.
-    ///
-    /// Resolved by slot *kind*, never by model number. An endpoint reports
-    /// model 0, and 0 is a real entry in the symbol table - a Cali 400 - so
-    /// looking it up put an amp's name and knobs on the input block.
-    fn endpoint_editor(&mut self, ui: &mut egui::Ui, block: &session::Block) {
-        let Some(model) = self.slot_model(block).cloned() else {
-            ui.add_space(8.0);
-            ui.label(RichText::new("nothing to edit here").color(theme::muted()));
-            return;
-        };
-        ui.add_space(8.0);
-        let art = self.artwork(block);
-        self.pedal(
-            ui,
-            &model,
-            &block.values.clone(),
-            block.position,
-            false,
-            art.as_ref(),
-        );
-    }
-
     /// The colour HX Edit gives this block's category.
     ///
     /// Effects only. An endpoint reports model 0, which is a real amp in the
@@ -8147,670 +7032,6 @@ impl App {
             .and_then(|c| catalog.category(c))
             .map(|c| theme::category_colour(&c.name))
             .unwrap_or(fallback)
-    }
-
-    /// The shelf: swap the selected block for another.
-    ///
-    /// Swapping only. Adding is done at the gap it goes into - see
-    /// [`Self::insert_picker`] - because choosing a pedal in a panel on the
-    /// far side of the window, after arming a mode there, was a lot of
-    /// ceremony for "put a delay here".
-    fn shelf(&mut self, root_ui: &mut egui::Ui) {
-        let Some(block) = self.chain.get(self.selected).cloned() else {
-            return;
-        };
-        // On a preset with nothing in it there is no block to swap, but the
-        // obvious thing to want is a pedal - so the shelf adds instead.
-        let empty = !self.chain.iter().any(|b| self.is_effect(b));
-        if !(self.is_effect(&block) || empty) {
-            return;
-        }
-
-        let heading = if empty { "ADD A BLOCK" } else { "SWAP FOR" };
-        let current = self
-            .catalog
-            .as_ref()
-            .and_then(|c| c.model_number(block.model))
-            .map(|m| m.id.clone());
-
-        if !self.shelf_open {
-            let mut reopen = false;
-            egui::Panel::right("shelf-collapsed")
-                .resizable(false)
-                .exact_size(32.0)
-                .show(root_ui, |ui| {
-                    ui.add_space(6.0);
-                    reopen = ui
-                        .add_sized(
-                            [ui.available_width(), 26.0],
-                            egui::Button::new("‹").frame(false),
-                        )
-                        .on_hover_text("show the model browser")
-                        .clicked();
-                });
-            if reopen {
-                self.shelf_open = true;
-            }
-            return;
-        }
-
-        let mut picked = None;
-        egui::Panel::right("shelf")
-            .default_size(430.0)
-            .size_range(300.0..=620.0)
-            .show(root_ui, |ui| {
-                let App {
-                    catalog,
-                    search,
-                    browsing,
-                    browsing_shelf,
-                    shelf_open,
-                    ..
-                } = self;
-                let Some(catalog) = catalog.as_ref() else {
-                    return;
-                };
-                ui.add_space(6.0);
-                picked = model_picker(
-                    ui,
-                    catalog,
-                    Browsing {
-                        search,
-                        category: browsing,
-                        shelf: browsing_shelf,
-                    },
-                    Holding {
-                        model: current.as_deref(),
-                        paired: block.paired.is_some(),
-                    },
-                    PickerChrome {
-                        heading,
-                        focus_search: false,
-                        open: Some(shelf_open),
-                    },
-                );
-            });
-
-        if let Some(Picked { model, paired }) = picked {
-            if empty {
-                // The first slot the signal reaches that is free.
-                let at = self
-                    .layout
-                    .paths
-                    .first()
-                    .and_then(|p| p.input)
-                    .map(|i| i + 1)
-                    .unwrap_or(1);
-                self.edit(Cmd::InsertBlock { at, model, paired });
-            } else {
-                self.edit(Cmd::SetModel {
-                    block: block.position,
-                    model,
-                    paired,
-                });
-            }
-        }
-    }
-
-    /// Choose a pedal for the gap you clicked, where you clicked it.
-    ///
-    /// Opens focused with the search field live, so the fastest way to add a
-    /// delay is to click the gap and type "del". Escape closes it. Everything
-    /// happens in one place: the previous flow put a menu on the gap, a mode
-    /// on a panel across the window, and the actual choosing a third place
-    /// again, which is why it never felt like it worked.
-    fn insert_picker(&mut self, ctx: &egui::Context) {
-        let (Some(at), Some(pos)) = (self.inserting_at, self.insert_pos) else {
-            return;
-        };
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.close_picker();
-            return;
-        }
-
-        let mut picked = None;
-        let area = egui::Area::new(egui::Id::new("insert-picker"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(pos)
-            .constrain(true)
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style())
-                    .inner_margin(10.0)
-                    .show(ui, |ui| {
-                        ui.set_width(520.0);
-                        ui.set_height(430.0);
-                        let App {
-                            catalog,
-                            search,
-                            browsing,
-                            browsing_shelf,
-                            ..
-                        } = self;
-                        let Some(catalog) = catalog.as_ref() else {
-                            return;
-                        };
-                        picked = model_picker(
-                            ui,
-                            catalog,
-                            Browsing {
-                                search,
-                                category: browsing,
-                                shelf: browsing_shelf,
-                            },
-                            Holding::default(),
-                            PickerChrome {
-                                heading: "ADD A BLOCK",
-                                focus_search: true,
-                                open: None,
-                            },
-                        );
-                    });
-            });
-
-        // Clicking anywhere else means "not that after all" - but not the
-        // click that opened it, which egui still reports this frame, and which
-        // landed on the gap rather than inside the popup. A moment's grace is
-        // more reliable than a frame counter here, because egui may run
-        // several passes for one frame.
-        let settled = self
-            .insert_opened
-            .is_some_and(|t| t.elapsed() > Duration::from_millis(250));
-        let outside = ctx.input(|i| {
-            i.pointer.any_click()
-                && !i
-                    .pointer
-                    .interact_pos()
-                    .is_some_and(|p| area.response.rect.contains(p))
-        });
-        if settled && outside {
-            self.close_picker();
-            return;
-        }
-        if let Some(Picked { model, paired }) = picked {
-            self.close_picker();
-            self.edit(Cmd::InsertBlock { at, model, paired });
-        }
-    }
-
-    fn close_picker(&mut self) {
-        self.inserting_at = None;
-        self.insert_pos = None;
-        self.insert_opened = None;
-        self.search.clear();
-    }
-
-    /// Where an Input or Main L/R block is routed.
-    ///
-    /// Editable via opcode 42, captured from HX Edit's own routing clicks - a
-    /// document write is accepted but ignored for this field. Returns the
-    /// chosen destination, so the caller can send it once the catalog borrow
-    /// has ended.
-    fn routing_menu(
-        &self,
-        ui: &mut egui::Ui,
-        model: &hx_catalog::Model,
-        position: i64,
-    ) -> Option<i64> {
-        let current = self
-            .chain
-            .iter()
-            .find(|b| b.position == position)
-            .and_then(|b| b.routing)?;
-        let catalog = self.catalog.as_ref()?;
-        let param = model
-            .params
-            .iter()
-            .find(|p| p.id == "@input" || p.id == "@output")?;
-        let choices = catalog.choices(param)?;
-
-        let mut chosen = None;
-        let showing = choices
-            .get(current.max(0) as usize)
-            .cloned()
-            .unwrap_or_else(|| current.to_string());
-
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&param.name).small().color(theme::muted()));
-            egui::ComboBox::from_id_salt(("routing", position))
-                .selected_text(RichText::new(showing).color(theme::accent()))
-                .width(240.0)
-                .show_ui(ui, |ui| {
-                    for (index, label) in choices.iter().enumerate() {
-                        if ui
-                            .selectable_label(index as i64 == current, label)
-                            .clicked()
-                        {
-                            chosen = Some(index as i64);
-                        }
-                    }
-                });
-        });
-        ui.add_space(4.0);
-        chosen.filter(|to| *to != current)
-    }
-
-    /// How a split divides the signal, as a row of chips - the defining
-    /// choice for the block, in the same place an endpoint offers its
-    /// routing. Returns the model number of a newly chosen type.
-    ///
-    /// Changing type is an ordinary model change on the split's slot; the
-    /// attach points and the branch survive it (verified on hardware), the
-    /// knobs below re-render for the new type, and undo steps back through it.
-    fn split_type_menu(&self, ui: &mut egui::Ui, position: i64) -> Option<u32> {
-        let block = self.chain.iter().find(|b| b.position == position)?;
-        if block.kind != hx_proto::preset::Kind::Split {
-            return None;
-        }
-        let catalog = self.catalog.as_ref()?;
-        let current = catalog.model_number(block.model)?.id.clone();
-        let family = catalog.models_in(catalog.category_of(&current)?);
-
-        let mut picked = None;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Type").small().color(theme::muted()));
-            for model in family {
-                let name = model.name.strip_prefix("Split ").unwrap_or(&model.name);
-                let on = model.id == current;
-                // The split types are named, not pictured: they are three
-                // variations on one thing, and HX Edit gives the category a
-                // single glyph that would say the same on all three.
-                let chip = theme::category_chip(ui, name, None, theme::accent(), on)
-                    .on_hover_text(split_type_hint(&model.name));
-                if chip.clicked() && !on {
-                    picked = number_of(catalog, &model.id);
-                }
-            }
-        });
-        ui.add_space(4.0);
-        picked
-    }
-
-    /// The selected block drawn as a pedal: its artwork, then its controls as
-    /// knobs beneath, the way Logic's Pedalboard and the hardware itself do.
-    /// Used for both halves of an Amp+Cab block, so the model is passed in
-    /// rather than read off the block.
-    fn pedal(
-        &mut self,
-        ui: &mut egui::Ui,
-        model: &hx_catalog::Model,
-        values: &[f32],
-        position: i64,
-        paired: bool,
-        art: Option<&theme::Art>,
-    ) {
-        let Some(catalog) = self.catalog.as_ref() else {
-            for (i, value) in values.iter().enumerate() {
-                ui.label(format!("{i}: {value}"));
-            }
-            return;
-        };
-
-        let mut edit = None;
-        let mut assign: Option<(i64, AssignAction)> = None;
-        // The pedal, at a size worth looking at. This is the thing being
-        // worked on, so it gets the room; the shelf next door is deliberately
-        // smaller.
-        // What kind of split this is goes with the block's name, not below its
-        // knobs: it is what the block *is*, and it was the one control you had
-        // to scroll past the picture to reach.
-        let retype = self.split_type_menu(ui, position);
-        ui.vertical_centered(|ui| {
-            if let Some(art) = art {
-                theme::pedal_image(ui, art, 240.0);
-            }
-            ui.add_space(4.0);
-            ui.label(RichText::new(&model.name).heading());
-        });
-        ui.add_space(10.0);
-        let reroute = self.routing_menu(ui, model, position);
-
-        // Values arrive in the order the device indexes them, which the catalog
-        // knows how to reproduce - it is not simply the model's parameter list.
-        // An input's list starts with `@input`, which carries no value, and
-        // using it directly shifted every knob by one.
-        let params = catalog.ordered_params(model);
-
-        // Knobs sit in rows under the pedal like the face of one, every row
-        // starting at the same left edge so the columns line up - a wrapped
-        // row that started at the margin made twelve knobs look scattered.
-        let cell = processor::CONTROL_CELL;
-        // The bypass is a control like any other and leads them: it is the
-        // first thing you reach for on a real pedal, and putting it on a line
-        // of its own said it was a different kind of thing, which was the whole
-        // problem with the row of buttons it replaced. `None` is the bypass.
-        let cells: Vec<Option<(usize, f32)>> = self
-            .is_effect_at(position)
-            .then_some(None)
-            .into_iter()
-            .chain(values.iter().copied().enumerate().map(Some))
-            .collect();
-        let (columns, indent) = processor::control_grid(ui, cells.len());
-        let draft = self.param_draft.clone();
-        let mut set_draft: Option<Option<(i64, i64, String)>> = None;
-        let bypass = self.bypass_view(position);
-        // Every knob's menu, gathered before the knobs draw: the grid below is
-        // laid out holding a borrow of the catalog, and a lookup on `self`
-        // cannot fight a borrow.
-        let menus: Vec<AssignMenu> = params
-            .iter()
-            .enumerate()
-            .map(|(index, param)| {
-                self.assign_view(
-                    position,
-                    hx_proto::preset::Target::Param(index as i64),
-                    param.name.clone(),
-                )
-            })
-            .collect();
-        let mut bypassed = None;
-        // Which control a pick landed on, if the header's button is armed.
-        let mut pick: Option<usize> = None;
-        let mut pick_bypass = false;
-        let catalog = self.catalog.as_ref().expect("checked above");
-        let params = catalog.ordered_params(model);
-        for row in cells.chunks(columns) {
-            // Cells with an assignment badge or a wrapped name are taller.
-            // Pin every cell to the top of the row so those extras extend
-            // downward instead of shifting the knob and value upward.
-            ui.horizontal_top(|ui| {
-                ui.add_space(indent);
-                for slot in row {
-                    let Some((index, value)) = *slot else {
-                        // The on/off switch is a control, so a pick lands on it
-                        // like any other.
-                        let before = ui.cursor().min;
-                        if let Some(chose) = bypass_cell(ui, cell, &bypass) {
-                            bypassed = Some(chose);
-                        }
-                        if self.assigning == Some(position) {
-                            let rect = egui::Rect::from_min_size(before, cell);
-                            ui.painter().rect_stroke(
-                                rect.shrink(1.0),
-                                egui::CornerRadius::same(4),
-                                egui::Stroke::new(1.0_f32, theme::accent()),
-                                egui::StrokeKind::Middle,
-                            );
-                            if ui
-                                .put(rect, egui::Button::new("").frame(false))
-                                .on_hover_text("assign the on/off switch")
-                                .clicked()
-                            {
-                                pick_bypass = true;
-                            }
-                        }
-                        continue;
-                    };
-                    let Some(param) = params.get(index).copied() else {
-                        continue;
-                    };
-                    let mut current = value;
-
-                    // Every part of a control opens its assignment menu, not
-                    // only its name: a person right-clicks the knob, because
-                    // the knob is the control. Collected as they are drawn and
-                    // hooked up after, because the menu needs the whole cell's
-                    // worth of state.
-                    let mut parts: Vec<egui::Response> = Vec::new();
-                    let picking = self.assigning == Some(position);
-                    let drawn = ui.allocate_ui(cell, |ui| {
-                        ui.vertical_centered(|ui| {
-                            let mut changed = false;
-                            match (param.kind, catalog.choices(param)) {
-                                (Kind::Switch, _) => {
-                                    let mut on = current >= 0.5;
-                                    let hit = ui.add(theme::switch(&mut on));
-                                    changed = hit.changed();
-                                    parts.push(hit);
-                                    current = on as u8 as f32;
-                                    ui.label(
-                                        RichText::new(catalog.format(param, current))
-                                            .monospace()
-                                            .color(theme::accent()),
-                                    );
-                                }
-                                // Only a catalog entry with actual labels is a
-                                // menu. `valueType: integer` also covers stepped
-                                // numbers such as Pitch Wham's -24..+24 range;
-                                // drawing those as a ComboBox produced an empty
-                                // popup because there were no choices to list.
-                                (Kind::Enum, Some(choices)) => {
-                                    let choice = current.round().max(0.0) as usize;
-                                    ui.add_space(11.0);
-                                    egui::ComboBox::from_id_salt((
-                                        "param", position, index, paired,
-                                    ))
-                                    .width(cell.x)
-                                    .selected_text(
-                                        RichText::new(catalog.format(param, current))
-                                            .color(theme::accent()),
-                                    )
-                                    .show_ui(ui, |ui| {
-                                        for (n, label) in choices.iter().enumerate() {
-                                            if ui
-                                                .selectable_label(n == choice, label)
-                                                .clicked()
-                                                && n != choice
-                                            {
-                                                current = n as f32;
-                                                changed = true;
-                                            }
-                                        }
-                                    });
-                                    ui.add_space(11.0);
-                                }
-                                _ => {
-                                    let hit =
-                                        theme::knob(ui, &mut current, param.min..=param.max);
-                                    changed = hit.changed();
-                                    // Double-click puts the factory default
-                                    // back, the way every DAW knob does.
-                                    if hit.double_clicked() {
-                                        current = param.default;
-                                        changed = true;
-                                    }
-                                    parts.push(hit.clone().on_hover_text(
-                                        "drag to turn; Shift-drag for fine adjustment\ndouble-click to reset; click the value to type it\nright-click to assign a control",
-                                    ));
-                                    match &draft {
-                                        Some((block, i, text))
-                                            if *block == position && *i == index as i64 =>
-                                        {
-                                            let mut text = text.clone();
-                                            let field = ui.add(
-                                                egui::TextEdit::singleline(&mut text)
-                                                    .desired_width(64.0)
-                                                    .font(egui::TextStyle::Monospace),
-                                            );
-                                            if !field.has_focus() && !field.lost_focus() {
-                                                field.request_focus();
-                                            }
-                                            if field.lost_focus() {
-                                                if ui.input(|inp| {
-                                                    inp.key_pressed(egui::Key::Enter)
-                                                }) {
-                                                    if let Some(typed) =
-                                                        catalog.parse(param, &text)
-                                                    {
-                                                        current = typed
-                                                            .clamp(param.min, param.max);
-                                                        changed = true;
-                                                    }
-                                                }
-                                                set_draft = Some(None);
-                                            } else {
-                                                set_draft =
-                                                    Some(Some((position, index as i64, text)));
-                                            }
-                                        }
-                                        _ => {
-                                            let shown = ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(
-                                                        catalog.format(param, current),
-                                                    )
-                                                    .monospace()
-                                                    .color(theme::accent()),
-                                                )
-                                                .sense(egui::Sense::click()),
-                                            );
-                                            let shown = shown
-                                                .on_hover_text("click to type a value");
-                                            if shown.clicked() {
-                                                set_draft = Some(Some((
-                                                    position,
-                                                    index as i64,
-                                                    catalog.format(param, current),
-                                                )));
-                                            }
-                                            parts.push(shown);
-                                        }
-                                    }
-                                }
-                            }
-                            // What controls this knob, if anything, said the
-                            // same way the chain says it: the source's own
-                            // badge, under the name, in the block's colour. An
-                            // assignment you cannot see is an assignment you
-                            // will be surprised by on stage, and a bare dot
-                            // told you only that there was one.
-                            let menu = &menus[index];
-                            let label = match menu.under {
-                                Some(_) => RichText::new(&param.name).color(theme::accent()),
-                                None => RichText::new(&param.name).color(theme::muted()),
-                            };
-                            let name = ui.add(
-                                egui::Label::new(label).sense(egui::Sense::click()),
-                            );
-                            if let Some(source) = menu.under {
-                                parts.push(theme::tag(
-                                    ui,
-                                    &source.short(),
-                                    bypass.tint,
-                                ));
-                            }
-                            let name = match menu.under {
-                                Some(source) => name.on_hover_text(format!(
-                                    "{} controls this\nclick to change",
-                                    source.label(),
-                                )),
-                                None => name.on_hover_text(
-                                    "click to put this under a pedal or a switch",
-                                ),
-                            };
-                            // Left-click as well as right: the menu is the only
-                            // way to reach this, so it should not be hidden
-                            // behind the gesture people try second.
-                            if name.clicked() {
-                                egui::Popup::toggle_id(ui.ctx(), popup_id(position, index));
-                            }
-                            parts.push(name.clone());
-                            for part in &parts {
-                                part.context_menu(|ui| {
-                                    if let Some(chose) = assign_menu(ui, menu) {
-                                        assign = Some((index as i64, chose));
-                                    }
-                                });
-                            }
-                            egui::Popup::from_response(&name)
-                                .id(popup_id(position, index))
-                                .open_memory(None)
-                                .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
-                                .show(|ui| {
-                                    if let Some(chose) = assign_menu(ui, menu) {
-                                        assign = Some((index as i64, chose));
-                                    }
-                                });
-                            if changed {
-                                // Integer parameters rendered as knobs move in
-                                // whole native steps. Named menus already return
-                                // an integer index, so this is harmless there too.
-                                if param.kind == Kind::Enum {
-                                    current = current.round();
-                                }
-                                edit = Some((index as i64, current, param.kind));
-                            }
-                        });
-                    });
-                    if picking {
-                        let rect = drawn.response.rect;
-                        ui.painter().rect_stroke(
-                            rect.shrink(1.0),
-                            egui::CornerRadius::same(4),
-                            egui::Stroke::new(1.0_f32, theme::accent()),
-                            egui::StrokeKind::Middle,
-                        );
-                        // On top of the control, so a pick cannot turn a knob
-                        // by accident. It goes away the moment one is chosen.
-                        let target = ui.put(
-                            rect,
-                            egui::Button::new("").frame(false).fill(
-                                egui::Color32::TRANSPARENT,
-                            ),
-                        );
-                        if target
-                            .on_hover_text(format!("assign {}", param.name))
-                            .clicked()
-                        {
-                            pick = Some(index);
-                        }
-                    }
-                }
-            });
-        }
-        if let Some(index) = pick {
-            self.assigning = None;
-            egui::Popup::open_id(ui.ctx(), popup_id(position, index));
-        }
-        if pick_bypass {
-            self.assigning = None;
-            egui::Popup::open_id(ui.ctx(), bypass_popup_id(position));
-        }
-        if let Some(update) = set_draft {
-            self.param_draft = update;
-        }
-        if let Some(action) = bypassed {
-            self.bypass_action(position, action);
-        }
-        // Once per block, not once per model: an Amp+Cab draws these controls
-        // twice and there is one list of what drives the block.
-        if !paired {
-            self.assignment_list(ui, position);
-        }
-
-        if let Some((param, chose)) = assign {
-            self.assign_action(position, hx_proto::preset::Target::Param(param), chose);
-        }
-        if let Some(to) = reroute {
-            self.edit(Cmd::SetRouting {
-                block: position,
-                to,
-            });
-        }
-        if let Some(model) = retype {
-            self.edit(Cmd::SetModel {
-                block: position,
-                model,
-                paired: None,
-            });
-        }
-        if let Some((index, value, kind)) = edit {
-            let slot = &mut self.chain[self.selected];
-            let target = if paired {
-                &mut slot.paired_values
-            } else {
-                &mut slot.values
-            };
-            target[index as usize] = value;
-            // The cab's parameters are addressed on the same block; only which
-            // half they belong to differs, and the device infers that from the
-            // index range.
-            self.edit(Cmd::SetParam {
-                block: position,
-                index,
-                value,
-                kind,
-            });
-        }
     }
 }
 
@@ -8894,40 +7115,6 @@ fn attach_range(path: &hx_proto::preset::Path, opening: bool) -> Option<(usize, 
     })
 }
 
-/// Search, categories and a grid of pedals. Returns the model chosen.
-///
-/// A free function taking the pieces it needs rather than `&mut self`, so the
-/// same widget serves the swap shelf and the insert popup - the two places you
-/// choose a pedal should not look or behave differently.
-/// Where the model browser is pointed: the filter typed in, the category
-/// chosen, and the shelf under that category.
-///
-/// The three travel together because they are not independent - typing a
-/// search overrides both, and choosing a category clears the shelf. Kept as
-/// separate arguments they were three chances to update two of them.
-struct Browsing<'a> {
-    search: &'a mut String,
-    category: &'a mut Option<u32>,
-    shelf: &'a mut Option<String>,
-}
-
-/// What a block holds now, which decides where the picker opens and which tile
-/// it marks as the current one.
-#[derive(Debug, Clone, Copy, Default)]
-struct Holding<'a> {
-    model: Option<&'a str>,
-    /// Whether a second model rides along - an Amp+Cab.
-    paired: bool,
-}
-
-/// What the picker hands back: a model, and the cab that rides along with it
-/// when the shelf it came from was Amp+Cab.
-#[derive(Debug, Clone, Copy)]
-struct Picked {
-    model: u32,
-    paired: Option<u32>,
-}
-
 /// The device speaks in model numbers, and only knows the models its firmware
 /// carries - a catalog entry with no symbol cannot be sent.
 fn number_of(catalog: &hx_catalog::Catalog, id: &str) -> Option<u32> {
@@ -8936,359 +7123,6 @@ fn number_of(catalog: &hx_catalog::Catalog, id: &str) -> Option<u32> {
         .iter()
         .find(|s| s.model.as_deref() == Some(id))
         .map(|s| s.number)
-}
-
-struct PickerChrome<'a> {
-    heading: &'a str,
-    focus_search: bool,
-    open: Option<&'a mut bool>,
-}
-
-fn model_picker(
-    ui: &mut egui::Ui,
-    catalog: &hx_catalog::Catalog,
-    at: Browsing,
-    holding: Holding,
-    chrome: PickerChrome<'_>,
-) -> Option<Picked> {
-    let Browsing {
-        search,
-        category: browsing,
-        shelf,
-    } = at;
-    let PickerChrome {
-        heading,
-        focus_search,
-        open,
-    } = chrome;
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(heading).small().color(theme::muted()));
-        let collapse_width = if open.is_some() { 24.0 } else { 0.0 };
-        let field = ui.add(
-            egui::TextEdit::singleline(search)
-                .hint_text("Search pedals")
-                .desired_width((ui.available_width() - collapse_width).max(80.0)),
-        );
-        // Typing is the fastest way to find one of several hundred, so the
-        // popup opens ready for it.
-        if focus_search && !field.has_focus() {
-            field.request_focus();
-        }
-        if let Some(open) = open {
-            if ui
-                .small_button("›")
-                .on_hover_text("hide the model browser")
-                .clicked()
-            {
-                *open = false;
-            }
-        }
-    });
-    ui.add_space(4.0);
-
-    let searching = !search.is_empty();
-    // With no category explicitly chosen, show the one the current block is
-    // already in - not the first category. Otherwise swapping an amp snapped
-    // the browser back to Distortion every time.
-    let showing = browsing.unwrap_or_else(|| {
-        // A block that already holds a pair browses as Amp+Cab, which is where
-        // its own model lives as far as the person looking at it is concerned.
-        if holding.paired {
-            return hx_catalog::Category::AMP_CAB;
-        }
-        holding
-            .model
-            .and_then(|id| catalog.category_of(id))
-            .unwrap_or(1)
-    });
-    let categories: Vec<&hx_catalog::Category> = catalog
-        .categories()
-        .iter()
-        .filter(|category| category.is_effect() && !catalog.models_in(category.id).is_empty())
-        .collect();
-
-    // Whether what is on screen fills a block with two models. A search cuts
-    // across categories, so it can only offer single models.
-    let pairing = !searching && catalog.category(showing).is_some_and(|c| c.paired);
-
-    let models: Vec<&hx_catalog::Model> = if searching {
-        let needle = search.to_lowercase();
-        catalog
-            .models()
-            .filter(|m| m.name.to_lowercase().contains(&needle))
-            .filter(|m| {
-                catalog
-                    .category_of(&m.id)
-                    .and_then(|c| catalog.category(c))
-                    .is_some_and(|c| c.is_effect())
-            })
-            .collect()
-    } else {
-        catalog.models_in(showing)
-    };
-
-    // HX Edit shelves a category - Mono, Stereo, Legacy on the effects, Guitar
-    // and Bass on the amps, Single and Dual on the cabs - and those shelves are
-    // how people talk about the models. A search cuts across them, so it stays
-    // one flat list.
-    let shelves: Vec<(&str, Vec<&hx_catalog::Model>)> = if searching {
-        Vec::new()
-    } else {
-        catalog
-            .category(showing)
-            .map(|c| {
-                c.subcategories
-                    .iter()
-                    .map(|sub| {
-                        let models = sub
-                            .models
-                            .iter()
-                            .filter_map(|id| catalog.model(id))
-                            .collect::<Vec<_>>();
-                        (sub.name.as_str(), models)
-                    })
-                    .filter(|(_, models)| !models.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    // A category with no second level shows flat, as does a search, which cuts
-    // across shelves by definition. Amp+Cab does have one - Guitar and Bass,
-    // inherited from the Amp category and narrowed to the amps that come with a
-    // cab - and pairing changes only what a pick sends, never how the shelf is
-    // laid out.
-    let shelved = shelves.len() > 1;
-
-    // Which shelf is open. The stored name is checked against this category's
-    // own shelves rather than trusted, which is what makes changing category
-    // reset it; failing that, the shelf holding the block's current model, so
-    // swapping a stereo delay opens on Stereo rather than on Mono.
-    let open = if shelved {
-        let chosen = shelf
-            .as_deref()
-            .and_then(|want| shelves.iter().position(|(name, _)| *name == want));
-        let holds_current = || {
-            let held = holding.model?;
-            shelves
-                .iter()
-                .position(|(_, models)| models.iter().any(|m| m.id == held))
-        };
-        chosen.or_else(holds_current).unwrap_or(0)
-    } else {
-        0
-    };
-
-    // One shelf at a time when there are shelves; everything otherwise.
-    let models: Vec<&hx_catalog::Model> = if shelved {
-        shelves[open].1.clone()
-    } else {
-        models
-    };
-
-    // Below this width a permanent rail would leave only one narrow model
-    // column. Collapse the same category vocabulary into one compact menu
-    // instead. This applies equally to swapping and inserting: there is one
-    // model browser, responsive to the room it has.
-    if ui.available_width() < 400.0 {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("CATEGORY").small().color(theme::muted()));
-            egui::ComboBox::from_id_salt("model-category")
-                .selected_text(if searching {
-                    "All search results"
-                } else {
-                    catalog
-                        .category(showing)
-                        .map_or("Models", |category| category.name.as_str())
-                })
-                .width(ui.available_width())
-                .show_ui(ui, |ui| {
-                    for category in &categories {
-                        if ui
-                            .selectable_label(!searching && category.id == showing, &category.name)
-                            .clicked()
-                        {
-                            *browsing = Some(category.id);
-                            *shelf = None;
-                            search.clear();
-                        }
-                    }
-                });
-        });
-        if shelved {
-            ui.add_space(4.0);
-            picker_shelves(ui, &shelves, open, shelf);
-        }
-        ui.separator();
-        picker_models(ui, catalog, &models, holding, pairing, true)
-    } else {
-        let body = ui.available_size();
-        let mut picked = None;
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(118.0, body.y),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    egui::ScrollArea::vertical()
-                        .id_salt("model-category-rail")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            for category in &categories {
-                                let colour = theme::category_colour(&category.name);
-                                let on = !searching && category.id == showing;
-                                let icon = picker_category_icon(catalog, category);
-                                if theme::category_rail_row(
-                                    ui,
-                                    &category.name,
-                                    icon.as_ref(),
-                                    colour,
-                                    on,
-                                )
-                                .clicked()
-                                {
-                                    *browsing = Some(category.id);
-                                    *shelf = None;
-                                    search.clear();
-                                }
-                            }
-                        });
-                },
-            );
-            ui.separator();
-            ui.allocate_ui_with_layout(
-                ui.available_size(),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        let heading = if searching {
-                            RichText::new("Search results").color(theme::muted())
-                        } else {
-                            let category = catalog.category(showing);
-                            RichText::new(category.map_or("Models", |c| c.name.as_str())).color(
-                                category.map_or(theme::text(), |c| theme::category_colour(&c.name)),
-                            )
-                        };
-                        ui.label(heading.strong());
-                        if shelved {
-                            for (i, (name, shelf_models)) in shelves.iter().enumerate() {
-                                if theme::shelf_pill(ui, name, i == open)
-                                    .on_hover_text(format!("{} models", shelf_models.len()))
-                                    .clicked()
-                                {
-                                    *shelf = Some((*name).to_owned());
-                                }
-                            }
-                        }
-                    });
-                    ui.separator();
-                    picked = picker_models(ui, catalog, &models, holding, pairing, true);
-                },
-            );
-        });
-        picked
-    }
-}
-
-fn picker_category_icon(
-    catalog: &hx_catalog::Catalog,
-    category: &hx_catalog::Category,
-) -> Option<theme::Art> {
-    // Ours first, HX Edit's only where we have not drawn one.
-    theme::category_icon(&category.name).or_else(|| {
-        catalog.category_artwork(category).map(|(path, frames)| {
-            let uri = format!("file://{}", path.display());
-            match frames {
-                0 | 1 => theme::Art::whole(uri),
-                n => theme::Art::strip(uri, 0, n),
-            }
-        })
-    })
-}
-
-fn picker_shelves(
-    ui: &mut egui::Ui,
-    shelves: &[(&str, Vec<&hx_catalog::Model>)],
-    open: usize,
-    shelf: &mut Option<String>,
-) {
-    ui.horizontal_wrapped(|ui| {
-        for (i, (name, models)) in shelves.iter().enumerate() {
-            if theme::shelf_pill(ui, name, i == open)
-                .on_hover_text(format!("{} models", models.len()))
-                .clicked()
-            {
-                *shelf = Some((*name).to_owned());
-            }
-        }
-    });
-}
-
-fn picker_models(
-    ui: &mut egui::Ui,
-    catalog: &hx_catalog::Catalog,
-    models: &[&hx_catalog::Model],
-    holding: Holding,
-    pairing: bool,
-    compact: bool,
-) -> Option<Picked> {
-    let mut picked = None;
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if models.is_empty() {
-                ui.label(RichText::new("Nothing matches").color(theme::muted()));
-                return;
-            }
-
-            let size = if compact {
-                let available = ui.available_width();
-                let gap = ui.spacing().item_spacing.x;
-                // Add Block opens wide enough for three models. The dock grows
-                // into the same third column as it is resized, but never makes
-                // the thumbnails too narrow just to squeeze one more in.
-                let columns =
-                    (((available + gap) / (112.0 + gap)).floor() as usize).clamp(1, 3) as f32;
-                let width = ((available - gap * (columns - 1.0)) / columns)
-                    .floor()
-                    .clamp(112.0, 156.0)
-                    .min(available);
-                // Browser tiles only have a name below the art. Unlike signal
-                // chain blocks, they do not reserve a second category line.
-                egui::vec2(width, (width * 0.84).clamp(102.0, 132.0))
-            } else {
-                egui::vec2(156.0, 132.0)
-            };
-
-            ui.horizontal_wrapped(|ui| {
-                for model in models {
-                    let selected = holding.model == Some(model.id.as_str());
-                    let colour = catalog
-                        .category_of(&model.id)
-                        .and_then(|id| catalog.category(id))
-                        .map(|category| theme::category_colour(&category.name))
-                        .unwrap_or(theme::accent());
-                    let art = catalog
-                        .artwork(model)
-                        .map(|p| theme::Art::whole(format!("file://{}", p.display())));
-                    if theme::model_tile(ui, &model.name, art.as_ref(), selected, colour, size)
-                        .clicked()
-                    {
-                        // Only models the firmware knows by number can be sent.
-                        picked = number_of(catalog, &model.id).map(|model_number| Picked {
-                            model: model_number,
-                            // In a paired category the cab comes with the amp;
-                            // if the firmware does not know that cab by number
-                            // the amp still goes in, alone.
-                            paired: pairing
-                                .then(|| catalog.paired_cab(model))
-                                .flatten()
-                                .and_then(|cab| number_of(catalog, &cab.id)),
-                        });
-                    }
-                }
-            });
-        });
-    picked
 }
 
 /// A band's heading: its colour as a dot, then its name in that colour.
@@ -9414,7 +7248,6 @@ struct AssignMenu {
 
 /// A footswitch's own settings, as the panel draws them.
 struct SwitchView {
-    switch: u8,
     /// The name in the field, which is the draft while one is being typed.
     label: String,
     /// What the pedal writes under it when no name has been typed: the first
@@ -9422,13 +7255,7 @@ struct SwitchView {
     /// empty means rather than looking like a missing setting.
     carries: Option<String>,
     colour: Option<i64>,
-    /// What it is lighting right now, which under Auto Color is the colour of
-    /// whatever it carries. A word for a colour is worth less than the colour.
-    lit: egui::Color32,
     momentary: bool,
-    /// The colour of the block these settings were reached through, so the
-    /// switch's badge matches the one on that block in the chain.
-    tint: egui::Color32,
 }
 
 /// What choosing something in that menu means.
@@ -9456,170 +7283,10 @@ enum SwitchChange {
 /// the field shows before anybody chooses.
 const DEFAULT_CC: i64 = 4;
 
-/// The two travel columns of the assignments table, by index. Named because
-/// they are read back in three places and adding the CC column beside Source
-/// moved both of them.
-const LOW_END: usize = 3;
-const HIGH_END: usize = 4;
-
-/// The one assignment menu, for a knob and for a block's on/off alike.
-///
-/// It chooses what drives a control and nothing else. Everything that adjusts
-/// an assignment already made - which CC reaches it, where its two ends sit,
-/// what the switch carrying it is called - is in the ASSIGNMENTS panel, where
-/// you can see it without opening anything.
-fn assign_menu(ui: &mut egui::Ui, menu: &AssignMenu) -> Option<AssignAction> {
-    ui.set_min_width(230.0);
-    ui.label(
-        RichText::new(format!("Control {} with", menu.name))
-            .small()
-            .color(theme::muted()),
-    );
-    let mut action = None;
-    if ui
-        .selectable_label(menu.under.is_none(), "Nothing")
-        .clicked()
-    {
-        action = Some(AssignAction::To(None));
-        ui.close();
-    }
-    for (source, carries) in &menu.sources {
-        let on = menu.under == Some(*source);
-        // Say what a source is already busy with, so a footswitch is not
-        // quietly given a second job the night you find out about it.
-        let label = match carries.first() {
-            Some(what) if !on => format!("{}   carries {what}", source.label()),
-            _ => source.label(),
-        };
-        if ui.selectable_label(on, label).clicked() {
-            action = Some(AssignAction::To((!on).then_some(*source)));
-            ui.close();
-        }
-    }
-    action
-}
-
-/// One footswitch's own settings, on one line under the table.
-///
-/// The switch itself, rather than what it carries: what is written under it on
-/// the pedal, what colour it lights, and what your foot gets for pressing it.
-/// The pedal has had opcodes for all three since the protocol was mapped, and
-/// for a long time nothing to press them with.
-///
-/// Every control says what it is in the words a person would use standing in
-/// front of the pedal. It read `[what it carries] [Auto Color] (o) Momentary`
-/// for a while, which is three settings none of which says what it is.
-fn switch_settings(
-    ui: &mut egui::Ui,
-    view: &SwitchView,
-    colours: &[String],
-) -> Option<SwitchChange> {
-    use session::SwitchEdit;
-    let mut change = None;
-    let set = |edit| {
-        Some(SwitchChange::Set {
-            switch: view.switch,
-            edit,
-        })
-    };
-    let dim = |ui: &mut egui::Ui, text: &str| ui.label(RichText::new(text).color(theme::muted()));
-
-    // Wrapped rather than laid out in columns: the panel is as wide as the
-    // window leaves it, and controls that run off the edge of a narrow one are
-    // worse than controls that take two lines.
-    ui.horizontal_wrapped(|ui| {
-        theme::tag(ui, &format!("FS{}", view.switch), view.tint)
-            .on_hover_text("this footswitch, and what it is like to use");
-
-        dim(ui, "  Name");
-        let mut text = view.label.clone();
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut text)
-                .desired_width(110.0)
-                // Empty, the pedal writes what the switch carries under it. So
-                // that is what the empty field shows, greyed: the hint is not a
-                // suggestion, it is what you will get.
-                .hint_text(view.carries.clone().unwrap_or_default()),
-        );
-        if field.changed() {
-            change = Some(SwitchChange::Typing(view.switch, text.clone()));
-        }
-        // Committed on Enter or on leaving, like every other field here. An
-        // empty name is not a name: it clears back to what the switch carries,
-        // which is the same thing opcode 60 does.
-        if field.lost_focus() {
-            let typed = text.trim();
-            change = set(SwitchEdit::Label(
-                (!typed.is_empty()).then(|| typed.to_owned()),
-            ));
-        }
-        field.on_hover_text("what the pedal writes under this switch\nempty: whatever it carries");
-
-        if !colours.is_empty() {
-            dim(ui, "  Light");
-            // Auto Color is index 0 of HX Edit's list and `None` here, because
-            // the protocol reaches it by an opcode of its own rather than a
-            // value.
-            let chosen = view.colour.unwrap_or(0);
-            let showing = colours
-                .get(chosen.max(0) as usize)
-                .cloned()
-                .unwrap_or_else(|| format!("Colour {chosen}"));
-            // The colour it is lighting, beside the name of it. Under Auto
-            // Color the name says nothing at all - the switch takes the colour
-            // of what it carries - and this is that colour.
-            theme::led_dot(ui, view.lit);
-            egui::ComboBox::from_id_salt(("switch-colour", view.switch))
-                .selected_text(RichText::new(&showing).color(theme::accent()))
-                .width(120.0)
-                .show_ui(ui, |ui| {
-                    for (n, name) in colours.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            theme::led_dot(ui, theme::led_swatch(name));
-                            if ui.selectable_label(n as i64 == chosen, name).clicked() {
-                                change = set(SwitchEdit::Colour((n > 0).then_some(n as i64)));
-                            }
-                        });
-                    }
-                })
-                .response
-                .on_hover_text("the colour this switch lights up");
-        }
-
-        dim(ui, "  Press");
-        // Two words rather than a toggle called "Momentary". A toggle says
-        // "momentary: on" and leaves you to work out what the other one is;
-        // this says both, and one of them is lit.
-        for (momentary, word, what) in [
-            (false, "Toggles", "press once for on, press again for off"),
-            (true, "Holds", "on only while your foot is down"),
-        ] {
-            if ui
-                .selectable_label(view.momentary == momentary, word)
-                .on_hover_text(what)
-                .clicked()
-                && view.momentary != momentary
-            {
-                change = set(SwitchEdit::Momentary(momentary));
-            }
-        }
-    });
-    change
-}
-
 /// What the bypass control shows, beyond the menu every control shares.
 struct BypassView {
     position: i64,
     enabled: bool,
-    /// The colour the pedal lights the switch, or the block's own until it has
-    /// said.
-    lit: egui::Color32,
-    /// What drives it, in four characters, for the badge beside its name.
-    driven: Option<String>,
-    /// The block's own colour, which is what its badges are painted in.
-    tint: egui::Color32,
-    /// Whether a footswitch has it, which is what the switch graphic shows.
-    on_a_switch: bool,
     /// Whether what drives it is an expression pedal, which does not switch the
     /// block so much as let it switch itself. See `App::auto_engage`.
     auto_engage: bool,
@@ -9630,136 +7297,6 @@ struct BypassView {
 enum BypassAction {
     Toggle(bool),
     Assign(AssignAction),
-}
-
-/// The block's bypass, drawn as the footswitch it is and sitting with the
-/// block's other controls.
-///
-/// It used to be a tick box called "Engaged" in the header and a row of buttons
-/// called "Bypass switched by" underneath: two controls and two vocabularies
-/// for one thing. It is one thing. A switch is on or off, and something can be
-/// assigned to drive it, so it looks like a switch, it sits where the other
-/// controls are, and its name opens the same kind of popup a knob's name does.
-fn bypass_cell(ui: &mut egui::Ui, cell: egui::Vec2, view: &BypassView) -> Option<BypassAction> {
-    let mut action = None;
-    let mut open = false;
-    // Every part of the control opens its menu, the same as a knob's.
-    let mut parts: Vec<egui::Response> = Vec::new();
-    ui.allocate_ui(cell, |ui| {
-        ui.vertical_centered(|ui| {
-            let switch = theme::footswitch(ui, view.enabled, Some(view.lit), view.on_a_switch);
-            let switch = switch.on_hover_text(if view.enabled {
-                "on. Press to turn it off\nright-click to assign a control"
-            } else {
-                "off. Press to turn it on\nright-click to assign a control"
-            });
-            if switch.clicked() {
-                action = Some(BypassAction::Toggle(!view.enabled));
-            }
-            parts.push(switch);
-            // "On" and "Off", because that is what a guitarist calls a pedal
-            // that is or is not doing anything. "Engaged" and "Bypassed" are
-            // the engineer's words for the same two states.
-            parts.push(
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(if view.enabled { "On" } else { "Off" })
-                            .monospace()
-                            .color(if view.enabled {
-                                theme::accent()
-                            } else {
-                                theme::muted()
-                            }),
-                    )
-                    .selectable(false)
-                    .sense(egui::Sense::click()),
-                ),
-            );
-            // The name is the way in to the assignment, exactly as it is for a
-            // knob. It stays "On/Off" whatever drives it: a control that
-            // renames itself to whatever is driving it has stopped saying what
-            // it is. What drives it is the badge beside it, the same badge the
-            // block wears in the chain.
-            let label = ui.add(
-                egui::Label::new(RichText::new("On/Off").color(match view.driven {
-                    Some(_) => theme::accent(),
-                    None => theme::muted(),
-                }))
-                .selectable(false)
-                .sense(egui::Sense::click()),
-            );
-            // Under the name rather than beside it: a control cell is as wide
-            // as a knob, and "On/Off MIDI" on one line runs out over its
-            // neighbours.
-            let tagged = view.driven.as_ref().map(|what| {
-                ui.add_space(1.0);
-                theme::tag(ui, what, view.tint)
-            });
-            let label = label.on_hover_text(match (view.menu.under, view.auto_engage) {
-                // A wah does not wait to be switched on: it engages itself
-                // the moment the pedal leaves its heel.
-                (Some(source), true) => format!(
-                    "{} engages this on its own when you move it\nclick to change",
-                    source.label()
-                ),
-                (Some(source), false) => {
-                    format!("{} switches this\nclick to change", source.label())
-                }
-                (None, _) => "click to put this under a footswitch or a CC".to_owned(),
-            });
-            // The badge is part of the control, not a decoration on it: a
-            // person aiming at what drives this is aiming at the badge.
-            if let Some(tagged) = tagged {
-                if tagged.clicked() {
-                    open = true;
-                }
-                parts.push(tagged);
-            }
-            if label.clicked() {
-                open = true;
-            }
-            egui::Popup::from_response(&label)
-                .id(bypass_popup_id(view.position))
-                .open_memory(None)
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .show(|ui| {
-                    if let Some(chose) = assign_menu(ui, &view.menu) {
-                        action = Some(BypassAction::Assign(chose));
-                    }
-                });
-            parts.push(label);
-            for part in &parts {
-                part.context_menu(|ui| {
-                    if let Some(chose) = assign_menu(ui, &view.menu) {
-                        action = Some(BypassAction::Assign(chose));
-                    }
-                });
-            }
-        });
-    });
-    if open {
-        egui::Popup::toggle_id(ui.ctx(), bypass_popup_id(view.position));
-    }
-    action
-}
-
-/// One row of the assignments table, gathered before it draws.
-struct Row {
-    target: hx_proto::preset::Target,
-    /// What is driven: a parameter's name, or On/Off.
-    name: String,
-    /// What drives it. Kept as the source rather than its name, because what
-    /// the two ends are *called* depends on it.
-    source: hx_proto::rpc::Source,
-    /// Which CC reaches it, when MIDI is what drives it.
-    cc: Option<i64>,
-    min: f32,
-    max: f32,
-    /// The same two, read the way that parameter reads under the knobs.
-    min_text: String,
-    max_text: String,
-    /// The parameter the ends are values of. `None` for a bypass.
-    travel: Option<Travel>,
 }
 
 /// The parameter an assignment's ends belong to.
@@ -10027,6 +7564,7 @@ mod tests {
                 tempo: Some(120.0),
                 snapshots: vec!["SNAPSHOT 1".into()],
                 snapshot: None,
+                snapshot_details: Vec::new(),
                 layout: hx_proto::preset::Layout::default(),
                 assignments: Vec::new(),
                 dirty: false,
@@ -10198,6 +7736,7 @@ mod tests {
                 tempo: None,
                 snapshots: vec![],
                 snapshot: None,
+                snapshot_details: Vec::new(),
                 assignments: vec![],
                 chain: vec![
                     slot(0, Kind::Input),
@@ -10245,6 +7784,11 @@ mod tests {
             screen_rect: Some(screen),
             ..Default::default()
         };
+        // The board is drawn in the editor's own type, which a context has
+        // from the pass after it is installed.
+        theme::install(&ctx, theme::Appearance::Dark);
+        ctx.run_ui(input.clone(), |_| {})
+            .drop_without_applying_deltas();
         ctx.run_ui(input.clone(), |ui| app.signal_chain(ui))
             .drop_without_applying_deltas();
         let pos = at(app);
@@ -10355,6 +7899,7 @@ mod tests {
                 tempo: None,
                 snapshots: vec![],
                 snapshot: None,
+                snapshot_details: Vec::new(),
                 assignments: vec![],
                 chain: vec![
                     slot(0, Kind::Input),
@@ -10429,6 +7974,7 @@ mod tests {
             tempo: None,
             snapshots: vec![],
             snapshot: None,
+            snapshot_details: Vec::new(),
             layout: hx_proto::preset::Layout::default(),
             assignments: Vec::new(),
             chain: vec![],
@@ -10456,6 +8002,7 @@ mod tests {
             tempo: Some(120.0),
             snapshots: vec!["Verse".into(), "Chorus".into(), "Solo".into()],
             snapshot,
+            snapshot_details: Vec::new(),
             layout: hx_proto::preset::Layout::default(),
             assignments: Vec::new(),
             chain: vec![session::Block {
@@ -10470,6 +8017,134 @@ mod tests {
             }],
             dirty,
         }
+    }
+
+    /// The browser plays each model clicked in the block's place, once, and
+    /// ends the try as asked: Put back restores the block, Keep keeps it.
+    #[test]
+    fn the_browser_tries_models_and_ends_the_try_as_asked() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), false)).unwrap();
+        app.drain_events();
+        let _ = cmds.try_iter().count();
+
+        app.open_browser_swap();
+        assert_eq!(app.browser_swap_slot(), Some(1));
+        assert!(app.pick_model(("drive".into(), "Drive".into(), 7, None)));
+        assert!(matches!(
+            cmds.try_recv(),
+            Ok(Cmd::TryModel {
+                block: 1,
+                model: 7,
+                paired: None
+            })
+        ));
+        assert!(app.dirty);
+        assert!(
+            !app.pick_model(("drive".into(), "Drive".into(), 7, None)),
+            "what is playing already is not played again"
+        );
+        assert!(cmds.try_recv().is_err());
+        app.close_browser(false);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::PutBack)));
+        assert!(app.browser.is_none());
+
+        app.open_browser_swap();
+        app.pick_model(("fuzz".into(), "Fuzz".into(), 8, None));
+        let _ = cmds.try_recv();
+        app.close_browser(true);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::KeepTry)));
+
+        // Closing with nothing tried asks the pedal nothing.
+        app.open_browser_swap();
+        app.close_browser(false);
+        assert!(cmds.try_recv().is_err());
+    }
+
+    /// Choosing what the block held puts it back exactly, settings and all,
+    /// rather than loading a fresh copy of the model over it.
+    #[test]
+    fn choosing_the_original_again_puts_the_block_back() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), false)).unwrap();
+        app.drain_events();
+        let _ = cmds.try_iter().count();
+        app.open_browser_swap();
+        if let Some(browser) = app.browser.as_mut() {
+            if let browser::Target::Swap { original_id, .. } = &mut browser.target {
+                *original_id = Some("drive".into());
+            }
+        }
+        app.pick_model(("fuzz".into(), "Fuzz".into(), 8, None));
+        let _ = cmds.try_recv();
+        assert!(!app.pick_model(("drive".into(), "Drive".into(), 7, None)));
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::PutBack)));
+        assert!(app.browser.as_ref().is_some_and(|b| b.playing.is_none()));
+    }
+
+    /// Anything else sent while a model is being tried keeps it, as the
+    /// worker does, and the browser closes; reading the switches after a try
+    /// is not something done.
+    #[test]
+    fn sending_anything_else_keeps_the_model_being_tried() {
+        let (mut app, events, _cmds) = app();
+        events.send(loaded(2, Some(0), false)).unwrap();
+        app.drain_events();
+        app.open_browser_swap();
+        app.pick_model(("drive".into(), "Drive".into(), 7, None));
+        app.send(Cmd::ReadSwitches);
+        assert!(!app.trial_kept.get());
+        app.send(Cmd::SavePreset);
+        assert!(app.trial_kept.get());
+    }
+
+    /// A block added from the browser goes into the gap clicked, and is the
+    /// one selected when the preset comes back with it.
+    #[test]
+    fn a_block_added_from_the_browser_is_selected_when_it_arrives() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), false)).unwrap();
+        app.drain_events();
+        let _ = cmds.try_iter().count();
+        app.open_browser_insert(4);
+        assert_eq!(app.browser_insert_at(), Some(4));
+        assert!(app.pick_model(("delay".into(), "Delay".into(), 9, None)));
+        assert!(matches!(
+            cmds.try_recv(),
+            Ok(Cmd::InsertBlock {
+                at: 4,
+                model: 9,
+                paired: None
+            })
+        ));
+        assert!(app.browser.is_none(), "adding is one click");
+        let block = |position| session::Block {
+            position,
+            routing: None,
+            kind: hx_proto::preset::Kind::Block,
+            model: 101,
+            enabled: true,
+            values: vec![0.5],
+            paired: None,
+            paired_values: vec![],
+        };
+        events
+            .send(Evt::Loaded {
+                index: 2,
+                name: "Preset 2".into(),
+                firmware: "3.80".into(),
+                tempo: None,
+                snapshots: vec![],
+                snapshot: None,
+                snapshot_details: Vec::new(),
+                layout: hx_proto::preset::Layout::default(),
+                assignments: Vec::new(),
+                chain: vec![block(1), block(4)],
+                dirty: true,
+            })
+            .unwrap();
+        app.drain_events();
+        assert_eq!(app.chain[app.selected].position, 4);
     }
 
     /// The bar lights the snapshot the pedal says is active, whoever picked
@@ -10498,7 +8173,7 @@ mod tests {
         app.param_draft = Some((1, 0, "7.5".into()));
         app.renaming_header = Some("Crunch".into());
         app.dragging = Some(1);
-        app.inserting_at = Some(2);
+        app.open_browser_insert(2);
 
         events.send(loaded(5, Some(0), false)).unwrap();
         app.drain_events();
@@ -10508,7 +8183,10 @@ mod tests {
         assert!(app.param_draft.is_none());
         assert!(app.renaming_header.is_none());
         assert!(app.dragging.is_none());
-        assert!(app.inserting_at.is_none());
+        assert!(
+            app.browser.is_none(),
+            "the browser was aimed at the old preset"
+        );
 
         // A reload of the same preset, after an edit, leaves them alone.
         app.param_draft = Some((1, 0, "7.5".into()));

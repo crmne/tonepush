@@ -19,7 +19,7 @@ shared operations into the very different HX USB and VoidX serial protocols.
 It runs on Linux, macOS, and Windows, and the reusable protocol/client crates
 make the hardware useful outside this editor too.
 
-![TonePush editing a preset on an HX Stomp: a wah, distortion, amp and cab along the main line with a second cab on a parallel branch, the wah's knobs and its expression pedal assignment below, and the library along the bottom](/screenshot.png)
+![TonePush editing a preset on an HX Stomp: the pedal's presets in the sidebar, a wah, a drive, the selected amp and two cabs in parallel along the chain, the amp's twelve knobs beside its on/off switch and the controls on it, and the pedal's footswitches along the bottom](/screenshot.png)
 
 ## What it does
 

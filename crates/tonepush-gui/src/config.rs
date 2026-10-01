@@ -57,6 +57,10 @@ pub struct Config {
     /// Dark, light, or whichever the desktop is.
     #[serde(default)]
     pub appearance: crate::theme::Appearance,
+    /// The models last chosen in the model browser, newest first, by HX
+    /// Edit's id: its Recent shelf.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_models: Vec<String>,
 }
 
 impl Config {

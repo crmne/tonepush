@@ -96,3 +96,70 @@ destination), `hx-pedal`, `hx-pedal-irs`, `hx-pedal-eq`, `hx-pedal-settings`,
   message did.
 - The window opens at 1280 × 760, the design's reference, and no smaller than
   1024 × 640, the smallest size it was drawn for.
+
+## Stage 3: the HX Edit page
+
+The board: the chain on the dotted surface, tiles that fill it between their
+limits (72 to 104 points wide on a small window, 92 to 124 at the reference,
+136 to 176 on a large one) with the category's drawing and wash, the name on
+two lines, the caption, and tags hung on the top edge for what drives the
+block. Wires are one line for mono and two for stereo; forks and merges are
+dots on the line, with A/B, XO or DYN under a split that is not a Y; the
+endpoints are jacks with their routing. The header counts the blocks and says
+what the page is doing ("Trying models in Minotaur's place", "2 blocks on
+FS2"). A gap offers a "+", the parallel branch is offered dashed under the
+line, and a notch in the board's edge points at the selected block.
+
+The pane: the selected block's head (its drawing, its name as the model
+switch, what it is, Change model, copy, paste and remove, and the Block ·
+Footswitches · Snapshots switch) and its face: the on/off switch drawn as the
+footswitch it is, in a column of its own, and the controls in balanced rows of
+the largest knobs that fit (68 down to 44 points, 76 on a large window).
+"Controls on this block" replaces the ASSIGNMENTS table. The floor along the
+bottom is the pedal: its footswitches with their LED rings and what each
+carries, its expression pedals, and how many CCs reach the preset. A chip
+opens its switch in the Footswitches lens.
+
+The lenses: the model browser (Recent and HX Edit's categories with their
+counts, the shelves, cards with each model's controls drawn at their
+defaults, search, a list view, and the audition bar), Footswitches (every
+switch, pedal and MIDI as a row with what it carries, and the chosen one's
+name, light, press and the two ends of each control it carries, as that
+parameter's own knobs) and Snapshots (which blocks each snapshot turns on,
+what follows the snapshots, and the tempo each keeps). On a large window the
+block, the footswitch board, the controls, the snapshot matrix and what the
+library knows of the preset are on screen together.
+
+Scenes: `hx-edit`, `hx-browser` (Teemah! being tried in Minotaur's place),
+`hx-footswitches` (FS2) and `hx-snapshots`; `settings` and `no-device` show
+the new Edit page too. Their `before/` is `before/hx-edit`, where the shelf,
+the knobs and the ASSIGNMENTS table share the page.
+
+- Trying a model is the audition the design describes. The pedal's worker
+  keeps the preset as it was before the first try: Put back (Esc, or closing
+  the browser) restores it byte for byte with its undo history, and Keep
+  (Enter) makes all the tries one undo step. Anything else done meanwhile
+  keeps what is playing, as the shelf always did. Adding a block is one
+  click, and the new block is selected when the preset comes back.
+- The rail has no Favorites. The pedal's favourite blocks are names it keeps,
+  and TonePush has no way to put one in a slot; they stay on the Pedal page.
+  Recent is kept in TonePush's settings file.
+- Values set per snapshot show for the snapshot on the pedal only: the others
+  need the snapshot controller values decoded, which the design leaves for
+  later. The controls card shows that value as a chip with the snapshot's
+  name; switching snapshots shows the next.
+- There is no "Add: click a block or a knob" in the Footswitches editor and no
+  Assign control mode: a control is given by right-clicking a knob or the
+  on/off, or clicking its name, and the lens says so. The lens also leaves
+  out the MIDI channel and the HX Stomp's footswitch mode, which TonePush does
+  not read.
+- The header says "7 blocks" rather than "7 of 8 blocks": TonePush does not
+  know how many more a preset can take.
+- The board's height is the chain's, as the design draws it; the draggable
+  divider under the old chain is gone.
+- Tiles keep to drawings, as the design proposes; where HX Edit's pictures are
+  installed, the block's head shows the model's picture in its well. An
+  Amp+Cab's face shows the cab's controls under a rule with the cab's name,
+  which no mockup draws.
+- On a small window the browser's shelves move from its head to above the
+  models, and the deck says one thing at a time.

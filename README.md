@@ -8,7 +8,7 @@ StompStation PRO: one cross-platform GUI, one scriptable CLI, and reusable
 protocol/client crates behind both. Hardware-tested against an HX Stomp on
 firmware 3.80 and a StompStation PRO on firmware 1.5.12.
 
-![TonePush editing a preset on an HX Stomp: a wah, distortion, amp and cab along the main line with a second cab on a parallel branch, the wah's knobs and its expression pedal assignment below, and the library along the bottom](docs/screenshot.png)
+![TonePush editing a preset on an HX Stomp: the pedal's presets in the sidebar, a wah, a drive, the selected amp and two cabs in parallel along the chain, the amp's twelve knobs beside its on/off switch and the controls on it, and the pedal's footswitches along the bottom](docs/screenshot.png)
 
 Nothing here is derived from vendor source code. The HX protocol was
 reconstructed by observing USB traffic; see [PROTOCOL.md](PROTOCOL.md) for the write-up,
@@ -25,9 +25,11 @@ operation against the hardware:
   merge it, one lane per branch, with the endpoints showing where they are
   routed. Drag the fork or merge along the line to move where the path
   divides. Devices with two DSP paths get up to four lanes.
-- **Editing.** Swap any block's model from a searchable thumbnail browser, turn
-  knobs with values formatted exactly as HX Edit formats them, bypass blocks,
-  reorder the chain, clear slots.
+- **Editing.** Try models in any block's place from a searchable browser,
+  hearing each on the pedal as you click and keeping or putting back the one
+  you had; turn knobs with values formatted exactly as HX Edit formats them,
+  bypass blocks, reorder the chain, clear slots. Footswitches, expression
+  pedals, MIDI and snapshots each have their own view of what they control.
 - **Presets.** Select, rename, **save**, copy, paste, import, export, and back
   up a whole setlist to a directory. A preset travels as the device's own
   document byte for byte, so nothing is lost in translation; re-encoding is
