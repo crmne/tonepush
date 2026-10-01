@@ -59,8 +59,11 @@ tonepush-gui
 
 It connects on launch. Until a pedal answers, the window says to plug one in,
 shows both families it looks for, and checks what it can on this computer: the
-USB access rule, and HX Edit's data. **Look again** looks once more after you
-plug a pedal in, and your library is one click away.
+USB access rule, and HX Edit's data. While that page is open it checks USB
+every two seconds, listing devices without opening any, so a pedal plugged in
+later, or one another editor lets go of, connects by itself. A pedal you let go
+of in TonePush is left alone until you unplug it or press **Look again**, which
+looks at once. Your library is one click away.
 
 Once a pedal is connected, the sidebar on the left is the pedal: its name and
 firmware at the top, then its presets in its own banks. Across the top runs the

@@ -5,6 +5,10 @@
 //! and Line 6's model data as a step to take rather than a window in the way.
 //! The library stays one click away.
 
+use std::collections::BTreeSet;
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
+
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 use crate::shell;
@@ -42,6 +46,156 @@ fn usb_access() -> Option<bool> {
     }
 }
 
+/// How often the connect page looks on USB for a pedal.
+pub(crate) const WATCH_EVERY: Duration = Duration::from_secs(2);
+
+/// How long a pedal that is listed but did not connect waits before it is
+/// tried again: another editor may hold it, and a try every two seconds
+/// would fill the activity log while it does.
+pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(10);
+
+/// What one look at USB listed, without opening anything: HX pedals by
+/// serial (or model), and serial ports that are a StompStation PRO, or may
+/// be one in Update Mode.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Listed {
+    pub(crate) hx: BTreeSet<String>,
+    pub(crate) pro: BTreeSet<String>,
+    pub(crate) update: BTreeSet<String>,
+}
+
+impl Listed {
+    /// Enumerate only: the USB device list and the serial ports' names and
+    /// IDs. No device is opened or claimed, so a pedal another program holds
+    /// is not disturbed.
+    fn scan() -> Self {
+        Self {
+            hx: hx_usb::list()
+                .map(|found| {
+                    found
+                        .into_iter()
+                        .map(|found| {
+                            found
+                                .serial
+                                .unwrap_or_else(|| found.profile.name.to_owned())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            pro: ports(voidx_client::list()),
+            update: ports(voidx_client::list_update_mode()),
+        }
+    }
+}
+
+fn ports(found: voidx_client::Result<Vec<voidx_client::Found>>) -> BTreeSet<String> {
+    found
+        .map(|found| found.into_iter().map(|found| found.port_name).collect())
+        .unwrap_or_default()
+}
+
+/// One family's side of the watch.
+#[derive(Debug, Default)]
+struct Watched {
+    /// What was last tried, and when.
+    tried: Option<(BTreeSet<String>, Instant)>,
+    /// Pedals let go of on purpose: left alone until they leave the list
+    /// (unplugged) or somebody asks to look again.
+    released: BTreeSet<String>,
+    /// Set by a let go: the next look's pedals are the ones let go of.
+    release_next: bool,
+}
+
+impl Watched {
+    /// Whether to connect, given what is listed now.
+    fn decide(&mut self, listed: &BTreeSet<String>, free: bool, now: Instant) -> bool {
+        if std::mem::take(&mut self.release_next) {
+            self.released = listed.clone();
+        }
+        self.released.retain(|key| listed.contains(key));
+        let wanted: BTreeSet<String> = listed.difference(&self.released).cloned().collect();
+        if wanted.is_empty() {
+            self.tried = None;
+            return false;
+        }
+        if !free {
+            return false;
+        }
+        if let Some((tried, at)) = &self.tried {
+            if *tried == wanted && now.duration_since(*at) < RETRY_AFTER {
+                return false;
+            }
+        }
+        self.tried = Some((wanted, now));
+        true
+    }
+}
+
+/// The connect page's watch on USB. While no pedal is connected and no
+/// connect is in flight, it lists what is plugged in every two seconds, on a
+/// thread of its own, and asks a family to connect only once a pedal of
+/// that family is listed.
+#[derive(Debug, Default)]
+pub(crate) struct Watch {
+    due: Option<Instant>,
+    scanning: Option<Receiver<Listed>>,
+    hx: Watched,
+    pro: Watched,
+    /// Update Mode ports already asked who they are. Any Raspberry Pi gadget
+    /// can look like one, so each is asked once, not every two seconds.
+    probed: BTreeSet<String>,
+}
+
+/// Which families to connect.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Wanted {
+    pub(crate) hx: bool,
+    pub(crate) pro: bool,
+}
+
+impl Watch {
+    /// What to connect, given what a look listed and which families are
+    /// free to try.
+    pub(crate) fn decide(
+        &mut self,
+        listed: &Listed,
+        hx_free: bool,
+        pro_free: bool,
+        now: Instant,
+    ) -> Wanted {
+        let hx = self.hx.decide(&listed.hx, hx_free, now);
+        let mut pro = self.pro.decide(&listed.pro, pro_free, now);
+        self.probed.retain(|port| listed.update.contains(port));
+        // The worker takes an Update Mode port only when it is the only one.
+        if pro_free && !pro && listed.pro.is_empty() && listed.update.len() == 1 {
+            let port = listed.update.iter().next().expect("one port");
+            if self.probed.insert(port.clone()) {
+                pro = true;
+            }
+        }
+        Wanted { hx, pro }
+    }
+
+    /// The HX pedal was let go of: do not take it back by itself.
+    pub(crate) fn release_hx(&mut self) {
+        self.hx.release_next = true;
+    }
+
+    /// The StompStation PRO was let go of: do not take it back by itself.
+    pub(crate) fn release_pro(&mut self) {
+        self.pro.release_next = true;
+    }
+
+    /// Somebody asked to look: forget what was let go of and tried.
+    pub(crate) fn forget(&mut self) {
+        *self = Self {
+            due: self.due,
+            scanning: self.scanning.take(),
+            ..Self::default()
+        };
+    }
+}
+
 /// How a family's card says TonePush is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Search {
@@ -53,6 +207,64 @@ impl App {
     /// Whether the Edit page is the connect page: no pedal of either family.
     pub(crate) fn shows_connect(&self) -> bool {
         !matches!(self.connection, Connection::Online) && !self.pro_active()
+    }
+
+    /// Whether the connect page may look on USB now: it shows, and neither
+    /// family is connected or has a connect in flight.
+    fn may_watch(&self) -> bool {
+        self.page == shell::Page::Edit
+            && self.shows_connect()
+            && self.connection == Connection::Offline
+            && self.pro.free_to_look()
+    }
+
+    /// Look on USB every two seconds while the connect page shows, so a
+    /// pedal plugged in later, or freed by another program, is found
+    /// without asking. Called every frame, painted or not.
+    pub(crate) fn watch_usb(&mut self, ctx: &egui::Context) {
+        if let Some(scanning) = &self.watch.scanning {
+            match scanning.try_recv() {
+                Ok(listed) => {
+                    self.watch.scanning = None;
+                    self.on_listed(&listed, Instant::now());
+                }
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => self.watch.scanning = None,
+            }
+        }
+        // Tests, and the screenshots they draw, never look at real USB.
+        if cfg!(test) || !self.may_watch() {
+            self.watch.due = None;
+            return;
+        }
+        let now = Instant::now();
+        match self.watch.due {
+            Some(due) if now >= due => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(Listed::scan());
+                });
+                self.watch.scanning = Some(rx);
+                self.watch.due = Some(now + WATCH_EVERY);
+            }
+            Some(_) => {}
+            None => self.watch.due = Some(now + WATCH_EVERY),
+        }
+        ctx.request_repaint_after(WATCH_EVERY);
+    }
+
+    /// Connect the families a look found a pedal of, if the page still
+    /// waits for one.
+    pub(crate) fn on_listed(&mut self, listed: &Listed, now: Instant) {
+        let watching = self.may_watch();
+        let wanted = self.watch.decide(listed, watching, watching, now);
+        if wanted.hx {
+            self.connection = Connection::Connecting;
+            self.send(crate::Cmd::Connect);
+        }
+        if wanted.pro {
+            self.pro.reconnect();
+        }
     }
 
     /// The connect page, in place of the deck, the board and the pane.
@@ -165,7 +377,7 @@ impl App {
                         ui.add_space(10.0);
                         let line = shell::galley(
                             ui,
-                            "Plug the pedal in, then look again.",
+                            "TonePush keeps checking USB while this page is open.",
                             theme::regular(12.5),
                             theme::muted(),
                         );
@@ -537,5 +749,120 @@ fn pro_drawing(ui: &Ui, rect: Rect) {
             Stroke::new(2.0, theme::line_strong()),
         );
         painter.circle(at(x, 98.0), 10.0 * scale, theme::raised(), line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn listed(hx: &[&str], pro: &[&str], update: &[&str]) -> Listed {
+        let set = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect();
+        Listed {
+            hx: set(hx),
+            pro: set(pro),
+            update: set(update),
+        }
+    }
+
+    const HX: Wanted = Wanted {
+        hx: true,
+        pro: false,
+    };
+    const PRO: Wanted = Wanted {
+        hx: false,
+        pro: true,
+    };
+    const NONE: Wanted = Wanted {
+        hx: false,
+        pro: false,
+    };
+
+    /// Nothing is connected until a pedal of the family is listed; then it
+    /// is, once, and again only after a while if it is still there and still
+    /// not connected (another editor had it).
+    #[test]
+    fn a_family_connects_once_its_pedal_is_listed() {
+        let mut watch = Watch::default();
+        let start = Instant::now();
+        assert_eq!(watch.decide(&Listed::default(), true, true, start), NONE);
+
+        let stomp = listed(&["HX Stomp"], &[], &[]);
+        assert_eq!(watch.decide(&stomp, true, true, start), HX);
+        let soon = start + WATCH_EVERY;
+        assert_eq!(watch.decide(&stomp, true, true, soon), NONE);
+        let later = start + RETRY_AFTER;
+        assert_eq!(watch.decide(&stomp, true, true, later), HX, "freed since");
+
+        let pro = listed(&[], &["/dev/ttyACM0"], &[]);
+        assert_eq!(watch.decide(&pro, true, true, later), PRO);
+    }
+
+    /// While a family is connected or a connect is in flight nothing is
+    /// asked, and the pedal is asked for as soon as it is free.
+    #[test]
+    fn nothing_is_asked_while_a_family_is_not_free() {
+        let mut watch = Watch::default();
+        let now = Instant::now();
+        let both = listed(&["HX Stomp"], &["/dev/ttyACM0"], &[]);
+        assert_eq!(watch.decide(&both, false, false, now), NONE);
+        assert_eq!(
+            watch.decide(&both, true, true, now),
+            Wanted {
+                hx: true,
+                pro: true
+            }
+        );
+    }
+
+    /// A pedal let go of is not taken back by the watch: not until it is
+    /// unplugged and plugged in again, or somebody looks again.
+    #[test]
+    fn a_pedal_let_go_of_stays_let_go() {
+        let mut watch = Watch::default();
+        let start = Instant::now();
+        let stomp = listed(&["HX Stomp"], &[], &[]);
+        watch.release_hx();
+        assert_eq!(watch.decide(&stomp, true, true, start), NONE);
+        let later = start + RETRY_AFTER * 3;
+        assert_eq!(watch.decide(&stomp, true, true, later), NONE);
+
+        assert_eq!(watch.decide(&Listed::default(), true, true, later), NONE);
+        assert_eq!(
+            watch.decide(&stomp, true, true, later),
+            HX,
+            "plugged in again"
+        );
+
+        watch.release_hx();
+        assert_eq!(watch.decide(&stomp, true, true, later), NONE);
+        watch.forget();
+        assert_eq!(watch.decide(&stomp, true, true, later), HX, "asked to look");
+
+        let pro = listed(&[], &["/dev/ttyACM0"], &[]);
+        watch.release_pro();
+        assert_eq!(watch.decide(&pro, true, true, later), NONE);
+    }
+
+    /// A port that may be a PRO in Update Mode is asked who it is once: any
+    /// Raspberry Pi gadget looks the same until asked.
+    #[test]
+    fn an_update_mode_port_is_asked_once() {
+        let mut watch = Watch::default();
+        let start = Instant::now();
+        let pi = listed(&[], &[], &["/dev/ttyACM1"]);
+        assert_eq!(watch.decide(&pi, true, true, start), PRO);
+        let later = start + RETRY_AFTER * 3;
+        assert_eq!(watch.decide(&pi, true, true, later), NONE);
+        assert_eq!(watch.decide(&Listed::default(), true, true, later), NONE);
+        assert_eq!(
+            watch.decide(&pi, true, true, later),
+            PRO,
+            "plugged in again"
+        );
+
+        let two = listed(&[], &[], &["/dev/ttyACM1", "/dev/ttyACM2"]);
+        let mut watch = Watch::default();
+        assert_eq!(watch.decide(&two, true, true, start), NONE, "which one?");
     }
 }

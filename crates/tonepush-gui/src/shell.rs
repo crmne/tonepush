@@ -1612,9 +1612,13 @@ impl App {
     /// Let the pedal go, so another editor can have it.
     pub(crate) fn let_go(&mut self) {
         self.status.clear();
+        // The connect page watches USB; a pedal let go of on purpose is not
+        // taken back by it.
         if self.pro_active() {
+            self.watch.release_pro();
             self.pro.disconnect();
         } else {
+            self.watch.release_hx();
             self.send(Cmd::Disconnect);
         }
     }
@@ -1622,6 +1626,7 @@ impl App {
     /// Look on USB for either family.
     pub(crate) fn look_for_pedal(&mut self) {
         self.status.clear();
+        self.watch.forget();
         if !matches!(self.connection, Connection::Online) {
             self.connection = Connection::Connecting;
             self.send(Cmd::Connect);

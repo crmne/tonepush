@@ -191,6 +191,9 @@ enum ReadTarget {
 
 enum Evt {
     Connected(Snapshot),
+    /// A Connect has been handled, whatever came of it. The connect page
+    /// watches USB only while no look is in flight.
+    Looked,
     Snapshot {
         snapshot: Snapshot,
         baseline: bool,
@@ -258,6 +261,8 @@ struct Confirmation {
 pub(crate) struct Panel {
     tx: Sender<Cmd>,
     rx: Receiver<Evt>,
+    /// Whether a Connect is with the worker and not yet answered.
+    connecting: bool,
     active: bool,
     online: bool,
     busy: bool,
@@ -337,9 +342,10 @@ impl Panel {
         } else {
             std::thread::spawn(move || Worker::new(commands, events, ctx).run());
         }
-        let panel = Self {
+        let mut panel = Self {
             tx,
             rx,
+            connecting: false,
             active: false,
             online: false,
             busy: false,
@@ -387,7 +393,7 @@ impl Panel {
         // reach for a StompStation PRO that happens to be plugged into the
         // machine running the tests.
         if !cfg!(test) {
-            let _ = panel.tx.send(Cmd::Connect);
+            panel.ask_connect();
         }
         panel
     }
@@ -403,6 +409,7 @@ impl Panel {
     pub(crate) fn drain(&mut self) {
         loop {
             match self.rx.try_recv() {
+                Ok(Evt::Looked) => self.connecting = false,
                 Ok(Evt::Connected(snapshot)) => {
                     self.active = true;
                     self.online = true;
@@ -661,7 +668,19 @@ impl Panel {
             self.failed = false;
             self.status = "Looking for a StompStation PRO…".into();
         }
+        self.ask_connect();
+    }
+
+    /// Ask the worker to look for the pedal, and remember that it is.
+    fn ask_connect(&mut self) {
+        self.connecting = true;
         let _ = self.tx.send(Cmd::Connect);
+    }
+
+    /// Whether the connect page may watch USB for a StompStation PRO: none
+    /// is connected, no look is in flight, and no firmware update has it.
+    pub(crate) fn free_to_look(&self) -> bool {
+        !self.online && !self.connecting && !self.updating()
     }
 
     /// Whether TonePush is still looking for a StompStation PRO.
@@ -1676,6 +1695,7 @@ impl Worker {
             };
             let (command, next) = self.coalesce_live_edits(command);
             pending = next;
+            let looking = matches!(command, Cmd::Connect);
             let show_busy = !matches!(
                 &command,
                 Cmd::SetNode {
@@ -1702,6 +1722,9 @@ impl Worker {
             }
             if show_busy {
                 self.send(Evt::Busy(false));
+            }
+            if looking {
+                self.send(Evt::Looked);
             }
         }
     }
@@ -3524,6 +3547,26 @@ pub(crate) mod demo {
     }
 
     impl Panel {
+        /// Cut the panel off from its worker, so nothing a test does reaches
+        /// a pedal plugged into the machine, and count the Connects it asks
+        /// for from then on.
+        pub(crate) fn count_connects(&mut self) -> impl FnMut() -> usize {
+            let (tx, commands) = mpsc::channel();
+            self.tx = tx;
+            move || {
+                commands
+                    .try_iter()
+                    .filter(|command| matches!(command, Cmd::Connect))
+                    .count()
+            }
+        }
+
+        /// A look that has been answered with nothing found.
+        pub(crate) fn demo_looked(&mut self) {
+            self.connecting = false;
+            self.failed = true;
+        }
+
         /// Show the synthetic pedal as though it had just connected, guarded
         /// by a backup and with two controls turned since the last save.
         pub(crate) fn show_demo(&mut self) {

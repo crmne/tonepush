@@ -381,3 +381,18 @@ is `before/no-device`.
 - The welcome window's credits line is not carried over; the page keeps its
   licence and the note that TonePush is not affiliated with Yamaha Guitar
   Group. "What's new" opens the latest release.
+
+## Fixes
+
+Fixes after the stages that change what the window shows, each before (in
+`fixes/before/`) and after (in `fixes/`), drawn by the same harness.
+
+- `connect-not-found`: the connect page now watches USB. While it shows and
+  no connect is in flight, TonePush lists the USB devices and serial ports
+  every two seconds, without opening any, and connects a pedal of either
+  family once one is listed: one plugged in later, or one another editor lets
+  go of (a pedal that is listed but does not connect is tried again every ten
+  seconds). A port that may be a PRO in Update Mode is asked who it is once,
+  and a pedal let go of in TonePush is left alone until it is unplugged or
+  Look again is pressed. The line beside Look again says so; the stage 7
+  note that TonePush does not watch USB no longer holds.

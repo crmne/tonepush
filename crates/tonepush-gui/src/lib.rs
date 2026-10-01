@@ -266,6 +266,8 @@ pub struct App {
     /// Which page the window shows: the loaded preset, the library, or the
     /// pedal itself.
     page: shell::Page,
+    /// The connect page's watch on USB for a pedal plugged in later.
+    watch: connect::Watch,
     /// Which tab of the HX's page is open.
     pedal_tab: pages::PedalTab,
     /// Whether the sidebar is put away (Ctrl+B), giving the page the width.
@@ -1066,6 +1068,7 @@ impl App {
             pending_copy: CopyTarget::Clipboard,
             dirty: false,
             page: shell::Page::Edit,
+            watch: connect::Watch::default(),
             pedal_tab: pages::PedalTab::Backups,
             sidebar_hidden: false,
             automatic_backup: None,
@@ -1650,6 +1653,7 @@ impl eframe::App for App {
         self.drain_events();
         self.hold_close_while_busy(ctx);
         self.pro.drain();
+        self.watch_usb(ctx);
         self.updates.poll(ctx);
         if let Some(problem) = self.updates.take_problem() {
             self.problem(problem);
@@ -6765,6 +6769,75 @@ mod tests {
         assert!(!cmds
             .try_iter()
             .any(|cmd| matches!(cmd, Cmd::WriteSetlist { .. })));
+    }
+
+    /// The connect page connects a pedal a look on USB lists, and asks
+    /// nothing while a connect is in flight, a pedal is connected, or the
+    /// page is not showing.
+    #[test]
+    fn the_connect_page_connects_a_pedal_plugged_in_later() {
+        let (mut app, events, cmds) = app();
+        assert!(
+            matches!(cmds.try_recv(), Ok(Cmd::Connect)),
+            "the look at start-up"
+        );
+        let mut pro_connects = app.pro.count_connects();
+        let stomp = connect::Listed {
+            hx: ["HX Stomp".to_owned()].into(),
+            ..Default::default()
+        };
+        let now = std::time::Instant::now();
+
+        // The look at start-up is still in flight.
+        assert_eq!(app.connection, Connection::Connecting);
+        app.on_listed(&stomp, now);
+        assert!(
+            cmds.try_recv().is_err(),
+            "nothing while a look is in flight"
+        );
+
+        events.send(Evt::Failed("no HX found".into())).unwrap();
+        app.drain_events();
+        app.pro.demo_looked();
+        app.go_to(shell::Page::Library);
+        app.on_listed(&stomp, now);
+        assert!(
+            cmds.try_recv().is_err(),
+            "nothing while the page is not shown"
+        );
+
+        app.go_to(shell::Page::Edit);
+        app.on_listed(&connect::Listed::default(), now);
+        assert!(cmds.try_recv().is_err(), "nothing listed, nothing asked");
+        app.on_listed(&stomp, now);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Connect)));
+        assert_eq!(app.connection, Connection::Connecting);
+        assert_eq!(pro_connects(), 0);
+
+        let pro = connect::Listed {
+            pro: ["/dev/ttyACM0".to_owned()].into(),
+            ..Default::default()
+        };
+        events
+            .send(Evt::Connected {
+                device: "HX Stomp".into(),
+                presets: 126,
+            })
+            .unwrap();
+        app.drain_events();
+        app.on_listed(&pro, now);
+        assert_eq!(pro_connects(), 0, "nothing while a pedal is connected");
+
+        events.send(Evt::Disconnected).unwrap();
+        app.drain_events();
+        app.on_listed(&pro, now);
+        assert_eq!(pro_connects(), 1);
+        app.on_listed(&pro, now);
+        assert_eq!(
+            pro_connects(),
+            0,
+            "nothing while the PRO's look is in flight"
+        );
     }
 
     /// With no pedal the Edit page is the connect page, and a pedal of

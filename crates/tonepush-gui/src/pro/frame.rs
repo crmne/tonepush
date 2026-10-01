@@ -877,7 +877,7 @@ impl Panel {
                     let _ = self.tx.send(Cmd::Disconnect);
                 }
                 if reconnect {
-                    let _ = self.tx.send(Cmd::Connect);
+                    self.ask_connect();
                 }
                 let tabs: Vec<(&str, Option<String>)> = TABS
                     .iter()
@@ -950,7 +950,7 @@ impl Panel {
                         },
                     );
                     if look {
-                        let _ = self.tx.send(Cmd::Connect);
+                        self.ask_connect();
                     }
                     return;
                 };
