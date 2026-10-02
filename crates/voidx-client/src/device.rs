@@ -10,8 +10,15 @@ use crate::session::Session;
 use crate::{values_equivalent, Error, Link, Notification, Result};
 
 /// Firmware on which every persistent write TonePush makes was checked on a
-/// pedal, by reading each result back.
-pub const VERIFIED_FIRMWARE: &[&str] = &["1.5.12"];
+/// pedal, by reading each result back: saving, renaming, moving, clearing,
+/// preset, IR, stereo IR and NAM uploads, global settings and restore. 2.2.6
+/// is left out because its USB serial stops answering during long reads.
+pub const VERIFIED_FIRMWARE: &[&str] = &["1.5.12", "2.0.10"];
+
+/// 2.0.10's NAM player caches models by slot and is not told when slots are
+/// swapped, so a preset can keep playing the model that used to be there
+/// until the pedal restarts. 2.2.6 fixed it.
+const NAM_MOVES_STALE: &[&str] = &["2.0.10"];
 const NAME_CHUNK_BYTES: usize = 128;
 const READ_BATCH_CHUNKS: usize = 32;
 /// Chunk data asked for in one batch. Firmware 2.2.6 moved presets to
@@ -572,6 +579,12 @@ impl<L: Link> Device<L> {
             )));
         }
         self.require_writes()?;
+        if list.gzip && NAM_MOVES_STALE.contains(&self.identity.version.as_str()) {
+            return Err(Error::WriteRefused(format!(
+                "firmware {} keeps playing the old model after NAM slots move until it restarts; update to 2.2.6 to reorder models",
+                self.identity.version
+            )));
+        }
         let before = self.list_info(list.path.clone())?;
         let before_first = before.names[first].clone();
         let before_second = before.names[second].clone();
@@ -984,6 +997,36 @@ mod tests {
             Err(Error::WriteRefused(_))
         ));
         assert!(device.save_preset("Mine").is_err());
+    }
+
+    #[test]
+    fn nam_models_are_not_reordered_on_2_0_10() {
+        let link = Scripted {
+            input: Cursor::new(identity_frames("2.0.10")),
+            output: vec![],
+        };
+        let mut device = Device::connect(link).unwrap();
+        // Refused either way: unverified firmware cannot write at all, and on
+        // verified firmware the NAM guard refuses before anything is sent.
+        let _ = device.enable_writes();
+        let amps = BlobList {
+            path: NodePath::new("root\\nam_amp").unwrap(),
+            description: None,
+            size: 1 << 20,
+            count: 60,
+            chunk_size: 1024,
+            group: None,
+            gzip: true,
+            movable: true,
+            item_type: Some("nam".into()),
+            names: vec![None; 60],
+        };
+        assert!(matches!(
+            device.swap_slots(&amps, 0, 1),
+            Err(Error::WriteRefused(_))
+        ));
+        let sent = device.disconnect().output;
+        assert!(!String::from_utf8_lossy(&sent).contains("dswap"));
     }
 
     #[test]

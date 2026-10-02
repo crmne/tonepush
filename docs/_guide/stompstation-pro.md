@@ -13,7 +13,14 @@ local and Cloud library, and **Pedal** the pedal's backups, NAM and IR
 libraries and settings.
 
 TonePush support is hardware-tested with a StompStation PRO running firmware
-1.5.12. The protocol implementation is independent and based on the vendor's
+1.5.12 and 2.0.10: every write it makes was read back on each. On other
+firmware, including 2.2.6, it opens the pedal read only: browsing, export,
+backups, picking presets and turning knobs work, and nothing is written to
+the pedal's memory. On 2.0.10, NAM models cannot be reordered, because that
+firmware keeps playing the old model after a move until it restarts. 2.2.6
+stops answering over USB during long reads, which makes complete backups
+unreliable, so saving waits for a firmware that fixes it. The protocol
+implementation is independent and based on the vendor's
 [public VoidX protocol documentation](https://www.voidxdevteam.com/voidx-control/voidx-protocol/)
 plus traffic captured from our own pedal.
 

@@ -6,7 +6,7 @@
 An open-source editor for Line 6 HX-family devices and the Sonulab
 StompStation PRO: one cross-platform GUI, one scriptable CLI, and reusable
 protocol/client crates behind both. Hardware-tested against an HX Stomp on
-firmware 3.80 and a StompStation PRO on firmware 1.5.12.
+firmware 3.80 and a StompStation PRO on firmware 1.5.12 and 2.0.10.
 
 ![TonePush editing a preset on an HX Stomp: the pedal's presets in the sidebar, a wah, a drive, the selected amp and two cabs in parallel along the chain, the amp's twelve knobs beside its on/off switch and the controls on it, and the pedal's footswitches along the bottom](docs/screenshot.png)
 
@@ -72,7 +72,9 @@ model-shelf and pedal-knob design instead of reproducing VoidX Control's UI:
   chunks instead of waiting for one USB round trip per chunk.
 - **Conservative compatibility.** Reads work with self-described protocol
   data; writes are enabled only for the exact identity and firmware verified
-  on hardware (`StompStation PRO`, CM4, `sspro`, firmware 1.5.12).
+  on hardware (`StompStation PRO`, CM4, `sspro`, firmware 1.5.12 or 2.0.10).
+  Other firmware, including 2.2.6, opens read only, with presets and knobs
+  still live.
 
 See [the StompStation PRO guide](docs/_guide/stompstation-pro.md) for the GUI,
 CLI, file formats and rollback workflow. The independent VoidX implementation
