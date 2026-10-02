@@ -479,6 +479,21 @@ impl<L: Link> Device<L> {
             });
         }
         self.require_writes()?;
+        // The pedal drops an upload whose name another slot already has,
+        // while acknowledging every chunk as usual.
+        let current = self.list_info(list.path.clone())?;
+        if let Some(other) = current
+            .names
+            .iter()
+            .enumerate()
+            .position(|(slot, existing)| slot != index && existing.as_deref() == Some(name))
+        {
+            return Err(Error::WriteRefused(format!(
+                "slot {} of {} is already named {name:?}; the pedal ignores an upload under a name another slot uses",
+                other + 1,
+                list.path
+            )));
+        }
 
         // Name chunks are always 128 bytes on 1.5.12, independently of the
         // list's data chunk size (NAM data chunks are 1024 bytes).
