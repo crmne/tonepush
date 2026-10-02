@@ -545,6 +545,20 @@ mod tests {
         )));
     }
 
+    /// The docs site's download page builds its links from this version, so
+    /// a release that forgets it sends people to an old one (0.7.0 did).
+    #[test]
+    fn the_docs_site_offers_this_version() {
+        let site = include_str!("../../../docs/_config.yml");
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(
+            site.contains(&format!("tonepush_version: \"{version}\"")),
+            "docs/_config.yml must say tonepush_version: \"{version}\""
+        );
+        let versions = include_str!("../../../docs/_data/versions.yml");
+        assert!(versions.contains(&format!("current: v{version}")));
+    }
+
     /// The answer the previous release's helper checks before installing.
     #[test]
     fn the_version_line_is_the_slug_and_version() {

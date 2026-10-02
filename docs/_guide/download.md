@@ -20,24 +20,7 @@ One download for both Apple Silicon and Intel:
 Open it and drag **TonePush** to Applications. The DMG also carries the
 `tonepush` command-line tool; copy it somewhere on your PATH if you want it.
 
-### First open on macOS
-
-This build is not yet notarized with Apple, so macOS blocks it the first time.
-Recent macOS versions (Sequoia and later) no longer let you bypass this with a
-right-click, so you open it once through Privacy & Security instead:
-
-1. Double-click **TonePush** in Applications. macOS says it cannot be opened
-   because Apple cannot check it for malicious software. Click **Done** (do
-   **not** click Move to Trash).
-2. Open **System Settings**, then **Privacy & Security**.
-3. Scroll down to the **Security** section. You will see a line like
-   *"TonePush was blocked to protect your Mac"* with an **Open Anyway**
-   button next to it. Click it.
-4. Authenticate with Touch ID or your password, then click **Open Anyway**
-   once more in the confirmation dialog.
-
-The app opens, and macOS remembers the choice: every launch after this is an
-ordinary double-click. This whole step disappears once notarized builds ship.
+The app is signed and notarized by Apple, so it opens with a double-click.
 
 Homebrew users can instead run:
 
@@ -66,7 +49,22 @@ udev rule and desktop entry:
 yay -S tonepush-bin     # ready made; tonepush builds the release from source, tonepush-git the latest commit
 ```
 
-On any other distro, grab the archive for your machine:
+On Debian, Ubuntu and their derivatives, or on Fedora and other RPM
+distros, install the package for your machine, which also sets up the udev
+rule and desktop entry:
+
+- [tonepush_{{ v }}_amd64.deb]({{ base }}/tonepush_{{ v }}_amd64.deb) ·
+  [tonepush_{{ v }}_arm64.deb]({{ base }}/tonepush_{{ v }}_arm64.deb)
+- [tonepush-{{ v }}-1.x86_64.rpm]({{ base }}/tonepush-{{ v }}-1.x86_64.rpm) ·
+  [tonepush-{{ v }}-1.aarch64.rpm]({{ base }}/tonepush-{{ v }}-1.aarch64.rpm)
+
+To run it without installing anything, use the AppImage. It needs glibc 2.39
+or newer and still needs the udev rule below to reach the pedal:
+
+- [tonepush-{{ v }}-x86_64.AppImage]({{ base }}/tonepush-{{ v }}-x86_64.AppImage) ·
+  [tonepush-{{ v }}-aarch64.AppImage]({{ base }}/tonepush-{{ v }}-aarch64.AppImage)
+
+Or grab the archive for your machine:
 
 - [tonepush-v{{ v }}-x86_64-unknown-linux-gnu.tar.gz]({{ base }}/tonepush-v{{ v }}-x86_64-unknown-linux-gnu.tar.gz)
 - [tonepush-v{{ v }}-aarch64-unknown-linux-gnu.tar.gz]({{ base }}/tonepush-v{{ v }}-aarch64-unknown-linux-gnu.tar.gz)
