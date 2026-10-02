@@ -518,7 +518,16 @@ impl<L: Link> Device<L> {
         let readback = self.read_blob_with_progress(&refreshed, index, |chunk, chunks| {
             progress(UploadStep::Verify { chunk, chunks });
         })?;
-        if readback != blob {
+        // The pedal stores a NAM model uncompressed and gzips it again when it
+        // is read, with its own header (OS byte 3, Unix), so a gzip slot is
+        // checked by what it decompresses to.
+        let same = if list.gzip {
+            let wrote = gunzip(blob);
+            wrote.is_some() && wrote == gunzip(&readback)
+        } else {
+            readback == blob
+        };
+        if !same {
             let first = readback
                 .iter()
                 .zip(blob)
@@ -526,7 +535,10 @@ impl<L: Link> Device<L> {
                 .unwrap_or(readback.len().min(blob.len()));
             return Err(Error::InvalidResponse {
                 subject: list.path.to_string(),
-                detail: format!("slot {index} readback first differed at byte {first}"),
+                detail: format!(
+                    "slot {} read back differently from what was written, from byte {first}",
+                    index + 1
+                ),
             });
         }
         progress(UploadStep::Done);
@@ -733,6 +745,16 @@ fn decode_data_read_record(
 /// preset loads unless it is saved.
 fn is_live(path: &NodePath) -> bool {
     path.as_str().starts_with("root\\app\\")
+}
+
+/// The whole content of a gzip stream, or `None` when it does not decompress.
+fn gunzip(bytes: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut content = Vec::new();
+    flate2::read::GzDecoder::new(bytes)
+        .read_to_end(&mut content)
+        .ok()?;
+    Some(content)
 }
 
 pub(crate) fn read_batch_chunks(chunk_size: usize) -> usize {
@@ -947,6 +969,21 @@ mod tests {
             Err(Error::WriteRefused(_))
         ));
         assert!(device.save_preset("Mine").is_err());
+    }
+
+    #[test]
+    fn a_gzip_slot_is_compared_by_its_content() {
+        use std::io::Write as _;
+        let gz = |os: u8| {
+            let mut encoder = flate2::GzBuilder::new()
+                .operating_system(os)
+                .write(Vec::new(), flate2::Compression::default());
+            encoder.write_all(b"{\"version\":\"0.5.4\"}").unwrap();
+            encoder.finish().unwrap()
+        };
+        assert_ne!(gz(255), gz(3));
+        assert_eq!(gunzip(&gz(255)), gunzip(&gz(3)));
+        assert_eq!(gunzip(b"not gzip"), None);
     }
 
     #[test]
