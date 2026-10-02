@@ -45,26 +45,29 @@ hx-catalog = { path = "crates/hx-catalog" }
 # 0.36.1 with right-to-left shaping (emilk/egui#8577), egui's busy-loop fix
 # (emilk/egui#8398), and eframe pacing Wayland frames by the compositor's frame
 # callbacks, so a window the compositor stops showing never blocks in a vsync
-# swap (emilk/egui#8631). Every egui crate comes from the same revision so they
-# share one emath and epaint. Drop this once egui releases all three.
-ecolor = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-eframe = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-egui = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-egui-wgpu = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-egui-winit = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-egui_extras = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-egui_glow = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+# swap (emilk/egui#8631). On Wayland, egui-winit uses winit's clipboard (see
+# winit below), and each emoji cluster is laid out one emoji wide. Every egui
+# crate comes from the same revision so they share one emath and epaint. Drop
+# this once egui releases these.
+ecolor = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
+eframe = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
+egui = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
+egui-wgpu = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
+egui-winit = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
+egui_extras = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
+egui_glow = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
 # Test only: renders the editor offscreen for the design screenshots.
-egui_kittest = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-emath = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-epaint = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
-epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "0b431145c22ee27b20b0aff7243d74f4b32e9a79" }
+egui_kittest = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
+emath = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
+epaint = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
+epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
 # crmne/winit apps-0.30, shared with the same apps: winit 0.30.13 plus Wayland
 # `Occluded` for the xdg-shell suspended state with commits on the app's behalf
 # while it isn't presenting (rust-windowing/winit#4709, #4710), which eframe
 # from the fork above uses. Its other change (macOS Quit through close requests
-# behind a feature) is unused here. Its Wayland file drops were reverted
-# (544a737): their extra data device kept the selection from egui's clipboard
-# on Hyprland, so paste failed in every text field (crmne/spotifast#614).
+# behind a feature) is unused here. On Wayland it reports dropped files and
+# offers the clipboard through one data device, which the egui fork above
+# uses: Hyprland sends the selection and drags only to a client's first data
+# device, so a second one for the clipboard broke paste (crmne/spotifast#614).
 # Drop the fork when a winit release includes the Wayland changes.
-winit = { git = "https://github.com/crmne/winit", rev = "544a73716c7a54c916d97d6c86c0b1bdaa81234e" }
+winit = { git = "https://github.com/crmne/winit", rev = "fb8b24c3ec3f2c499daa92aeb4e783a8efa2e973" }
