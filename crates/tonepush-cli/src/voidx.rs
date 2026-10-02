@@ -359,6 +359,12 @@ pub(crate) fn run(command: Command) -> Result<()> {
                 .with_context(|| format!("{} was absent from its browse response", path))?;
             let value = parse_node_value(&description, &value)?;
             let persistent = !path.as_str().starts_with("root\\app\\");
+            // Outside the live preset only global settings are writable here:
+            // other branches hold things like 2.0.10's USB mode, which can
+            // take the serial port TonePush talks through away.
+            if persistent && !path.as_str().starts_with("root\\settings\\") {
+                bail!("{path} is neither a live preset value (root\\app) nor a global setting (root\\settings)");
+            }
             let guard = if persistent {
                 let rollback = rollback.as_deref().context(
                     "non-app nodes require --rollback PATH and --yes because they may persist",
