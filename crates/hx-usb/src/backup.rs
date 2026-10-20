@@ -855,7 +855,12 @@ fn remove_other_slot_files(dir: &Path, slot: usize, keep: Option<&OsStr>) -> Res
 /// learn what a pedal is holding without asking the pedal, which is what the
 /// editor needs to say whether a preset is in the library.
 pub fn slot_files(dir: &Path) -> BTreeMap<usize, PathBuf> {
-    let Ok(read) = std::fs::read_dir(dir.join("presets")) else {
+    setlist_slot_files(dir, 0)
+}
+
+/// [`slot_files`] for any setlist of the bundle, not only the first.
+pub fn setlist_slot_files(dir: &Path, setlist: usize) -> BTreeMap<usize, PathBuf> {
+    let Ok(read) = std::fs::read_dir(dir.join(setlist_dir(setlist))) else {
         return BTreeMap::new();
     };
     read.flatten()

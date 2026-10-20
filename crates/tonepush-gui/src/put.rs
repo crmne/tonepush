@@ -217,7 +217,7 @@ impl App {
         if self.pro_active() {
             self.pro.loaded_slot().map(|slot| slot as i64)
         } else {
-            (self.preset_index >= 0).then_some(self.preset_index)
+            self.loaded_in_view()
         }
     }
 

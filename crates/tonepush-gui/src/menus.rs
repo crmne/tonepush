@@ -1363,11 +1363,13 @@ impl App {
             self.pro.preset_keys(ctx, &self.library_lookup);
             return;
         }
-        if !matches!(self.connection, crate::Connection::Online) || self.preset_index < 0 {
+        if !matches!(self.connection, crate::Connection::Online) {
             return;
         }
+        let Some(slot) = self.loaded_in_view() else {
+            return;
+        };
         use egui::{Key, Modifiers};
-        let slot = self.preset_index;
         let name = self.presets.get(slot as usize).cloned().unwrap_or_default();
         let (copied, pasted) = clipboard_events(ctx);
         let consume = |modifiers: Modifiers, key: Key| {

@@ -421,6 +421,10 @@ pub struct App {
     /// picker, which appears when a device has more than one - an HX Stomp has
     /// a single list, so on that hardware this stays at zero.
     setlist: i64,
+    /// Which setlist holds the loaded preset. While another is shown,
+    /// `preset_index` is not a row of the list; see
+    /// [`loaded_in_view`](Self::loaded_in_view).
+    loaded_setlist: i64,
 
     /// Favorites and other settings that persist across runs.
     config: config::Config,
@@ -1429,6 +1433,7 @@ impl App {
             irs: Vec::new(),
             setlists: Vec::new(),
             setlist: 0,
+            loaded_setlist: 0,
             crash_question: !cfg!(test) && crash_reports::Consent::read(Some(&config)).undecided(),
             config,
             show_favorites_only: false,
@@ -1665,6 +1670,8 @@ impl App {
                     self.presets.clear();
                     self.irs.clear();
                     self.setlists.clear();
+                    self.setlist = 0;
+                    self.loaded_setlist = 0;
                     self.favourites.clear();
                     self.confirm_switch = None;
                     self.working = None;
@@ -1679,8 +1686,8 @@ impl App {
                     // until something else happened to reload. The list is the
                     // authority on names; the title follows it.
                     if let Some(name) = self
-                        .presets
-                        .get(self.preset_index.max(0) as usize)
+                        .loaded_in_view()
+                        .and_then(|index| self.presets.get(index as usize))
                         .filter(|n| !n.is_empty())
                     {
                         self.preset_name = name.clone();
@@ -1831,6 +1838,16 @@ impl App {
                 Ok(Evt::Irs(slots)) => self.irs = slots,
                 Ok(Evt::Favourites(list)) => self.favourites = list,
                 Ok(Evt::Setlists(names)) => self.setlists = names,
+                Ok(Evt::Setlist { showing, loaded }) => {
+                    self.loaded_setlist = loaded;
+                    if showing != self.setlist {
+                        self.setlist = showing;
+                        // The library dots and the slot documents come from
+                        // the backup of the setlist on screen.
+                        self.refresh_mirror();
+                        self.reveal_preset = showing == loaded;
+                    }
+                }
                 Ok(Evt::CapturedSetlist(slots)) => self.keep_setlist(slots, "hxpreset"),
                 Ok(Evt::Switches(switches)) => self.switches = switches,
                 Ok(Evt::Activity(line)) => self.note(line),
@@ -2564,7 +2581,35 @@ impl App {
     fn load_preset(&mut self, index: i64) {
         self.loading = true;
         self.preset_index = index;
+        self.loaded_setlist = self.setlist;
         self.send(Cmd::SelectPreset(index));
+    }
+
+    /// The loaded preset's row, if the list is showing its setlist. Anything
+    /// that acts on "the loaded preset" through a row of the list asks this
+    /// rather than `preset_index`, which on another setlist names somebody
+    /// else's slot.
+    pub(crate) fn loaded_in_view(&self) -> Option<i64> {
+        (self.preset_index >= 0 && self.setlist == self.loaded_setlist).then_some(self.preset_index)
+    }
+
+    /// Rename the loaded preset from the title, in whichever setlist holds
+    /// it: the slot with the same number in a setlist only being browsed is
+    /// somebody else's.
+    fn rename_loaded(&mut self, name: String) {
+        // Browsing another setlist, no list comes back with the new name for
+        // the title.
+        if self.loaded_in_view().is_none() {
+            self.preset_name = name.clone();
+        }
+        self.send(Cmd::RenameLoaded(name));
+    }
+
+    /// Show another of the pedal's setlists. The loaded preset stays loaded.
+    pub(crate) fn show_setlist(&mut self, setlist: i64) {
+        if setlist != self.setlist {
+            self.send(Cmd::SelectSetlist(setlist));
+        }
     }
 
     /// Throw away the edit buffer by asking the pedal to load its stored copy
@@ -2572,6 +2617,15 @@ impl App {
     /// selecting a preset, even when the selected slot does not change.
     fn discard_changes(&mut self) {
         if self.dirty && self.preset_index >= 0 {
+            // The stored copy is in the loaded preset's setlist, which is not
+            // necessarily the one on screen.
+            if self.setlist != self.loaded_setlist {
+                self.send(Cmd::SelectSetlist(self.loaded_setlist));
+                self.setlist = self.loaded_setlist;
+                // Set here, the worker's answer no longer looks like a change
+                // of setlist, so the library dots are rebuilt now.
+                self.refresh_mirror();
+            }
             self.load_preset(self.preset_index);
         }
     }
@@ -2590,11 +2644,12 @@ impl App {
         };
         let visible =
             |index| !self.show_favorites_only || self.config.is_favorite(self.setlist, index);
+        let current = self.loaded_in_view().unwrap_or(-1);
         if direction < 0 {
-            let before = self.preset_index.clamp(0, total);
+            let before = current.clamp(0, total);
             (0..before).rev().find(|index| visible(*index))
         } else {
-            let after = (self.preset_index + 1).max(0);
+            let after = (current + 1).max(0);
             (after..total).find(|index| visible(*index))
         }
     }
@@ -2618,14 +2673,14 @@ impl App {
         if self.hearing() {
             // The loaded preset's own row puts it back; another puts it back
             // first, then asks about its changes, as any switch does.
-            let back = index == self.preset_index && matches!(then, AfterSwitch::Load);
+            let back = self.loaded_in_view() == Some(index) && matches!(then, AfterSwitch::Load);
             self.end_audition();
             self.forget_heard();
             if back {
                 return;
             }
         }
-        if index == self.preset_index && !matches!(then, AfterSwitch::Load) {
+        if self.loaded_in_view() == Some(index) && !matches!(then, AfterSwitch::Load) {
             for cmd in self.commands_for(index, then) {
                 self.send(cmd);
             }
@@ -2699,6 +2754,7 @@ impl App {
         }
         self.loading = true;
         self.preset_index = index;
+        self.loaded_setlist = self.setlist;
         self.send(Cmd::Switch { index, save, then });
     }
 
@@ -2707,7 +2763,7 @@ impl App {
         let Some(index) = self.confirm_switch.as_ref().map(|switch| switch.index) else {
             return;
         };
-        let consequence = if index == self.preset_index {
+        let consequence = if self.loaded_in_view() == Some(index) {
             "Loading it again from the pedal discards them.".to_owned()
         } else {
             let going_to = self
@@ -3332,11 +3388,12 @@ impl App {
     /// bundle holds what was saved, and what a person means by "keep this" is
     /// what they can hear. That case goes the long way, through the device.
     fn slot_document(&self, index: i64) -> Option<(String, Vec<u8>)> {
-        if index == self.preset_index && self.dirty {
+        if self.loaded_in_view() == Some(index) && self.dirty {
             return None;
         }
         let dir = session::automatic_dir()?;
-        let bytes = std::fs::read(hx_usb::backup::slot_files(&dir).get(&(index as usize))?).ok()?;
+        let files = hx_usb::backup::setlist_slot_files(&dir, self.setlist.max(0) as usize);
+        let bytes = std::fs::read(files.get(&(index as usize))?).ok()?;
         let name = self.presets.get(index as usize).cloned()?;
         Some((name, bytes))
     }
@@ -3349,9 +3406,10 @@ impl App {
     fn refresh_mirror(&mut self) {
         self.read_automatic_backup();
         let Some(dir) = session::automatic_dir() else {
+            self.mirror.clear();
             return;
         };
-        self.mirror = hx_usb::backup::slot_files(&dir)
+        self.mirror = hx_usb::backup::setlist_slot_files(&dir, self.setlist.max(0) as usize)
             .into_iter()
             .filter_map(|(slot, path)| {
                 let bytes = std::fs::read(path).ok()?;
@@ -4641,6 +4699,12 @@ impl App {
             "the pedal".to_owned()
         } else {
             format!("the {}", self.device.trim())
+        };
+        // A pedal with several setlists takes it into the one on screen, which
+        // is worth naming before every slot of it is written.
+        let pedal = match self.setlists.get(self.setlist.max(0) as usize) {
+            Some(name) if self.setlists.len() > 1 => format!("{pedal}'s setlist {}", name.trim()),
+            _ => pedal,
         };
         let filled = setlist.filled();
         let missing = setlist
@@ -6691,7 +6755,7 @@ impl App {
             layout,
             skipped: tone.skipped,
             load: LoadKind::Steps(blocks),
-            dest: self.preset_index.max(0),
+            dest: self.loaded_in_view().unwrap_or(0),
             source: ("hlx".to_owned(), bytes),
         });
     }
@@ -6722,7 +6786,7 @@ impl App {
             layout: preset.layout(),
             skipped: tone.skipped,
             load: LoadKind::Document(bytes.clone()),
-            dest: self.preset_index.max(0),
+            dest: self.loaded_in_view().unwrap_or(0),
             source: ("hxpreset".to_owned(), bytes),
         });
     }
@@ -7573,6 +7637,65 @@ mod tests {
             Some("HX Stomp"),
             "a reconnect is a new pedal-selection event"
         );
+    }
+
+    /// While another setlist is shown, the loaded preset's index names
+    /// somebody else's slot there: it is not selected, and nothing that acts
+    /// on "the loaded preset" reaches it through the list.
+    #[test]
+    fn the_loaded_preset_is_only_a_row_of_its_own_setlist() {
+        let (mut app, events, cmds) = app();
+        app.connection = Connection::Online;
+        app.setlists = vec!["Variax".into(), "Setlist".into(), "USER 2".into()];
+        app.presets = (0..8).map(|i| format!("Preset {i}")).collect();
+        app.preset_index = 5;
+        assert_eq!(app.loaded_in_view(), Some(5));
+        let _ = cmds.try_iter().count();
+
+        app.show_setlist(2);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::SelectSetlist(2))));
+        events
+            .send(Evt::Setlist {
+                showing: 2,
+                loaded: 0,
+            })
+            .unwrap();
+        app.drain_events();
+        assert_eq!(app.setlist, 2);
+        assert_eq!(app.loaded_in_view(), None);
+        assert!(app.hx_rows().iter().all(|row| !row.selected));
+
+        // The browsed setlist's names do not rename the loaded preset in the
+        // title, whatever its slot holds there.
+        app.preset_name = "Preset 5".into();
+        events
+            .send(Evt::Presets(
+                (0..8).map(|i| format!("Browsed {i}")).collect(),
+            ))
+            .unwrap();
+        app.drain_events();
+        assert_eq!(app.preset_name, "Preset 5");
+
+        // Renaming from the title names the loaded preset, not the browsed
+        // slot with its number, and the title shows the new name at once.
+        let _ = cmds.try_iter().count();
+        app.rename_loaded("Kept".into());
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::RenameLoaded(name)) if name == "Kept"));
+        assert_eq!(app.preset_name, "Kept");
+
+        // Discarding changes reloads the loaded preset from its own setlist,
+        // and the library dots follow it there at once.
+        app.dirty = true;
+        app.mirror.insert(5, "browsed".into());
+        app.discard_changes();
+        assert_ne!(
+            app.mirror.get(&5).map(String::as_str),
+            Some("browsed"),
+            "the mirror is the loaded setlist's"
+        );
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::SelectSetlist(0))));
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::SelectPreset(5))));
+        assert_eq!(app.loaded_in_view(), Some(5));
     }
 
     /// A dropped session must not leave the last preset on screen, or the UI

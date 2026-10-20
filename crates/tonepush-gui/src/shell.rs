@@ -1582,7 +1582,7 @@ impl App {
             })
             .map(|index| {
                 let name = self.presets.get(index).cloned().unwrap_or_default();
-                let selected = index as i64 == self.preset_index;
+                let selected = self.loaded_in_view() == Some(index as i64);
                 PresetRow {
                     index,
                     slot: self.active_slot_label(index as i64),
@@ -1869,6 +1869,7 @@ impl App {
                 format!("{kept} of the pedal's {total} presets are in your library"),
             )
         };
+        self.setlist_picker(ui, live);
         let asked = presets_header(ui, &aside, &hint, self.show_favorites_only, live);
         if asked.favourites {
             self.show_favorites_only = !self.show_favorites_only;
@@ -1881,6 +1882,57 @@ impl App {
         }
         self.presets_rect = Some(ui.available_rect_before_wrap());
         self.hx_preset_list(ui);
+    }
+
+    /// Which of the pedal's setlists the list shows. Only a device with more
+    /// than one gets it: an HX Stomp's single list needs no choosing.
+    fn setlist_picker(&mut self, ui: &mut Ui, live: bool) {
+        if self.setlists.len() < 2 {
+            return;
+        }
+        let label = |index: usize, name: &str| {
+            let name = if name.trim().is_empty() {
+                format!("Setlist {}", index + 1)
+            } else {
+                name.trim().to_owned()
+            };
+            if index as i64 == self.loaded_setlist && self.preset_index >= 0 {
+                format!("{name}  (loaded)")
+            } else {
+                name
+            }
+        };
+        let labels: Vec<String> = self
+            .setlists
+            .iter()
+            .enumerate()
+            .map(|(index, name)| label(index, name))
+            .collect();
+        let mut chosen = self.setlist;
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.add_enabled_ui(live, |ui| {
+                egui::ComboBox::from_id_salt("hx-setlist")
+                    .width((ui.available_width() - 10.0).max(80.0))
+                    .selected_text(
+                        labels
+                            .get(self.setlist.max(0) as usize)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (index, label) in labels.iter().enumerate() {
+                            ui.selectable_value(&mut chosen, index as i64, label);
+                        }
+                    })
+                    .response
+                    .on_hover_text("Which setlist the list shows. The loaded preset stays loaded.");
+            });
+        });
+        if chosen != self.setlist {
+            self.show_setlist(chosen);
+        }
     }
 
     fn hx_preset_list(&mut self, ui: &mut Ui) {
@@ -2072,7 +2124,7 @@ impl App {
             if back {
                 self.go_to(Page::Edit);
             }
-            if !(back && index == self.preset_index) {
+            if !(back && self.loaded_in_view() == Some(index)) {
                 // Selecting a preset throws away whatever is in the edit
                 // buffer. That is the device's rule, not ours, and it costs a
                 // person their unsaved work in silence, so it asks first.
@@ -2408,10 +2460,7 @@ impl App {
                                 true,
                                 "",
                             ) {
-                                self.send(Cmd::Rename {
-                                    index: self.preset_index,
-                                    name,
-                                });
+                                self.rename_loaded(name);
                             }
                         } else {
                             let title =
@@ -2496,7 +2545,7 @@ impl App {
                 .map(|entry| format!(" as v{}", entry.version))
                 .unwrap_or_default()
         };
-        match self.slot_sync(self.preset_index) {
+        match self.slot_sync(self.loaded_in_view()?) {
             theme::Sync::Same => Some(State::Note(format!(
                 "In your library{}",
                 version(&self.preset_name)

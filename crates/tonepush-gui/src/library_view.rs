@@ -935,10 +935,7 @@ impl App {
                 entry.pro && entry.name.trim().eq_ignore_ascii_case(name.trim())
             });
         }
-        if self.preset_index < 0 {
-            return None;
-        }
-        let held = self.mirror.get(&self.preset_index);
+        let held = self.mirror.get(&self.loaded_in_view()?);
         held.and_then(|hash| {
             self.lib_entries
                 .iter()
@@ -1007,7 +1004,7 @@ impl App {
         let loaded_slot = if self.pro_active() {
             self.pro.loaded_slot().map(|slot| slot as i64)
         } else {
-            (self.preset_index >= 0).then_some(self.preset_index)
+            self.loaded_in_view()
         };
         // The pedal.
         let sending = self.sending.as_ref().is_some_and(|s| s.holds(&entry.hash));
@@ -1312,8 +1309,11 @@ impl App {
         }
         let Some(i) = self.lib_selected.filter(|i| *i < self.lib_entries.len()) else {
             // The loaded preset, not kept yet: the one thing to do with it.
-            if self.pedal_online() && !self.pro_active() && self.preset_index >= 0 {
-                let slot = self.active_slot_label(self.preset_index);
+            if let Some(index) = self
+                .loaded_in_view()
+                .filter(|_| self.pedal_online() && !self.pro_active())
+            {
+                let slot = self.active_slot_label(index);
                 let name = self.preset_name.clone();
                 ui.spacing_mut().item_spacing.y = 4.0;
                 let title =
@@ -1331,7 +1331,7 @@ impl App {
                     &[(&words, Words::Soft)],
                     Some("Keep in library"),
                 ) {
-                    self.row_action(self.preset_index, crate::RowAction::Keep);
+                    self.row_action(index, crate::RowAction::Keep);
                 }
                 return;
             }
