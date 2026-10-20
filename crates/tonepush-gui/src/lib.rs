@@ -5924,6 +5924,7 @@ impl App {
         use hx_proto::preset::Target;
         let index = match target {
             Target::Bypass => return "On/Off".to_owned(),
+            Target::Mic => return "Mic".to_owned(),
             Target::Param(index) => index,
         };
         self.chain
@@ -6047,6 +6048,7 @@ impl App {
                         cc,
                     }),
                     Target::Param(param) => self.edit(Cmd::SetAssignCc { block, param, cc }),
+                    Target::Mic => self.note(MIC_ON_THE_PEDAL.to_owned()),
                 }
                 return;
             }
@@ -6057,6 +6059,9 @@ impl App {
                 param,
                 source,
             }),
+            // How the request names one of a model's own settings has not
+            // been seen, so a Mic assignment is shown but not touched.
+            Target::Mic => self.note(MIC_ON_THE_PEDAL.to_owned()),
             Target::Bypass => match source {
                 Some(Source::Footswitch(switch)) => self.edit(Cmd::AssignBypassFootswitch {
                     block,
@@ -7347,6 +7352,10 @@ enum SwitchChange {
 /// What the pedal picks for itself when a MIDI assignment is made, and so what
 /// the field shows before anybody chooses.
 const DEFAULT_CC: i64 = 4;
+
+/// What the editor says when asked to change a cab's Mic assignment, which it
+/// shows but cannot yet write.
+const MIC_ON_THE_PEDAL: &str = "a cab's Mic assignment can be changed on the pedal, not here yet";
 
 /// What the bypass control shows, beyond the menu every control shares.
 struct BypassView {

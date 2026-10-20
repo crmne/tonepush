@@ -54,6 +54,9 @@ pub enum Target {
     Bypass,
     /// One of its parameters, by index.
     Param(i64),
+    /// A cab's microphone: one of the model's own settings (HX Edit's `@mic`)
+    /// rather than one of its parameters, so it has no index among them.
+    Mic,
 }
 
 /// Where each part of the signal path lives in the slot array.
@@ -362,6 +365,12 @@ mod key {
     /// was drawn as owning the Drive knob. Confirmed by dumping key 4 of a
     /// preset whose only assignment is on parameter 1: `6: {28: 0, 29: 1}`.
     pub const ASSIGNED_PARAM: i64 = 29;
+    /// Inside the target, set when the index names one of the model's own
+    /// settings (HX Edit's `@` names) instead of a parameter. **[confirmed]**
+    /// A cab's Mic assigned on a Helix Floor is `{28: 0, 29: 0, 41: true}`,
+    /// travel 0 to 15 as `@mic` has, while `{28: 0, 29: 0, 41: false}` is the
+    /// same cab's Distance. Reading the index alone put the Mic on Distance.
+    pub const ASSIGNED_SETTING: i64 = 41;
 
     /// Snapshots and footswitch assignments.
     pub const SNAPSHOT_SECTION: i64 = 10;
@@ -789,15 +798,24 @@ impl Preset {
                 let target = if what.get(key::ASSIGNED_BYPASS).is_some() {
                     Target::Bypass
                 } else {
-                    match what
-                        .get(key::ASSIGNED_TARGET)
-                        .and_then(|t| t.get(key::ASSIGNED_PARAM))
-                        .and_then(Value::as_i64)
-                    {
-                        Some(param) => Target::Param(param),
+                    let pointed = what.get(key::ASSIGNED_TARGET);
+                    let setting = matches!(
+                        pointed.and_then(|t| t.get(key::ASSIGNED_SETTING)),
+                        Some(Value::Bool(true))
+                    );
+                    match (
+                        pointed
+                            .and_then(|t| t.get(key::ASSIGNED_PARAM))
+                            .and_then(Value::as_i64),
+                        setting,
+                    ) {
+                        (Some(param), false) => Target::Param(param),
+                        // The first of a model's own settings: a cab's Mic,
+                        // the only one seen under a controller.
+                        (Some(0), true) => Target::Mic,
                         // Pointing at nothing we can name. Better left out
-                        // than shown as parameter zero.
-                        None => continue,
+                        // than shown as some parameter it is not.
+                        _ => continue,
                     }
                 };
                 // Under MIDI, key 1 is the CC number - for a parameter as much
@@ -2921,6 +2939,47 @@ mod tests {
     #[test]
     fn rejects_a_blob_that_is_not_a_preset() {
         assert!(Preset::parse(b"\xa3abc").is_none());
+    }
+
+    /// A cab's Mic assigned on a Helix Floor points at index 0 with the
+    /// setting flag up; Distance is index 0 without it. Read by index alone,
+    /// the Mic's assignment showed up on Distance.
+    #[test]
+    fn a_model_setting_under_a_controller_is_not_read_as_a_parameter() {
+        let document = |target: Value| {
+            let mut preset = Preset::parse(&sample()).unwrap();
+            let entry = crate::msgmap! {
+                0 => Value::Int(0),
+                key::ASSIGNED_WHAT => crate::msgmap! {
+                    key::ASSIGNED_KIND => Value::Int(0),
+                    key::ASSIGNED_MIN => Value::Int(0),
+                    key::ASSIGNED_MAX => Value::Int(15),
+                    key::ASSIGNED_ON => Value::Int(4),
+                    key::ASSIGNED_TARGET => target,
+                },
+            };
+            *preset.tone.get_mut(key::ASSIGNMENTS).unwrap() =
+                Value::Array(vec![Value::Nil, Value::Array(vec![entry])]);
+            Preset::parse(&preset.encode()).expect("parses")
+        };
+        let target = |param: i64, setting: bool| {
+            crate::msgmap! {
+                28 => Value::Int(0),
+                key::ASSIGNED_PARAM => Value::Int(param),
+                key::ASSIGNED_SETTING => Value::Bool(setting),
+            }
+        };
+
+        let mic = document(target(0, true)).assignments();
+        assert_eq!(mic.len(), 1);
+        assert_eq!(mic[0].target, Target::Mic);
+
+        let distance = document(target(0, false)).assignments();
+        assert_eq!(distance[0].target, Target::Param(0));
+
+        // A setting other than the Mic has never been seen; it is left out
+        // rather than shown as a parameter it is not.
+        assert!(document(target(2, true)).assignments().is_empty());
     }
 
     #[test]

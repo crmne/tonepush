@@ -35,6 +35,10 @@ impl Lens {
     }
 }
 
+/// Why a Mic assignment cannot be taken off here: the editor reads it but does
+/// not know how to send a change to it yet.
+const MIC_HINT: &str = "a cab's Mic is changed on the pedal";
+
 /// What a tag says for a source, as the pedal prints it.
 pub(crate) fn source_tag(source: Source) -> String {
     match source {
@@ -2010,7 +2014,17 @@ impl App {
                         open = Some(row.source);
                     }
                     theme::menu_separator(ui);
-                    if theme::menu_danger(ui, Icon::Close, "Take the control off").clicked() {
+                    // A Mic assignment is shown, not changed: offering to take
+                    // it off would offer something that cannot happen.
+                    if row.target == Target::Mic {
+                        theme::menu_disabled(
+                            ui,
+                            Some(Icon::Close),
+                            "Take the control off",
+                            Some(MIC_HINT),
+                        );
+                    } else if theme::menu_danger(ui, Icon::Close, "Take the control off").clicked()
+                    {
                         take_off = Some(row.target);
                     }
                 });
@@ -2773,7 +2787,7 @@ impl App {
         } else {
             match a.target {
                 Target::Bypass => "turns on and off".to_owned(),
-                Target::Param(_) => self.target_name(a.block, a.target),
+                Target::Param(_) | Target::Mic => self.target_name(a.block, a.target),
             }
         };
         let mut remove = false;
@@ -2798,8 +2812,10 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 remove = theme::IconButton::new(Icon::Close)
                     .small()
+                    .enabled(a.target != Target::Mic)
                     .show(ui)
                     .on_hover_text("Take this off")
+                    .on_disabled_hover_text(MIC_HINT)
                     .clicked();
             });
         });
