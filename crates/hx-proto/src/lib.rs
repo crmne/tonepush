@@ -68,6 +68,10 @@ pub struct DeviceProfile {
     /// Family and member ids, as reported by a MIDI identity request and stored
     /// in `.hlx` files - HX Stomp is `0x00210006`.
     pub device_id: u32,
+    /// Whether its snapshots light in a colour of their own that TonePush may
+    /// change. Every device's presets carry the field, but only a Helix Floor
+    /// has been seen to show it.
+    pub snapshot_colours: bool,
 }
 
 impl DeviceProfile {
@@ -89,6 +93,7 @@ pub const HX_STOMP: DeviceProfile = DeviceProfile {
     presets_per_bank: 3,
     switches: 5,
     device_id: 0x0021_0006,
+    snapshot_colours: false,
 };
 pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     product_id: 0x4253,
@@ -97,6 +102,7 @@ pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     presets_per_bank: 3,
     switches: 8,
     device_id: 0x0021_000B,
+    snapshot_colours: false,
 };
 pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     product_id: 0x4248,
@@ -105,6 +111,7 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     presets_per_bank: 3,
     switches: 10,
     device_id: 0x0021_0001,
+    snapshot_colours: true,
 };
 pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     product_id: 0x4249,
@@ -113,6 +120,7 @@ pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     presets_per_bank: 3,
     switches: 10,
     device_id: 0x0021_0002,
+    snapshot_colours: false,
 };
 pub const HELIX_LT: DeviceProfile = DeviceProfile {
     product_id: 0x424A,
@@ -121,6 +129,7 @@ pub const HELIX_LT: DeviceProfile = DeviceProfile {
     presets_per_bank: 3,
     switches: 10,
     device_id: 0x0021_0004,
+    snapshot_colours: false,
 };
 pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     product_id: 0x4245,
@@ -129,6 +138,7 @@ pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     presets_per_bank: 4,
     switches: 6,
     device_id: 0x0021_0005,
+    snapshot_colours: false,
 };
 
 /// Every device profile we recognise.

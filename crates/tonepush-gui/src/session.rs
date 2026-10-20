@@ -74,6 +74,12 @@ pub enum Cmd {
         index: usize,
         name: String,
     },
+    /// Give a snapshot a colour: an index into HX Edit's `footswitchLED`
+    /// list, 0 for Auto Color.
+    SetSnapshotColour {
+        index: usize,
+        colour: i64,
+    },
     ListSetlists,
     /// Put a block's bypass under MIDI, or take it back off. No CC number:
     /// the pedal picks one, and no captured message sets it.
@@ -1161,6 +1167,13 @@ impl Worker {
                     self.dirty = true;
                     self.reload();
                 }
+            }
+            Cmd::SetSnapshotColour { index, colour } => {
+                self.edit_document(|p| {
+                    p.set_snapshot_colour(index, colour)
+                        .then_some(())
+                        .ok_or("that snapshot cannot take that colour")
+                });
             }
             Cmd::AssignMidi { block, on, cc } => {
                 self.snapshot();

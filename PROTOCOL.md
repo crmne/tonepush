@@ -858,6 +858,21 @@ Block parameter maps use `{2: n, 3: n, 4: [values]}` groups, and floats carry th
 actual parameter values. Snapshot names (`SNAPSHOT 1`…) and the preset name appear
 as plain strings.
 
+### A snapshot's colour [confirmed on a Helix Floor]
+
+Each snapshot under `tone[10][10]` carries its colour at key `12`: an index
+into HX Edit's `footswitchLED` list, `0` Auto Color, `1` White, `2` Red, `3`
+Dark Orange, `4` Light Orange, `5` Yellow, `6` Green, `7` Turquoise, `8` Blue,
+`9` Violet, `10` Pink, `11` Off. Found on a Helix Floor, firmware 3.80, by
+recolouring snapshots on the pedal and reading the preset back: red to white
+read `2` then `1`, green to blue `6` then `8`, and snapshots left on Auto read
+`0`.
+
+The same edits turned key `14` on, and so did renaming a snapshot on the pedal,
+while snapshots named in HX Edit carry it off. It marks a snapshot changed on
+the device rather than a typed name. HX Stomp presets carry key `12` as well
+(all `0` in the captures), but nobody has seen one light a snapshot in it.
+
 ### Model and parameter numbering [confirmed]
 
 **`Helix.sym`'s array index is the device's model number.** The file ships with

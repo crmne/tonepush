@@ -2649,6 +2649,7 @@ fn hx_stomp(app: &mut App) {
             valid: true,
             named: true,
             enabled,
+            colour: None,
         }
     })
     .collect();

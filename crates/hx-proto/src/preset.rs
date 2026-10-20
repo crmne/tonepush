@@ -374,8 +374,16 @@ mod key {
     pub const SNAPSHOT_SLOTS: i64 = 3;
     /// The snapshot's own tempo.
     pub const SNAPSHOT_TEMPO: i64 = 5;
-    /// Whether the name was typed rather than left as "SNAPSHOT 1".
+    /// A flag the device sets when a snapshot is changed on it. Read as "the
+    /// name was typed" for a long time, but on a Helix Floor (firmware 3.80)
+    /// typed names arrive with it off, and renaming or recolouring a snapshot
+    /// on the pedal turns it on.
     pub const SNAPSHOT_NAMED: i64 = 14;
+    /// The snapshot's colour: an index into HX Edit's `footswitchLED` list, 0
+    /// for Auto Color, 1 White, 2 Red, up to 11 Off. Confirmed on a Helix
+    /// Floor, firmware 3.80, by recolouring snapshots on the pedal and reading
+    /// the preset back.
+    pub const SNAPSHOT_COLOUR: i64 = 12;
 }
 
 /// One snapshot: a remembered set of bypass states, with its own name and tempo.
@@ -388,6 +396,9 @@ pub struct Snapshot {
     pub named: bool,
     /// Whether each slot was on, indexed the same as [`Preset::slots`].
     pub enabled: Vec<Option<bool>>,
+    /// Its colour, as an index into HX Edit's `footswitchLED` list, where the
+    /// document carries one.
+    pub colour: Option<i64>,
 }
 
 impl Preset {
@@ -732,6 +743,38 @@ impl Preset {
         true
     }
 
+    /// Give a snapshot a colour, by its index in HX Edit's `footswitchLED`
+    /// list (0 Auto Color to 11 Off).
+    ///
+    /// Only a snapshot that already carries a colour takes one: the field's
+    /// place in a document without it is unknown. The changed flag (key 14)
+    /// is set as well, as the pedal sets it when a snapshot is recoloured on
+    /// it.
+    pub fn set_snapshot_colour(&mut self, index: usize, colour: i64) -> bool {
+        let Ok(colour) = u64::try_from(colour) else {
+            return false;
+        };
+        if colour > 11 {
+            return false;
+        }
+        let Some(entry) = self.snapshot_entry_mut(index) else {
+            return false;
+        };
+        let Some(slot) = entry.get_mut(key::SNAPSHOT_COLOUR) else {
+            return false;
+        };
+        *slot = match slot {
+            Value::Wide(_, width) => Value::Wide(colour, *width),
+            Value::WideInt(_, width) => Value::WideInt(colour as i64, *width),
+            Value::Int(_) | Value::UInt(_) => Value::UInt(colour),
+            _ => return false,
+        };
+        if let Some(changed) = entry.get_mut(key::SNAPSHOT_NAMED) {
+            *changed = Value::Bool(true);
+        }
+        true
+    }
+
     fn snapshot_entry_mut(&mut self, index: usize) -> Option<&mut Value> {
         match self.tone.at_mut(&[key::SNAPSHOT_SECTION, key::SNAPSHOTS]) {
             Some(Value::Array(entries)) => entries.get_mut(index),
@@ -879,6 +922,7 @@ impl Preset {
                 }),
                 valid: matches!(e.get(key::SNAPSHOT_VALID), Some(Value::Bool(true))),
                 named: matches!(e.get(key::SNAPSHOT_NAMED), Some(Value::Bool(true))),
+                colour: e.get(key::SNAPSHOT_COLOUR).and_then(Value::as_i64),
                 enabled: match e.get(key::SNAPSHOT_SLOTS) {
                     Some(Value::Array(slots)) => slots
                         .iter()
@@ -3084,6 +3128,31 @@ mod tests {
         };
         first.push(Value::Nil);
         assert!(Preset::parse(&document(trailing_state)).is_none());
+    }
+
+    #[test]
+    fn a_snapshot_takes_a_colour_as_the_pedal_writes_it() {
+        // A captured preset: three snapshots on Auto Color, none changed.
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+        assert_eq!(preset.snapshot_details()[1].colour, Some(0));
+        assert!(preset.set_snapshot_colour(1, 8));
+        let parsed = Preset::parse(&preset.encode()).expect("a recoloured preset parses");
+        let snapshots = parsed.snapshot_details();
+        assert_eq!(snapshots[1].colour, Some(8));
+        // The pedal marks a snapshot it recolours; the others are untouched.
+        assert!(snapshots[1].named);
+        assert_eq!(snapshots[0].colour, Some(0));
+        assert!(!snapshots[0].named);
+    }
+
+    #[test]
+    fn a_snapshot_colour_must_be_one_the_pedal_has() {
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+        let before = preset.encode();
+        assert!(!preset.set_snapshot_colour(0, 12));
+        assert!(!preset.set_snapshot_colour(0, -1));
+        assert!(!preset.set_snapshot_colour(99, 1));
+        assert_eq!(preset.encode(), before);
     }
 
     #[test]

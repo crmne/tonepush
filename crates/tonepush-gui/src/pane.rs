@@ -1200,6 +1200,77 @@ fn copy_snapshot_button(
     chosen
 }
 
+/// A colour from HX Edit's `footswitchLED` list as a round swatch: Auto
+/// Color (index 0) as a wheel of every colour, since it takes the colour of
+/// what it lights for, and the rest in their own light.
+fn paint_led(ui: &Ui, centre: Pos2, radius: f32, index: usize, name: &str) {
+    if index == 0 {
+        let wheel = [
+            "Red",
+            "Light Orange",
+            "Yellow",
+            "Green",
+            "Turquoise",
+            "Blue",
+            "Violet",
+            "Pink",
+        ];
+        let step = std::f32::consts::TAU / wheel.len() as f32;
+        for (k, colour) in wheel.iter().enumerate() {
+            theme::paint::arc(
+                ui.painter(),
+                centre,
+                radius / 2.0,
+                k as f32 * step,
+                step,
+                Stroke::new(radius, theme::led(colour).unwrap_or_else(theme::muted)),
+            );
+        }
+    } else {
+        ui.painter()
+            .circle_filled(centre, radius, theme::led_swatch(name));
+    }
+    ui.painter().circle_stroke(
+        centre,
+        radius,
+        Stroke::new(1.0, Color32::from_black_alpha(60)),
+    );
+}
+
+/// Every colour in HX Edit's `footswitchLED` list as a swatch, the chosen
+/// one ringed. Returns another one clicked.
+fn led_swatches(ui: &mut Ui, colours: &[String], chosen: usize) -> Option<usize> {
+    let mut clicked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+        for (index, name) in colours.iter().enumerate() {
+            let on = index == chosen;
+            let (rect, response) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+            let centre = rect.center();
+            paint_led(ui, centre, 11.0, index, name);
+            if on {
+                ui.painter()
+                    .circle_stroke(centre, 13.5, Stroke::new(2.0, theme::text()));
+            }
+            if response.on_hover_text(name).clicked() && !on {
+                clicked = Some(index);
+            }
+        }
+    });
+    clicked
+}
+
+/// What a snapshot's head in the matrix was asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeadAsk {
+    Switch(usize),
+    /// A snapshot and the colour chosen for it.
+    Colour(usize, usize),
+    Rename(usize),
+    /// Copy the first snapshot over the second.
+    CopyTo(usize, usize),
+}
+
 /// A form row's key, in a fixed column.
 fn form_key(ui: &mut Ui, text: &str) {
     let (place, _) = ui.allocate_exact_size(Vec2::new(84.0, 26.0), Sense::hover());
@@ -2673,67 +2744,13 @@ impl App {
         if !colours.is_empty() {
             ui.horizontal_top(|ui| {
                 form_key(ui, "Light");
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                    let chosen = view.colour.unwrap_or(0);
-                    for (index, name) in colours.iter().enumerate() {
-                        let on = index as i64 == chosen;
-                        let (rect, response) =
-                            ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
-                        let centre = rect.center();
-                        if index == 0 {
-                            // Auto Color: every colour, since it takes the
-                            // colour of what it carries.
-                            let wheel = [
-                                "Red",
-                                "Light Orange",
-                                "Yellow",
-                                "Green",
-                                "Turquoise",
-                                "Blue",
-                                "Violet",
-                                "Pink",
-                            ];
-                            let step = std::f32::consts::TAU / wheel.len() as f32;
-                            for (k, colour) in wheel.iter().enumerate() {
-                                theme::paint::arc(
-                                    ui.painter(),
-                                    centre,
-                                    5.5,
-                                    k as f32 * step,
-                                    step,
-                                    Stroke::new(
-                                        11.0,
-                                        theme::led(colour).unwrap_or_else(theme::muted),
-                                    ),
-                                );
-                            }
-                        } else {
-                            ui.painter()
-                                .circle_filled(centre, 11.0, theme::led_swatch(name));
-                        }
-                        ui.painter().circle_stroke(
-                            centre,
-                            11.0,
-                            Stroke::new(1.0, Color32::from_black_alpha(60)),
-                        );
-                        if on {
-                            ui.painter().circle_stroke(
-                                centre,
-                                13.5,
-                                Stroke::new(2.0, theme::text()),
-                            );
-                        }
-                        if response.on_hover_text(name).clicked() && !on {
-                            change = Some(crate::SwitchChange::Set {
-                                switch: n,
-                                edit: session::SwitchEdit::Colour(
-                                    (index > 0).then_some(index as i64),
-                                ),
-                            });
-                        }
-                    }
-                });
+                let chosen = view.colour.unwrap_or(0) as usize;
+                if let Some(index) = led_swatches(ui, &colours, chosen) {
+                    change = Some(crate::SwitchChange::Set {
+                        switch: n,
+                        edit: session::SwitchEdit::Colour((index > 0).then_some(index as i64)),
+                    });
+                }
             });
         }
         ui.horizontal(|ui| {
@@ -3028,13 +3045,31 @@ impl App {
             });
     }
 
+    /// HX Edit's footswitch LED colours, where this device lights its
+    /// snapshots in a colour TonePush may change.
+    fn snapshot_colours(&self) -> Option<Vec<String>> {
+        if self.pro_active() {
+            return None;
+        }
+        hx_proto::PROFILES
+            .iter()
+            .find(|profile| profile.name == self.device.trim())
+            .filter(|profile| profile.snapshot_colours)?;
+        self.catalog
+            .as_ref()?
+            .menu(hx_catalog::FOOTSWITCH_LED)
+            .map(<[String]>::to_vec)
+    }
+
     /// The matrix's head row: the snapshots' names, the one on the pedal
-    /// lit. Returns a snapshot clicked.
-    fn snapshot_head(&self, ui: &mut Ui, column: f32, salt: &str) -> Option<usize> {
+    /// lit. Clicking another snapshot switches to it; clicking the one on the
+    /// pedal opens what can be done to that snapshot.
+    fn snapshot_head(&self, ui: &mut Ui, column: f32, salt: &str) -> Option<HeadAsk> {
         let width = ui.available_width();
         let label_width = width - column * self.snapshots.len() as f32;
         let (head, _) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::hover());
         let mut pick = None;
+        let colours = self.snapshot_colours();
         for (index, name) in self.snapshots.iter().enumerate() {
             let cell = Rect::from_min_size(
                 Pos2::new(
@@ -3050,7 +3085,11 @@ impl App {
                     ui.id().with(("snapshot-head", salt, index)),
                     Sense::click(),
                 )
-                .on_hover_text(format!("Switch to {name}"));
+                .on_hover_text(if on {
+                    format!("{name}: its colour, name and copies")
+                } else {
+                    format!("Switch to {name}")
+                });
             if on {
                 ui.painter()
                     .rect_filled(cell, CornerRadius::ZERO, theme::hover());
@@ -3067,23 +3106,121 @@ impl App {
                 theme::semibold(12.0),
                 if on { theme::muted() } else { theme::faint() },
             );
+            // Its colour first, where the device lights snapshots in one.
+            let led = colours.as_ref().and_then(|colours| {
+                let colour = self.snapshot_details.get(index)?.colour?;
+                let colour = usize::try_from(colour).ok()?;
+                Some((colour, colours.get(colour)?.clone()))
+            });
+            let led_width = if led.is_some() { 14.0 } else { 0.0 };
+            // The one on the pedal has a menu, and says so.
+            let chevron_width = if on { 14.0 } else { 0.0 };
             let label = shell::elided(
                 ui,
                 name.clone(),
                 theme::semibold(12.0),
                 if on { theme::text() } else { theme::muted() },
-                column - 24.0,
+                column - 24.0 - led_width - chevron_width,
             );
             let number_width = number.size().x + 6.0;
-            let total = number_width + label.size().x;
-            let x = cell.center().x - total / 2.0;
+            let total = led_width + number_width + label.size().x + chevron_width;
+            let mut x = cell.center().x - total / 2.0;
+            if let Some((colour, led_name)) = &led {
+                paint_led(
+                    ui,
+                    Pos2::new(x + 4.5, cell.center().y),
+                    4.5,
+                    *colour,
+                    led_name,
+                );
+                x += led_width;
+            }
+            let label_end = x + number_width + label.size().x;
             shell::paint_line(ui, number, x, cell.center().y);
             shell::paint_line(ui, label, x + number_width, cell.center().y);
-            if response.clicked() && !on {
-                pick = Some(index);
+            if on {
+                theme::paint_icon(
+                    ui,
+                    Icon::ChevronDown,
+                    Pos2::new(label_end + 4.0 + 6.0, cell.center().y),
+                    12.0,
+                    theme::muted(),
+                );
+                egui::Popup::menu(&response).gap(4.0).show(|ui| {
+                    pick = self.snapshot_menu(ui, index, name, colours.as_deref(), led);
+                });
+            } else if response.clicked() {
+                pick = Some(HeadAsk::Switch(index));
             }
         }
         pick
+    }
+
+    /// What can be done to one snapshot: its colour, where the device lights
+    /// snapshots in one, its name, and copying it over another.
+    fn snapshot_menu(
+        &self,
+        ui: &mut Ui,
+        index: usize,
+        name: &str,
+        colours: Option<&[String]>,
+        led: Option<(usize, String)>,
+    ) -> Option<HeadAsk> {
+        let mut ask = None;
+        theme::menu_width(ui, 240.0);
+        theme::menu_header(ui, &format!("{} {name}", index + 1), None);
+        if let (Some(colours), Some((colour, _))) = (colours, led) {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.set_width(220.0);
+                    if let Some(chosen) = led_swatches(ui, colours, colour) {
+                        ask = Some(HeadAsk::Colour(index, chosen));
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            theme::menu_separator(ui);
+        }
+        if theme::menu_item(ui, Some(Icon::TextCursorInput), "Rename", None).clicked() {
+            ask = Some(HeadAsk::Rename(index));
+        }
+        let others: Vec<(usize, &String)> = self
+            .snapshots
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .collect();
+        if !others.is_empty() {
+            theme::menu_separator(ui);
+            theme::menu_header(ui, &format!("Copy {name} over"), None);
+            for (other, other_name) in others {
+                if theme::menu_item(ui, None, &format!("{} {other_name}", other + 1), None)
+                    .clicked()
+                {
+                    ask = Some(HeadAsk::CopyTo(index, other));
+                }
+            }
+        }
+        if ask.is_some() {
+            ui.close();
+        }
+        ask
+    }
+
+    /// Do what a snapshot's head asked.
+    fn answer_snapshot_head(&mut self, ask: HeadAsk) {
+        match ask {
+            HeadAsk::Switch(index) => self.switch_snapshot(index),
+            HeadAsk::Colour(index, colour) => self.edit(Cmd::SetSnapshotColour {
+                index,
+                colour: colour as i64,
+            }),
+            HeadAsk::Rename(index) => {
+                self.snapshot_draft = self.snapshots.get(index).map(|name| (index, name.clone()));
+            }
+            HeadAsk::CopyTo(from, to) => self.edit(Cmd::CopySnapshot { from, to }),
+        }
     }
 
     /// The highlight down the column of the snapshot on the pedal.
@@ -3218,8 +3355,8 @@ impl App {
             self.snapshot_value_rows(ui, column, "Values that change");
         }
         ui.add_space(8.0);
-        if let Some(index) = pick {
-            self.switch_snapshot(index);
+        if let Some(ask) = pick {
+            self.answer_snapshot_head(ask);
         }
     }
 
@@ -3334,8 +3471,8 @@ impl App {
         if self.snapshots.is_empty() {
             return;
         }
-        if let Some(index) = self.snapshot_head(ui, column, "values") {
-            self.switch_snapshot(index);
+        if let Some(ask) = self.snapshot_head(ui, column, "values") {
+            self.answer_snapshot_head(ask);
         }
         self.snapshot_value_rows(ui, column, "Values each snapshot sets");
         let width = ui.available_width();
@@ -3814,6 +3951,32 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_helix_floor_offers_snapshot_colours() {
+        let (to_device, _cmds) = std::sync::mpsc::channel();
+        let (_events, from_device) = std::sync::mpsc::channel();
+        let mut app = App::new(&egui::Context::default(), to_device, from_device);
+        if app.catalog.is_none() {
+            eprintln!("SKIPPED: HX Edit is not installed");
+            return;
+        }
+        app.device = "Helix Floor".into();
+        let colours = app.snapshot_colours().expect("a Floor's snapshots light");
+        assert_eq!(colours[0], "Auto Color");
+        assert_eq!(colours[2], "Red");
+        // Their presets carry the field, but nobody has seen it light them.
+        for device in [
+            "HX Stomp",
+            "HX Stomp XL",
+            "HX Effects",
+            "Helix LT",
+            "Helix Rack",
+        ] {
+            app.device = device.into();
+            assert_eq!(app.snapshot_colours(), None, "{device}");
+        }
+    }
 
     #[test]
     fn a_face_never_leaves_one_straggler() {
