@@ -363,6 +363,19 @@ mod key {
     /// preset whose only assignment is on parameter 1: `6: {28: 0, 29: 1}`.
     pub const ASSIGNED_PARAM: i64 = 29;
 
+    /// What the footswitches act on, as an array indexed by the switch's
+    /// ordinal the way [`ASSIGNMENTS`] is. **[confirmed]** on a Helix Floor,
+    /// firmware 3.80: Footswitch 7 driving the Volume Pedal in slot 28 and the
+    /// Gain in slot 1 read `3: {8: [.., 12: [{11: {8: 28, ..}}, {11: {8: 1,
+    /// ..}}], ..]}`.
+    pub const SWITCH_SECTION: i64 = 3;
+    pub const SWITCHES: i64 = 8;
+    /// Inside one of a switch's entries: what it acts on.
+    pub const SWITCHED_WHAT: i64 = 11;
+    /// And inside that, the block, by slot. A switch that acts on no block
+    /// (kind 3 at key 0 inside [`SWITCHED_WHAT`]) has none.
+    pub const SWITCHED_ON: i64 = 8;
+
     /// Snapshots and footswitch assignments.
     pub const SNAPSHOT_SECTION: i64 = 10;
     pub const SNAPSHOTS: i64 = 10;
@@ -517,6 +530,7 @@ impl Preset {
             *target = a_slot;
         }
         self.slots.swap(a, b);
+        self.follow_slots(|order| order.swap(a, b));
         true
     }
 
@@ -527,6 +541,61 @@ impl Preset {
             self.slots.get(position).map(|s| s.kind),
             Some(Kind::Block) | Some(Kind::Empty)
         )
+    }
+
+    /// Point everything that names a block by its slot at where the block
+    /// went, after `rearrange` did to the slot numbers what a move did to the
+    /// slots.
+    ///
+    /// Moving a slot's body moves the block and nothing else. Its controller
+    /// assignments, the footswitches that switch it and each snapshot's
+    /// memory of whether it was on all name it by slot, so they stayed behind
+    /// on whatever came to sit there. Seen on a Helix Floor: a Volume Pedal slid
+    /// from slot 28 to 24 left Expression Pedal 2 on the empty slot 28, and the
+    /// pedal saved that preset with a value missing, so it no longer read.
+    fn follow_slots(&mut self, rearrange: impl FnOnce(&mut [usize])) {
+        let mut order: Vec<usize> = (0..self.slots.len()).collect();
+        rearrange(&mut order);
+        let mut moved_to = vec![0; order.len()];
+        for (new, &old) in order.iter().enumerate() {
+            moved_to[old] = new;
+        }
+        let renumber = |slot: &mut Value| {
+            let Some(old) = slot.as_i64().and_then(|n| usize::try_from(n).ok()) else {
+                return;
+            };
+            let Some(&new) = moved_to.get(old).filter(|new| **new != old) else {
+                return;
+            };
+            *slot = match *slot {
+                Value::Wide(_, width) => Value::Wide(new as u64, width),
+                Value::WideInt(_, width) => Value::WideInt(new as i64, width),
+                _ => Value::UInt(new as u64),
+            };
+        };
+        let by_source = self.tone.get_mut(key::ASSIGNMENTS);
+        for entry in entries_of(by_source) {
+            if let Some(slot) = entry.at_mut(&[key::ASSIGNED_WHAT, key::ASSIGNED_ON]) {
+                renumber(slot);
+            }
+        }
+        let by_switch = self.tone.at_mut(&[key::SWITCH_SECTION, key::SWITCHES]);
+        for entry in entries_of(by_switch) {
+            if let Some(slot) = entry.at_mut(&[key::SWITCHED_WHAT, key::SWITCHED_ON]) {
+                renumber(slot);
+            }
+        }
+        if let Some(Value::Array(snapshots)) =
+            self.tone.at_mut(&[key::SNAPSHOT_SECTION, key::SNAPSHOTS])
+        {
+            for snapshot in snapshots {
+                if let Some(Value::Array(states)) = snapshot.get_mut(key::SNAPSHOT_SLOTS) {
+                    if states.len() == order.len() {
+                        *states = order.iter().map(|old| states[*old].clone()).collect();
+                    }
+                }
+            }
+        }
     }
 
     /// Move a block to another position the way a hand would: within a lane
@@ -562,9 +631,11 @@ impl Preset {
         if from_local < to_local {
             items[from_local..=to_local].rotate_left(1);
             self.slots[from..=to].rotate_left(1);
+            self.follow_slots(|order| order[from..=to].rotate_left(1));
         } else {
             items[to_local..=from_local].rotate_right(1);
             self.slots[to..=from].rotate_right(1);
+            self.follow_slots(|order| order[to..=from].rotate_right(1));
         }
         true
     }
@@ -1264,6 +1335,7 @@ impl Preset {
         // leaves the empty one sitting at `at`.
         items[at_local..=free_local].rotate_right(1);
         self.slots = collect_slots(&self.tone);
+        self.follow_slots(|order| order[at..=free].rotate_right(1));
         true
     }
 
@@ -1379,6 +1451,22 @@ fn flat_slot_position(tone: &Value, dsp: usize, local: usize) -> Option<usize> {
         offset = offset.checked_add(slots.len())?;
     }
     None
+}
+
+/// Every entry of a table indexed by controller or switch ordinal, past the
+/// ordinals that hold nothing.
+fn entries_of(table: Option<&mut Value>) -> impl Iterator<Item = &mut Value> {
+    let ordinals = match table {
+        Some(Value::Array(ordinals)) => ordinals.as_mut_slice(),
+        _ => &mut [],
+    };
+    ordinals
+        .iter_mut()
+        .filter_map(|entries| match entries {
+            Value::Array(entries) => Some(entries.iter_mut()),
+            _ => None,
+        })
+        .flatten()
 }
 
 fn raw_slot_at(tone: &Value, position: usize) -> Option<&Value> {
@@ -2837,6 +2925,135 @@ mod tests {
             before.iter().map(|(_, m)| *m).collect::<Vec<_>>(),
             "sliding lost or reordered a block"
         );
+    }
+
+    /// Put the blocks at `slots` under Expression Pedal 1 and Footswitch 1,
+    /// and off in the first snapshot with every other slot on: everything
+    /// that names a block by its slot.
+    fn mark(preset: &mut Preset, slots: &[usize]) {
+        let assigned = slots
+            .iter()
+            .map(|slot| {
+                crate::msgmap! {
+                    0 => Value::Int(0),
+                    key::ASSIGNED_WHAT => crate::msgmap! {
+                        key::ASSIGNED_KIND => Value::Int(4),
+                        key::ASSIGNED_MIN => Value::F32(0.0),
+                        key::ASSIGNED_MAX => Value::F32(1.0),
+                        key::ASSIGNED_ON => Value::UInt(*slot as u64),
+                        key::ASSIGNED_TARGET => crate::msgmap! {
+                            28 => Value::Int(0),
+                            key::ASSIGNED_PARAM => Value::Int(0),
+                        },
+                    },
+                }
+            })
+            .collect();
+        *preset.tone.get_mut(key::ASSIGNMENTS).unwrap() =
+            Value::Array(vec![Value::Nil, Value::Array(assigned)]);
+        let switched = slots
+            .iter()
+            .map(|slot| {
+                crate::msgmap! {
+                    10 => Value::Int(0),
+                    key::SWITCHED_WHAT => crate::msgmap! {
+                        0 => Value::Int(1),
+                        key::SWITCHED_ON => Value::UInt(*slot as u64),
+                    },
+                }
+            })
+            .collect();
+        *preset
+            .tone
+            .at_mut(&[key::SWITCH_SECTION, key::SWITCHES])
+            .unwrap() = Value::Array(vec![Value::Nil, Value::Array(switched)]);
+        let Some(Value::Array(snapshots)) =
+            preset.tone.at_mut(&[key::SNAPSHOT_SECTION, key::SNAPSHOTS])
+        else {
+            panic!("snapshots");
+        };
+        let Some(Value::Array(states)) = snapshots[0].get_mut(key::SNAPSHOT_SLOTS) else {
+            panic!("snapshot states");
+        };
+        for (slot, state) in states.iter_mut().enumerate() {
+            let on = !slots.contains(&slot);
+            *state = Value::Array(vec![Value::Bool(false), Value::Bool(on)]);
+        }
+    }
+
+    /// Where the marks are now: the slots the assignments, the footswitch and
+    /// the first snapshot's off states name.
+    fn marks(preset: &Preset) -> [Vec<usize>; 3] {
+        let preset = Preset::parse(&preset.encode()).expect("the moved document parses");
+        let named = |section: &[i64], what: i64, on: i64| -> Vec<usize> {
+            let mut tone = preset.tone.clone();
+            let mut slots: Vec<usize> = entries_of(tone.at_mut(section))
+                .filter_map(|entry| entry.get(what)?.get(on)?.as_i64())
+                .map(|slot| slot as usize)
+                .collect();
+            slots.sort_unstable();
+            slots
+        };
+        let off = preset.snapshot_details()[0]
+            .enabled
+            .iter()
+            .enumerate()
+            .filter(|(_, on)| **on == Some(false))
+            .map(|(slot, _)| slot)
+            .collect();
+        [
+            named(&[key::ASSIGNMENTS], key::ASSIGNED_WHAT, key::ASSIGNED_ON),
+            named(
+                &[key::SWITCH_SECTION, key::SWITCHES],
+                key::SWITCHED_WHAT,
+                key::SWITCHED_ON,
+            ),
+            off,
+        ]
+    }
+
+    /// A Volume Pedal under Expression Pedal 2, slid along by an insert on a
+    /// Helix Floor, left the pedal on the empty slot it came from - and the
+    /// pedal saved that preset with a value missing, so it no longer read.
+    #[test]
+    fn a_moved_block_takes_its_controllers_and_snapshot_states_along() {
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+        let (first, _) = preset.blocks().next().unwrap();
+        let bounds = preset.lane_bounds(first).unwrap();
+        let last = bounds.end - 1;
+        mark(&mut preset, &[first]);
+        assert_eq!(marks(&preset), [vec![first], vec![first], vec![first]]);
+
+        assert!(preset.move_slot(first, last));
+        assert_eq!(marks(&preset), [vec![last], vec![last], vec![last]]);
+        assert!(preset.move_slot(last, first), "and back the other way");
+        assert_eq!(marks(&preset), [vec![first], vec![first], vec![first]]);
+    }
+
+    #[test]
+    fn blocks_slid_to_make_room_take_their_controllers_along() {
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+        let (first, _) = preset.blocks().next().unwrap();
+        let bounds = preset.lane_bounds(first).unwrap();
+        mark(&mut preset, &[first]);
+
+        assert!(preset.make_room(first, bounds));
+        let next = first + 1;
+        assert_eq!(marks(&preset), [vec![next], vec![next], vec![next]]);
+    }
+
+    #[test]
+    fn swapped_blocks_trade_their_controllers() {
+        let mut preset = Preset::parse(&dual_dsp_fixture()).unwrap();
+        let (first, _) = preset.blocks().next().unwrap();
+        let (other, _) = preset
+            .blocks()
+            .find(|(slot, _)| preset.slot_address(*slot).unwrap().0 == 1)
+            .expect("a block on the second DSP");
+        mark(&mut preset, &[first]);
+
+        assert!(preset.swap_slots(first, other));
+        assert_eq!(marks(&preset), [vec![other], vec![other], vec![other]]);
     }
 
     /// A full lane has nowhere to slide, and must say so rather than pushing a
