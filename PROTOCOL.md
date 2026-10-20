@@ -141,6 +141,15 @@ untouched, three minutes of `watch`: 195 notifications and then silence before
 (195 ticks of 21 bytes is 4095 bytes), 1095 and still flowing after. The device
 tests do not cover this; `fake::Pedal::events_window` models it.
 
+**Idle channels need keep-alives during long reads. [confirmed]** A Helix Floor
+(3.80) probes a channel that has carried no traffic with keep-alive frames
+(type 0x10) at growing intervals. After four that the host leaves unanswered, it
+stops answering that channel. A whole-pedal backup spends about a minute on the
+data channel alone, so the control channel went quiet and the IR list that
+follows the presets and settings timed out. Sending a keep-alive at most once a
+second during the backup's read loops, as the editor's poll loop already does,
+lets it finish: 231 presets in 8 setlists, 169 settings and 7 IRs in 24.5 s.
+
 Two things that look like fixes and are not:
 
 - **Acknowledging the channel a reply just arrived on, before returning.** The
