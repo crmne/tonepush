@@ -1015,6 +1015,26 @@ derived structure:
  B  10 Split Y  ->  13 Line 6 2204 Mod  ->  19 Mixer
 ```
 
+### A block is named by its slot outside the slot array too [confirmed]
+
+Three other places name a block by its flattened slot number, counted across
+both paths:
+
+- a controller assignment, at key 5 inside key 1 of its entry in the table at
+  top-level key 4;
+- a footswitch, at key 8 inside key 11 of its entry in the table at top-level
+  key 3, key 8, indexed by switch ordinal like key 4. Entries whose key 11 has
+  kind 1 or 2 at key 0 carry it; kind 3 entries name no block;
+- each snapshot's per-slot states at key 3, one entry per slot.
+
+Moving a block in the document therefore means moving these with it. Seen on a
+Helix Floor, firmware 3.80: a Volume Pedal slid from slot 28 to 24 by a document
+write left Expression Pedal 2 and a footswitch on the empty slot 28. The pedal
+accepted the write and saved the preset. It dropped the footswitch entry, and
+it wrote the first snapshot's value for that assignment as an array header
+promising three values with only two after it, so the saved preset no longer
+decodes.
+
 ### A `.hlx` numbers cells along a row, not slots [confirmed]
 
 HX Edit records where a block sits as two fields: `@path`, the branch, and
