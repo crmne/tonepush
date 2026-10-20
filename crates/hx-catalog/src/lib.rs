@@ -25,8 +25,8 @@ mod write;
 pub use build::{documents_from_backup, empty_the_chain, resolve, slots_from_hlx, Built};
 pub use format::Display;
 pub use hxb::{
-    read_backup, read_favourite_file, read_setlist_file, write_backup, Backup, BackupPreset, Block,
-    Container, Favourite, NewBackup,
+    read_backup, read_backup_setlists, read_favourite_file, read_setlist_file, write_backup,
+    Backup, BackupPreset, BackupSetlist, Block, Container, Favourite, NewBackup,
 };
 pub use inspect::{inspect, ChainContent, OutputTarget, Tone, ToneBlock};
 pub use write::{to_hlx, to_hlx_for_device, Written};

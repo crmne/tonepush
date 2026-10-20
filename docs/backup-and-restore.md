@@ -75,6 +75,10 @@ and says so.
 Blocks: `IDXH` (device id + Unix timestamp - the field that looked like a
 checksum), `GLOB` (globals JSON), `SDMU`, `MNLS` (the name `PRESETS`), `SL00`
 (setlist: `data.presets[]`, all 126 as `{meta,device,tone,device_version}`).
+A Helix Floor bundle holds eight setlists, `SL00` to `SL07` with 128 slots
+each, named in order by `MNLS`; tags are stored byte-reversed (`10LS` is
+setlist 1). `hx_catalog::read_backup_setlists` reads them all, and
+`tonepush extract-backup` writes one directory per setlist that holds presets.
 Compressed blocks are one zlib stream (flags==1); integrity is zlib's adler32,
 so there is **no container checksum**. Implemented in `hx-catalog/src/hxb.rs`.
 

@@ -102,7 +102,8 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     product_id: 0x4248,
     name: "Helix Floor",
     presets: 128,
-    presets_per_bank: 3,
+    // 32 banks of A to D, confirmed on a Floor: its fourth preset is 01D.
+    presets_per_bank: 4,
     switches: 10,
     device_id: 0x0021_0001,
 };
@@ -174,5 +175,14 @@ mod tests {
         assert_eq!(HX_EFFECTS.slot_label(104), "27A");
         assert_eq!(HX_EFFECTS.parse_slot("27A"), Some(104));
         assert_eq!(HX_EFFECTS.parse_slot("01D"), Some(3));
+    }
+
+    #[test]
+    fn helix_floor_uses_four_presets_per_bank() {
+        assert_eq!(HELIX_FLOOR.slot_label(3), "01D");
+        assert_eq!(HELIX_FLOOR.slot_label(4), "02A");
+        assert_eq!(HELIX_FLOOR.slot_label(127), "32D");
+        assert_eq!(HELIX_FLOOR.parse_slot("01D"), Some(3));
+        assert_eq!(HELIX_FLOOR.parse_slot("32D"), Some(127));
     }
 }

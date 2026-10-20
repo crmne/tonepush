@@ -16,7 +16,10 @@
 //! Blocks are tagged: `IDXH` (an index carrying the device id and the backup's
 //! Unix timestamp), `GLOB` (global settings as JSON), and the setlist payload
 //! `SL00` (schema `L6Setlist`, its `data.presets` array holding all 126 slots in
-//! front-panel order). Compressed blocks (flags == 1) are a single zlib stream;
+//! front-panel order). A Helix Floor backup carries eight setlists instead,
+//! `SL00` to `SL07`, each holding 128 slots, with their names in order in an
+//! `MNLS` block. Its setlist tags are stored byte-reversed, `10LS` for `SL01`,
+//! so the setlist number reads back to front. Compressed blocks (flags == 1) are a single zlib stream;
 //! block integrity rides on zlib's own adler32, so the container carries no
 //! checksum of its own - the field that looked like one is the timestamp.
 //!
@@ -79,7 +82,35 @@ impl Backup {
 }
 
 /// Read an `.hxb` bundle into its presets, touching no hardware.
+///
+/// For a bundle holding one setlist, as an HX Stomp's does. A bundle with
+/// several is refused rather than guessed at; read it with
+/// [`read_backup_setlists`].
 pub fn read_backup(bytes: &[u8]) -> Result<Backup, Error> {
+    let mut setlists = read_backup_setlists(bytes)?;
+    if setlists.len() > 1 {
+        return Err(Error::Backup(format!(
+            "more than one setlist found in this .hxb ({} of them)",
+            setlists.len()
+        )));
+    }
+    Ok(setlists.remove(0).backup)
+}
+
+/// One setlist of a backup, with where it sits on the device.
+pub struct BackupSetlist {
+    /// Zero-based setlist number, from the block's tag.
+    pub index: usize,
+    pub backup: Backup,
+}
+
+/// Read every setlist in an `.hxb` bundle, in device order, touching no
+/// hardware.
+///
+/// An HX Stomp's bundle holds one setlist; a Helix Floor's holds eight. The
+/// same setlist appearing twice is refused, since there is no telling which
+/// copy is meant.
+pub fn read_backup_setlists(bytes: &[u8]) -> Result<Vec<BackupSetlist>, Error> {
     let container = Container::parse(bytes)?;
     if container.version != 1 {
         return Err(Error::Backup(format!(
@@ -87,28 +118,44 @@ pub fn read_backup(bytes: &[u8]) -> Result<Backup, Error> {
             container.version
         )));
     }
-    let mut setlists = container
-        .blocks
-        .iter()
-        .filter(|block| is_setlist_tag(&block.tag));
-    let block = setlists
-        .next()
-        .ok_or_else(|| Error::Backup("no setlist block found in this .hxb".into()))?;
-    if setlists.next().is_some() {
-        return Err(Error::Backup(
-            "more than one setlist block found in this .hxb".into(),
-        ));
+    let mut setlists: Vec<BackupSetlist> = Vec::new();
+    for block in &container.blocks {
+        let Some(index) = setlist_index(&block.tag) else {
+            continue;
+        };
+        if setlists.iter().any(|setlist| setlist.index == index) {
+            return Err(Error::Backup(format!(
+                "setlist {index} appears more than once in this .hxb"
+            )));
+        }
+        let raw = block.decompress()?;
+        let setlist: Value = serde_json::from_slice(&raw)
+            .map_err(|error| Error::Backup(format!("the backup's setlist is not JSON: {error}")))?;
+        setlists.push(BackupSetlist {
+            index,
+            backup: presets_from(&setlist)?,
+        });
     }
-    let raw = block.decompress()?;
-    let setlist: Value = serde_json::from_slice(&raw)
-        .map_err(|error| Error::Backup(format!("the backup's setlist is not JSON: {error}")))?;
-
-    presets_from(&setlist)
+    if setlists.is_empty() {
+        return Err(Error::Backup("no setlist block found in this .hxb".into()));
+    }
+    setlists.sort_by_key(|setlist| setlist.index);
+    Ok(setlists)
 }
 
-fn is_setlist_tag(tag: &[u8; 4]) -> bool {
-    (tag[0..2] == *b"SL" && tag[2..].iter().all(u8::is_ascii_digit))
-        || (tag[2..] == *b"LS" && tag[..2].iter().all(u8::is_ascii_digit))
+/// The setlist number a block's tag names, or `None` if it is not a setlist.
+/// Tags are stored byte-reversed on disk, so `10LS` is `SL01`.
+fn setlist_index(tag: &[u8; 4]) -> Option<usize> {
+    let digits = if tag[..2] == *b"SL" {
+        [tag[2], tag[3]]
+    } else if tag[2..] == *b"LS" {
+        [tag[1], tag[0]]
+    } else {
+        return None;
+    };
+    digits.iter().try_fold(0, |n, d| {
+        d.is_ascii_digit().then(|| n * 10 + usize::from(d - b'0'))
+    })
 }
 
 /// Lift the presets out of a `{data: {meta, presets}}` document, which is what a
@@ -534,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_duplicate_setlist_blocks_are_rejected() {
+    fn a_bundle_with_several_setlists_is_not_read_as_one() {
         let setlist = json!({ "data": { "presets": [] } });
         let (stored, raw_len) = deflate(&setlist);
         let duplicate = Container {
@@ -556,6 +603,92 @@ mod tests {
             .expect("duplicate setlist")
             .to_string();
         assert!(error.contains("more than one setlist"), "{error}");
+    }
+
+    /// A container of setlist blocks, each tagged and holding its own name.
+    fn setlists(blocks: &[([u8; 4], &str)]) -> Vec<u8> {
+        Container {
+            version: 1,
+            blocks: blocks
+                .iter()
+                .map(|(tag, name)| {
+                    let (stored, raw_len) = deflate(&json!({
+                        "data": {
+                            "meta": { "name": name },
+                            "presets": [
+                                { "device": 0x0021_0001, "meta": { "name": "Lead" }, "tone": {} },
+                            ]
+                        }
+                    }));
+                    Block {
+                        tag: *tag,
+                        compressed: true,
+                        raw_len,
+                        stored,
+                    }
+                })
+                .collect(),
+        }
+        .encode()
+    }
+
+    /// A Helix Floor bundle holds eight setlists, tagged byte-reversed, so
+    /// `10LS` is setlist 1 and `01LS` would be setlist 10.
+    #[test]
+    fn every_setlist_of_a_multi_setlist_bundle_is_read_in_device_order() {
+        let bytes = setlists(&[
+            (*b"20LS", "Setlist"),
+            (*b"00LS", "Variax"),
+            (*b"10LS", "Vroudenspil Alt"),
+        ]);
+        let read = read_backup_setlists(&bytes).expect("reads every setlist");
+        let seen: Vec<_> = read
+            .iter()
+            .map(|s| (s.index, s.backup.name.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [(0, "Variax"), (1, "Vroudenspil Alt"), (2, "Setlist")]
+        );
+        assert_eq!(read[1].backup.occupied().count(), 1);
+
+        let error = read_backup(&bytes)
+            .err()
+            .expect("several setlists")
+            .to_string();
+        assert!(error.contains("more than one setlist"), "{error}");
+    }
+
+    #[test]
+    fn a_single_setlist_bundle_reads_the_same_either_way() {
+        let bytes = setlists(&[(*b"00LS", "PRESETS")]);
+        let read = read_backup_setlists(&bytes).expect("reads");
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].index, 0);
+        assert_eq!(read_backup(&bytes).expect("reads").name, "PRESETS");
+    }
+
+    #[test]
+    fn the_same_setlist_twice_is_rejected() {
+        let bytes = setlists(&[(*b"SL01", "A"), (*b"10LS", "B")]);
+        let error = read_backup_setlists(&bytes)
+            .err()
+            .expect("setlist 1 twice")
+            .to_string();
+        assert!(
+            error.contains("setlist 1 appears more than once"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn tags_that_only_look_like_setlists_are_ignored() {
+        assert_eq!(setlist_index(b"SL07"), Some(7));
+        assert_eq!(setlist_index(b"70LS"), Some(7));
+        assert_eq!(setlist_index(b"01LS"), Some(10));
+        assert_eq!(setlist_index(b"MNLS"), None);
+        assert_eq!(setlist_index(b"SLNM"), None);
+        assert_eq!(setlist_index(b"0xLS"), None);
     }
 
     #[test]

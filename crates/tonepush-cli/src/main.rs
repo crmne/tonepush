@@ -347,7 +347,9 @@ enum Cmd {
     /// touching no hardware.
     ///
     /// Writes one `NNL Name.hlx` per occupied slot; empty and never-edited
-    /// slots are skipped. The bundle is never modified.
+    /// slots are skipped. A bundle with several setlists, as a Helix Floor's
+    /// has, gets one `N Name` directory per setlist that holds any. The bundle
+    /// is never modified.
     ExtractBackup {
         file: std::path::PathBuf,
         /// Directory to write the .hlx files into; created if missing.
@@ -1781,21 +1783,44 @@ fn bundle_to_presets(
 
 fn extract_backup(file: &std::path::Path, output: &std::path::Path) -> Result<()> {
     let bytes = std::fs::read(file).with_context(|| format!("reading {file:?}"))?;
-    let backup =
-        hx_catalog::read_backup(&bytes).with_context(|| format!("reading the backup {file:?}"))?;
+    let setlists = hx_catalog::read_backup_setlists(&bytes)
+        .with_context(|| format!("reading the backup {file:?}"))?;
     std::fs::create_dir_all(output).with_context(|| format!("creating {output:?}"))?;
 
+    // One setlist goes straight into the output, as it always has; several
+    // each get a directory, numbered as the pedal numbers them.
+    let nested = setlists.len() > 1;
     let mut kept = 0;
-    for preset in backup.occupied() {
-        let name = format!("{} {}", preset.label(), sanitise(&preset.name));
-        let path = output.join(format!("{name}.hlx"));
-        write_file(&path, preset.to_hlx_string()).with_context(|| format!("writing {path:?}"))?;
-        println!("  {}  {}", preset.label(), preset.name);
-        kept += 1;
+    for setlist in &setlists {
+        let backup = &setlist.backup;
+        if nested && backup.occupied().next().is_none() {
+            continue;
+        }
+        let directory = if nested {
+            let directory =
+                output.join(format!("{} {}", setlist.index + 1, sanitise(&backup.name)));
+            std::fs::create_dir_all(&directory)
+                .with_context(|| format!("creating {directory:?}"))?;
+            println!("{}", backup.name);
+            directory
+        } else {
+            output.to_path_buf()
+        };
+        for preset in backup.occupied() {
+            let name = format!("{} {}", preset.label(), sanitise(&preset.name));
+            let path = directory.join(format!("{name}.hlx"));
+            write_file(&path, preset.to_hlx_string())
+                .with_context(|| format!("writing {path:?}"))?;
+            println!("  {}  {}", preset.label(), preset.name);
+            kept += 1;
+        }
     }
+    let from = match setlists.as_slice() {
+        [only] => format!("\"{}\"", only.backup.name),
+        all => format!("{} setlists", all.len()),
+    };
     println!(
-        "\nextracted {kept} presets from \"{}\" into {}",
-        backup.name,
+        "\nextracted {kept} presets from {from} into {}",
         output.display()
     );
     Ok(())
