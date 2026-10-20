@@ -747,9 +747,29 @@ pub(crate) fn sidebar_foot(ui: &mut Ui, foot: &Foot, update: Option<&str>) -> Fo
 // Deck pieces
 
 /// The slot chip at the start of a deck: 01B.
+/// How wide a slot chip is around a label this wide.
+fn slot_chip_width(label: f32) -> f32 {
+    (label + 14.0).max(38.0)
+}
+
+/// Whether the deck can spell out every snapshot's name and still leave the
+/// preset's name 320 points. Everything left of the title comes off first:
+/// the margin, the sidebar's button when the sidebar is hidden, the slot chip,
+/// and the 14 points that separate each of them and the right-hand group.
+fn snapshot_names_fit(spelled_out: f32, available: f32, chip: f32, sidebar_hidden: bool) -> bool {
+    const TITLE: f32 = 320.0;
+    const GAP: f32 = 14.0;
+    let margin = if sidebar_hidden {
+        12.0 + 28.0 + GAP
+    } else {
+        20.0
+    };
+    spelled_out <= available - (margin + chip + GAP + GAP + TITLE)
+}
+
 pub(crate) fn slot_chip(ui: &mut Ui, slot: &str) -> Response {
     let label = galley(ui, slot, theme::semibold(12.5), theme::text_soft());
-    let size = Vec2::new((label.size().x + 14.0).max(38.0), 24.0);
+    let size = Vec2::new(slot_chip_width(label.size().x), 24.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter().rect(
         rect,
@@ -2527,11 +2547,45 @@ impl App {
         }
         let names = self.snapshots.clone();
         let current = self.current_snapshot;
+        // Every name only when they fit beside the title. A Helix has eight
+        // snapshots, and spelled out they ran over the preset's name.
+        let spelled_out: f32 = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let width = |text: String, font| {
+                    ui.painter()
+                        .layout_no_wrap(text, font, Color32::PLACEHOLDER)
+                        .size()
+                        .x
+                };
+                20.0 + width(name.clone(), theme::medium(12.5))
+                    + width((index + 1).to_string(), theme::semibold(11.5))
+                    + 7.0
+                    + 2.0
+            })
+            .sum();
+        let chip = ui
+            .painter()
+            .layout_no_wrap(
+                self.active_slot_label(self.preset_index),
+                theme::semibold(12.5),
+                Color32::PLACEHOLDER,
+            )
+            .size()
+            .x;
+        let numbers_only = tier == Tier::S
+            || !snapshot_names_fit(
+                spelled_out,
+                ui.available_width(),
+                slot_chip_width(chip),
+                self.sidebar_hidden,
+            );
         let segments: Vec<theme::Segment> = names
             .iter()
             .enumerate()
             .map(|(index, name)| {
-                let label = if tier == Tier::S && index != current {
+                let label = if numbers_only && index != current {
                     ""
                 } else {
                     name.as_str()
@@ -2638,6 +2692,23 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The title keeps its 320 points after the margin, the slot chip and
+    /// the gaps, not only after the snapshots.
+    #[test]
+    fn snapshot_names_leave_the_title_its_room() {
+        let chip = slot_chip_width(26.0);
+        assert_eq!(chip, 40.0);
+        // 20 margin, a 40 chip and two 14 gaps leave 1000 - 408 = 592.
+        assert!(snapshot_names_fit(592.0, 1000.0, chip, false));
+        assert!(
+            !snapshot_names_fit(593.0, 1000.0, chip, false),
+            "one point more would take it from the title"
+        );
+        // The sidebar's button takes its place too once the sidebar is hidden.
+        assert!(!snapshot_names_fit(592.0, 1000.0, chip, true));
+        assert!(snapshot_names_fit(558.0, 1000.0, chip, true));
+    }
 
     #[test]
     fn the_tiers_switch_at_1100_and_1800_points() {
