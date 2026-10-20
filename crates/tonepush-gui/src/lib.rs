@@ -21,6 +21,7 @@ mod connect;
 pub mod crash_reports;
 mod devices;
 mod dnd;
+mod dsp;
 mod eq;
 mod floor;
 pub mod library;

@@ -814,7 +814,8 @@ observed:
 HX Edit's own traffic contains only 0 and 1, which is why the refusals stayed
 unmapped until deliberately bad requests were sent. Codes observed so far: `-3`
 a bad block or parameter reference, `-46` an out-of-range snapshot, `-302` an
-unknown model number. Two sharp edges: **accepted is not validated** - selecting
+unknown model number, `-306` no DSP left on the path for that block (see
+"What fits on a path" below). Two sharp edges: **accepted is not validated** - selecting
 preset 999 on a 126-preset device answers 1 and simply does nothing - and a
 no-op is not an error: clearing an already-empty IR slot answers 0.
 
@@ -1014,6 +1015,36 @@ derived structure:
  A   0 Input [Multi (Guitar, Aux, Variax)]  ->   1 Cali Q Graphic  ->  …  ->   9 Output [Multi (1/4", XLR, …)]
  B  10 Split Y  ->  13 Line 6 2204 Mod  ->  19 Mixer
 ```
+
+### What fits on a path [confirmed on a Helix Floor]
+
+Each path is one DSP, with a fixed budget in the units HX Edit's `.models`
+files list as `load`. Placing a block past it is refused with `-306`, and those
+are the models the pedal greys out on its own screen. Measured on a Helix
+Floor at firmware 3.80 by placing models into an empty preset until one was
+refused:
+
+- Each path holds **75.0**, and the limit itself fits: with 68 placed, a block
+  of 7.00 goes in and one of 7.01 is refused. Path 1 and path 2 are the same
+  and independent, both lanes of a split share their path's budget, and the
+  path's input setting makes no difference. Bypassed blocks count.
+- A block costs the load of the **exact number placed**. Mono and stereo
+  variants are separate numbers (`HD2_DelayVintageDigitalMono`,
+  `...Stereo`): the mono one costs `load`, the stereo one `load_stereo`. With
+  6.65 left, the mono Vintage Digital (3.93) went in and the stereo one (7.14)
+  was refused.
+- An Amp+Cab costs the amp and the cab together. A path holding 53.05 took a
+  pair costing 21.76 and refused one costing 22.5.
+- The IR blocks cost their `load_320`, 2.5, not the 7 (1024) or 13 (2048)
+  listed as `load`: both went in with 2.55 left and were refused with 2.40.
+- A split and its join cost at most 0.05 together, not the 1.5 listed.
+
+The HX Stomp's budget has not been measured. Helix LT and Rack are likely the
+same as the Floor, but neither has been tried.
+
+One refusal wedged the Floor: a whole-document write sent straight after a
+`-306` left it on "writing, please wait" until a power cycle. Waiting about
+five seconds and reading the preset back first was safe every time.
 
 ### A `.hlx` numbers cells along a row, not slots [confirmed]
 

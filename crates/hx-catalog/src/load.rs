@@ -368,6 +368,9 @@ struct RawModel {
     load_mono: Option<f32>,
     #[serde(default)]
     load_stereo: Option<f32>,
+    /// Only the IR blocks carry this, and it is what a Helix charges for them.
+    #[serde(default)]
+    load_320: Option<f32>,
     /// Only amps carry this: the cab they pair with in an Amp+Cab block.
     #[serde(default, rename = "cablink")]
     cab_link: Option<String>,
@@ -430,6 +433,11 @@ impl TryFrom<RawModel> for Model {
             // models have only `load_stereo`. Keep preferring the ordinary
             // field for models that offer both variants.
             load: m.load.or(m.load_mono).or(m.load_stereo).unwrap_or_default(),
+            loads: crate::Loads {
+                mono: m.load.or(m.load_mono),
+                stereo: m.load_stereo,
+                helix: m.load_320,
+            },
             image: None,
             cab_link: m.cab_link,
             params,

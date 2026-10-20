@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use hx_catalog::{Catalog, Kind, Model};
 
+use crate::dsp;
 use crate::shell;
 use crate::theme::{self, Icon, Mood, Tier};
 use crate::{App, Cmd};
@@ -50,6 +51,30 @@ pub(crate) struct Face {
     pub knobs: Vec<f32>,
     pub switches: Vec<bool>,
     pub names: String,
+}
+
+/// What a model costs the path it would go on, where that is known.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Price {
+    /// Its share of the path's DSP, as shown on the card.
+    pub share: String,
+    /// Whether the path has room for it. A model that does not fit cannot be
+    /// chosen, as the pedal greys it out on its own screen.
+    pub fits: bool,
+    /// What is said under the pointer when it does not fit.
+    pub short: Option<String>,
+}
+
+/// The numbers choosing a model places: the model, and in a paired category
+/// the cab that comes with an amp. If the firmware does not know that cab
+/// the amp goes in alone.
+fn numbers_for(catalog: &Catalog, model: &Model, pairing: bool) -> Option<(u32, Option<u32>)> {
+    let number = crate::number_of(catalog, &model.id)?;
+    let paired = pairing
+        .then(|| catalog.paired_cab(model))
+        .flatten()
+        .and_then(|cab| crate::number_of(catalog, &cab.id));
+    Some((number, paired))
 }
 
 /// The open browser.
@@ -440,6 +465,15 @@ impl App {
             return;
         };
         let recent: Vec<String> = self.config.recent_models.clone();
+        // The room on the path the model would go on, the block being
+        // swapped out counted as gone.
+        let room = match self.browser.as_ref().map(|b| &b.target) {
+            Some(Target::Insert { at }) => self.room_at(*at),
+            Some(Target::Swap { position, .. }) => usize::try_from(*position)
+                .ok()
+                .and_then(|slot| self.room_at(slot)),
+            None => None,
+        };
         let Some(browser) = self.browser.as_mut() else {
             return;
         };
@@ -525,6 +559,25 @@ impl App {
                     .insert(model.id.clone(), face_of(catalog, model));
             }
         }
+        let price_of = |model: &Model| -> Option<Price> {
+            let room = room?;
+            let (number, paired) = numbers_for(catalog, model, pairing)?;
+            let cost = dsp::block_cost(catalog, number, paired)?;
+            let fits = room.fits(cost);
+            let short = (!fits).then(|| {
+                let (need, left) = dsp::percents(cost, room.left(), room.budget);
+                format!(
+                    "{} needs {need} of path {}'s DSP, and {left} is left",
+                    model.name,
+                    room.path + 1
+                )
+            });
+            Some(Price {
+                share: dsp::percent(cost, room.budget),
+                fits,
+                short,
+            })
+        };
         let colour_of = |model: &Model| {
             catalog
                 .category_of(&model.id)
@@ -675,6 +728,30 @@ impl App {
             .clicked()
         {
             browser.list = false;
+        }
+        if let Some(room) = room {
+            right_ui.add_space(4.0);
+            let used = dsp::percent(room.used, room.budget);
+            let left = dsp::percent(room.left(), room.budget);
+            let words = format!("Path {}: {left} DSP left", room.path + 1);
+            let swapping = matches!(browser.target, Target::Swap { .. });
+            theme::Chip::new(&words)
+                .mood(if room.left() == 0 {
+                    Mood::Danger
+                } else {
+                    Mood::Neutral
+                })
+                .show(&mut right_ui)
+                .on_hover_text(format!(
+                    "Path {} uses {used} of its DSP{}. A model needing more than \
+                     is left is greyed out, as on the pedal.",
+                    room.path + 1,
+                    if swapping {
+                        " without the block being swapped"
+                    } else {
+                        ""
+                    }
+                ));
         }
         if shelved && tier != Tier::S {
             right_ui.add_space(4.0);
@@ -841,7 +918,21 @@ impl App {
                     for model in &models {
                         let colour = colour_of(model);
                         let face = browser.faces.get(&model.id).cloned().unwrap_or_default();
-                        if model_row(ui, catalog, model, &face, colour, badge_of(model)).clicked() {
+                        let price = price_of(model);
+                        let response = model_row(
+                            ui,
+                            catalog,
+                            model,
+                            &face,
+                            colour,
+                            badge_of(model),
+                            price.as_ref(),
+                        );
+                        let response = match price.as_ref().and_then(|p| p.short.clone()) {
+                            Some(short) => response.on_hover_text(short),
+                            None => response,
+                        };
+                        if response.clicked() {
                             asked = Some(Asked::Pick(model.id.clone()));
                         }
                     }
@@ -861,9 +952,22 @@ impl App {
                             let colour = colour_of(model);
                             let face = browser.faces.get(&model.id).cloned().unwrap_or_default();
                             let badge = badge_of(model);
-                            if model_card(ui, &model.name, &face, colour, card, badge)
-                                .on_hover_text(card_hover(&model.name, badge))
-                                .clicked()
+                            let price = price_of(model);
+                            let hover = price
+                                .as_ref()
+                                .and_then(|p| p.short.clone())
+                                .unwrap_or_else(|| card_hover(&model.name, badge));
+                            if model_card(
+                                ui,
+                                &model.name,
+                                &face,
+                                colour,
+                                card,
+                                badge,
+                                price.as_ref(),
+                            )
+                            .on_hover_text(hover)
+                            .clicked()
                             {
                                 asked = Some(Asked::Pick(model.id.clone()));
                             }
@@ -992,16 +1096,15 @@ impl App {
             _ => None,
         };
         let pick = match &asked {
-            Some(Asked::Pick(id)) => catalog.model(id).and_then(|model| {
-                let number = crate::number_of(catalog, &model.id)?;
-                // In a paired category the cab comes with the amp; if the
-                // firmware does not know that cab the amp goes in alone.
-                let paired = pairing
-                    .then(|| catalog.paired_cab(model))
-                    .flatten()
-                    .and_then(|cab| crate::number_of(catalog, &cab.id));
-                Some((model.id.clone(), model.name.clone(), number, paired))
-            }),
+            // A model that does not fit is never sent: the pedal would only
+            // refuse it.
+            Some(Asked::Pick(id)) => catalog
+                .model(id)
+                .filter(|model| price_of(model).is_none_or(|price| price.fits))
+                .and_then(|model| {
+                    let (number, paired) = numbers_for(catalog, model, pairing)?;
+                    Some((model.id.clone(), model.name.clone(), number, paired))
+                }),
             _ => None,
         };
         if last_category.is_some() {
@@ -1155,8 +1258,11 @@ pub(crate) fn model_card(
     colour: Color32,
     width: f32,
     badge: Option<Badge>,
+    price: Option<&Price>,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 130.0), Sense::click());
+    let fits = price.is_none_or(|price| price.fits);
+    let sense = if fits { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 130.0), sense);
     let playing = badge == Some(Badge::Playing);
     let was = matches!(badge, Some(Badge::WasHere | Badge::InTheBlock));
     if playing {
@@ -1170,7 +1276,7 @@ pub(crate) fn model_card(
     ui.painter().rect(
         rect,
         CornerRadius::same(theme::RADIUS_TILE),
-        if response.hovered() {
+        if response.hovered() && fits {
             theme::raised()
         } else {
             theme::panel()
@@ -1192,12 +1298,26 @@ pub(crate) fn model_card(
         Vec2::new(rect.width() - 14.0, 70.0),
     );
     paint_face(ui, face_rect, face, colour);
+    // Its share of the path's DSP, at the end of the name's line.
+    let share = price.map(|price| {
+        shell::galley(
+            ui,
+            price.share.clone(),
+            theme::semibold(10.5),
+            if price.fits {
+                theme::muted()
+            } else {
+                theme::danger()
+            },
+        )
+    });
+    let share_width = share.as_ref().map_or(0.0, |share| share.size().x + 6.0);
     let title = shell::elided(
         ui,
         name,
         theme::semibold(theme::BODY),
         theme::text(),
-        rect.width() - 20.0,
+        rect.width() - 20.0 - share_width,
     );
     shell::paint_line(
         ui,
@@ -1218,6 +1338,18 @@ pub(crate) fn model_card(
         rect.left() + 10.0,
         face_rect.bottom() + 4.0 + 19.0 + 4.0 + 7.0,
     );
+    if !fits {
+        // Faded, the way the pedal greys out what it has no room for.
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(theme::RADIUS_TILE),
+            theme::alpha(theme::panel(), 0.6),
+        );
+    }
+    if let Some(share) = share {
+        let x = rect.right() - 10.0 - share.size().x;
+        shell::paint_line(ui, share, x, face_rect.bottom() + 4.0 + 2.0 + 8.5);
+    }
     if let Some(badge) = badge {
         badge.paint(ui, rect);
     }
@@ -1241,9 +1373,12 @@ fn model_row(
     face: &Face,
     colour: Color32,
     badge: Option<Badge>,
+    price: Option<&Price>,
 ) -> egui::Response {
+    let fits = price.is_none_or(|price| price.fits);
+    let sense = if fits { Sense::click() } else { Sense::hover() };
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 36.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 36.0), sense);
     let row = rect.shrink2(Vec2::new(16.0, 0.0));
     if badge == Some(Badge::Playing) {
         ui.painter().rect_filled(
@@ -1251,7 +1386,7 @@ fn model_row(
             CornerRadius::same(7),
             theme::mix(theme::panel(), theme::accent(), 0.12),
         );
-    } else if response.hovered() {
+    } else if response.hovered() && fits {
         ui.painter()
             .rect_filled(row, CornerRadius::same(7), theme::hover());
     }
@@ -1277,12 +1412,27 @@ fn model_row(
         ui,
         model.name.clone(),
         theme::medium(theme::BODY),
-        theme::text(),
+        if fits { theme::text() } else { theme::faint() },
         220.0,
     );
     let name_width = name.size().x;
     shell::paint_line(ui, name, row.left() + 40.0, y);
     let mut right = row.right() - 10.0;
+    if let Some(price) = price {
+        let share = shell::galley(
+            ui,
+            price.share.clone(),
+            theme::semibold(11.0),
+            if fits {
+                theme::muted()
+            } else {
+                theme::danger()
+            },
+        );
+        right -= share.size().x;
+        shell::paint_line(ui, share, right, y);
+        right -= 16.0;
+    }
     if let Some(badge) = badge {
         let text = match badge {
             Badge::Playing => "On the pedal",
@@ -1340,6 +1490,7 @@ mod tests {
             category: 0,
             stereo: false,
             load: 0.0,
+            loads: Default::default(),
             image: None,
             cab_link: None,
             params: Vec::new(),

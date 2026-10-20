@@ -64,7 +64,7 @@ pub enum Error {
     Claim(String),
     #[error("usb error: {0}")]
     Usb(String),
-    #[error("the device refused: error {0}")]
+    #[error("{}", refusal(*.0))]
     Device(i64),
     #[error("protocol error: {0}")]
     Protocol(String),
@@ -89,6 +89,16 @@ fn retry_device_refusal<T>(result: Result<T>) -> Result<Option<T>> {
         Ok(value) => Ok(Some(value)),
         Err(Error::Device(_)) => Ok(None),
         Err(error) => Err(error),
+    }
+}
+
+/// What a refusal says, in words where its code is known well enough.
+fn refusal(code: i64) -> String {
+    match code {
+        -306 => {
+            format!("the device refused: that path has no DSP left for this block (error {code})")
+        }
+        _ => format!("the device refused: error {code}"),
     }
 }
 
@@ -1433,6 +1443,18 @@ mod tests {
             retry_device_refusal::<()>(Err(Error::Protocol("bad reply".into()))),
             Err(Error::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn a_path_out_of_dsp_is_said_in_words() {
+        assert_eq!(
+            Error::Device(-306).to_string(),
+            "the device refused: that path has no DSP left for this block (error -306)"
+        );
+        assert_eq!(
+            Error::Device(-3).to_string(),
+            "the device refused: error -3"
+        );
     }
 
     #[test]

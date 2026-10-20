@@ -1187,6 +1187,28 @@ impl App {
             .filter(|_| tier != Tier::L || self.lens == crate::pane::Lens::Footswitches)
         {
             return lens;
+        } else if let Some(rooms) = (0..self.layout.paths.len())
+            .map(|path| self.path_room(path))
+            .collect::<Option<Vec<_>>>()
+            .filter(|rooms| !rooms.is_empty())
+        {
+            // Where the device's budget is known, how much of it each path
+            // uses: both lanes of a split share their path's.
+            for room in &rooms {
+                parts.push((
+                    format!(
+                        "Path {}: {} DSP used",
+                        room.path + 1,
+                        crate::dsp::percent(room.used, room.budget)
+                    ),
+                    false,
+                    true,
+                ));
+            }
+            if self.hearing.glimpsing {
+                parts.push(("Read only until a pedal connects".to_owned(), false, true));
+            }
+            return parts;
         } else {
             match self.layout.paths.len() {
                 0 | 1 => "Path 1".to_owned(),

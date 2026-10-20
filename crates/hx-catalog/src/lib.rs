@@ -75,6 +75,9 @@ pub struct Model {
     pub stereo: bool,
     /// DSP cost, which the device uses to decide what still fits.
     pub load: f32,
+    /// The costs as HX Edit lists them, kept apart so a block can be priced
+    /// by the variant actually placed: see [`Catalog::cost`].
+    pub loads: Loads,
     /// Artwork file name, e.g. `FX_HX_DIST_KinkyBoost.png`. Resolve it with
     /// [`Catalog::artwork`].
     pub image: Option<String>,
@@ -82,6 +85,18 @@ pub struct Model {
     /// From `amp.models`' `cablink`; resolve it with [`Catalog::paired_cab`].
     pub cab_link: Option<String>,
     pub params: Vec<Param>,
+}
+
+/// A model's costs, as HX Edit's `.models` files list them.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Loads {
+    /// `load`, or `load_mono` where a model calls it that.
+    pub mono: Option<f32>,
+    /// `load_stereo`: what the stereo variant costs.
+    pub stereo: Option<f32>,
+    /// `load_320`, which only the IR blocks have. It is what a Helix Floor
+    /// charges for them: 2.5, where `load` says 7 or 13.
+    pub helix: Option<f32>,
 }
 
 /// One knob, switch or menu on a model.
@@ -267,6 +282,24 @@ impl Catalog {
     pub fn model_number(&self, number: u32) -> Option<&Model> {
         let symbol = self.symbol(number)?;
         self.models.get(symbol.model.as_deref()?)
+    }
+
+    /// What the block a wire model number names costs on a Helix Floor, in
+    /// HX Edit's units, or `None` where the catalog lists no cost.
+    ///
+    /// Mono and stereo variants are separate numbers and the pedal charges
+    /// the one placed: a stereo Vintage Digital (7.14) was refused where the
+    /// mono one (3.93) fit. The IR blocks cost their `load_320`. Both
+    /// measured on a Floor at firmware 3.80, as PROTOCOL.md describes.
+    pub fn cost(&self, number: u32) -> Option<f32> {
+        let symbol = self.symbol(number)?;
+        let model = self.models.get(symbol.model.as_deref()?)?;
+        let loads = model.loads;
+        if symbol.symbol != model.id && symbol.symbol.ends_with("Stereo") {
+            loads.stereo.or(loads.mono)
+        } else {
+            loads.helix.or(loads.mono).or(loads.stereo)
+        }
     }
 
     /// The parameter a `set parameter` message is addressing.
@@ -834,6 +867,27 @@ pub(crate) mod tests {
         assert_eq!(c.model_number(247).unwrap().name, "Room");
         assert_eq!(c.model_number(296).unwrap().name, "Simple Pitch");
         assert_eq!(c.model_number(180).unwrap().name, "Bubble Vibrato");
+    }
+
+    #[test]
+    fn a_block_costs_what_its_own_variant_costs() {
+        let Some(c) = catalog() else { return };
+        let number = |symbol: &str| {
+            c.symbols()
+                .iter()
+                .find(|s| s.symbol == symbol)
+                .unwrap()
+                .number
+        };
+        let cost = |symbol: &str| c.cost(number(symbol)).unwrap();
+        // The variants a Helix Floor was seen to charge for: mono and stereo
+        // apart, and the IRs at their `load_320`, not the 7 and 13 listed.
+        assert_eq!(cost("HD2_VolPanGainMono"), 0.35);
+        assert_eq!(cost("HD2_VolPanGainStereo"), 0.51);
+        assert_eq!(cost("HD2_DelayVintageDigitalMono"), 3.93);
+        assert_eq!(cost("HD2_DelayVintageDigitalStereo"), 7.14);
+        assert_eq!(cost("HD2_ImpulseResponse1024Mono"), 2.5);
+        assert_eq!(cost("HD2_ImpulseResponse2048Mono"), 2.5);
     }
 
     #[test]

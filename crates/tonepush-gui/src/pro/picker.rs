@@ -338,7 +338,7 @@ impl Panel {
                             let face = block_face(snapshot, &block.group);
                             let colour = theme::category_colour(block.category);
                             let response =
-                                browser::model_card(ui, &name, &face, colour, card, None)
+                                browser::model_card(ui, &name, &face, colour, card, None, None)
                                     .on_hover_text(format!(
                                         "Put {name} in position {}",
                                         position + 1
