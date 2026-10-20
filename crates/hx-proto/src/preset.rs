@@ -1159,10 +1159,11 @@ impl Preset {
         let tone_at = magic.len() + table_hdr + table_len;
 
         let tone = Encoder::encode(&self.tone);
-        let total = tone_at + tone.len();
 
-        // Walk the tone's top-level map recording where each key begins.
+        // Walk the tone's top-level map recording where each key begins and
+        // ends.
         let mut key_at = std::collections::HashMap::new();
+        let mut key_end = std::collections::HashMap::new();
         let (count, mut at) = match tone.as_slice() {
             [b @ 0x80..=0x8f, ..] => ((b & 0x0f) as usize, 1),
             [0xde, high, low, ..] => (u16::from_be_bytes([*high, *low]) as usize, 3),
@@ -1178,7 +1179,14 @@ impl Preset {
             dv.value().ok()?;
             at = tone.len() - dv.remaining();
             key_at.insert(key, tone_at + here);
+            key_end.insert(key, tone_at + at);
         }
+        // The two trailing words mark where the snapshot section ends. That
+        // is the end of the document on an HX Stomp, whose tone stops there,
+        // but the preset a Helix Floor (3.80) has loaded follows it with a
+        // section 12 that the table leaves out. Its stored presets do not
+        // carry one.
+        let snapshots_end = *key_end.get(&key::SNAPSHOT_SECTION)?;
 
         let mut out = Vec::with_capacity(table_len);
         out.extend_from_slice(&section_word(tone_at)?);
@@ -1186,7 +1194,7 @@ impl Preset {
             out.extend_from_slice(&section_word(*key_at.get(&key)?)?);
         }
         for _ in 0..tail {
-            out.extend_from_slice(&section_word(total)?);
+            out.extend_from_slice(&section_word(snapshots_end)?);
         }
         Some(out)
     }
@@ -1313,7 +1321,7 @@ impl Preset {
         // Put the name back without marking it as typed: paste keeps the
         // label, it does not rename.
         if let Some(slot) = existing.get_mut(key::SNAPSHOT_NAME) {
-            if snapshot_name_is_valid(&name) {
+            if name.is_empty() || snapshot_name_is_valid(&name) {
                 *slot = Value::Str(name);
             }
         }
@@ -1491,10 +1499,13 @@ fn snapshot_is_well_formed(entry: &Value, slot_count: usize) -> bool {
     if !matches!(entry, Value::Map(_)) {
         return false;
     }
+    // A name cleared on the device reads back empty, with the named flag still
+    // set. Seen on hardware, a Helix Floor on firmware 3.80, in 74 of 231
+    // presets; refusing it made every such preset unreadable.
     let valid_name = entry
         .get(key::SNAPSHOT_NAME)
         .and_then(Value::as_str)
-        .is_some_and(|name| !name.is_empty());
+        .is_some();
     let valid_tempo = entry
         .get(key::SNAPSHOT_TEMPO)
         .is_some_and(tempo_is_well_formed);
@@ -2902,6 +2913,60 @@ mod tests {
         // where you are in the song rather than what the settings are.
         assert_eq!(preset.snapshots()[1], "Chorus");
         assert_eq!(preset.snapshots()[0], "Verse");
+    }
+
+    #[test]
+    fn a_snapshot_whose_name_was_cleared_parses_and_keeps_it() {
+        let mut preset = Preset::parse(&dual_dsp_fixture()).unwrap();
+        preset.set_snapshot_name(0, "Verse");
+        let Some(Value::Array(entries)) =
+            preset.tone.at_mut(&[key::SNAPSHOT_SECTION, key::SNAPSHOTS])
+        else {
+            panic!("snapshots");
+        };
+        // What a Helix Floor sends for a snapshot whose name was cleared.
+        *entries[1].get_mut(key::SNAPSHOT_NAME).unwrap() = Value::Str(String::new());
+        *entries[1].get_mut(key::SNAPSHOT_NAMED).unwrap() = Value::Bool(true);
+        let document = preset.encode();
+
+        let mut parsed = Preset::parse(&document).expect("a cleared snapshot name parses");
+        assert_eq!(parsed.encode(), document, "and round-trips byte for byte");
+        assert_eq!(parsed.snapshots()[1], "");
+
+        // Pasting over it keeps the blank name, as it keeps any other.
+        let verse = parsed.copy_snapshot(0).unwrap();
+        assert!(parsed.paste_snapshot(1, &verse));
+        assert_eq!(parsed.snapshots()[1], "");
+
+        // Typing an empty name is still refused.
+        assert!(!parsed.set_snapshot_name(0, ""));
+    }
+
+    #[test]
+    fn the_section_table_ends_at_the_snapshots_not_at_a_section_after_them() {
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+        let Value::Map(fields) = &mut preset.tone else {
+            panic!("tone map");
+        };
+        // A loaded Helix Floor preset carries a section 12 after the
+        // snapshots, which the table does not cover.
+        fields.push((
+            crate::msgpack::Key::Int(12),
+            crate::msgmap! { 0 => Value::Int(1) },
+        ));
+        let document = preset.encode();
+        let section_12 = Encoder::encode(&Value::Int(12)).len()
+            + Encoder::encode(&crate::msgmap! { 0 => Value::Int(1) }).len();
+
+        let parsed = Preset::parse(&document).expect("a document with section 12 parses");
+        assert_eq!(parsed.encode(), document);
+        let words: Vec<usize> = parsed
+            .sections
+            .chunks(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()) as usize)
+            .collect();
+        let end = document.len() - section_12;
+        assert_eq!(words[words.len() - 2..], [end, end]);
     }
 
     #[test]
