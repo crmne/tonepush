@@ -1553,6 +1553,29 @@ pub(crate) fn sentence_case(text: &str) -> String {
 // The frame, for the app
 
 impl App {
+    /// How the connected HX numbers what can drive a parameter.
+    pub(crate) fn controls(&self) -> hx_proto::rpc::ControlLayout {
+        hx_proto::PROFILES
+            .iter()
+            .find(|profile| profile.name == self.device.trim())
+            .map_or(hx_proto::rpc::ControlLayout::Stomp, |profile| {
+                profile.controls
+            })
+    }
+
+    /// Whether a source is worth offering on this pedal. A Stomp's protocol
+    /// has room for five footswitches and the pedal has three, so the two it
+    /// does not have are left out; a Helix Floor offers every one its own
+    /// menu does.
+    pub(crate) fn offers_switch(&self, source: hx_proto::rpc::Source) -> bool {
+        match (self.controls(), source) {
+            (hx_proto::rpc::ControlLayout::Stomp, hx_proto::rpc::Source::Footswitch(n)) => {
+                n <= self.switch_count()
+            }
+            _ => true,
+        }
+    }
+
     /// How many slots one bank holds on the connected HX.
     pub(crate) fn presets_per_bank(&self) -> usize {
         hx_proto::PROFILES

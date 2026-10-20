@@ -362,6 +362,11 @@ mod key {
     /// was drawn as owning the Drive knob. Confirmed by dumping key 4 of a
     /// preset whose only assignment is on parameter 1: `6: {28: 0, 29: 1}`.
     pub const ASSIGNED_PARAM: i64 = 29;
+    /// What an assignment that drives no block parameter points at instead.
+    /// Seen on a Helix Floor (3.80): a Variax model switched per snapshot,
+    /// which HX Edit shows as `variax/@variax_model` and the document holds as
+    /// `{5: 0, 8: 45}` with neither a bypass nor a parameter target.
+    pub const ASSIGNED_GLOBAL: i64 = 8;
 
     /// Snapshots and footswitch assignments.
     pub const SNAPSHOT_SECTION: i64 = 10;
@@ -755,8 +760,9 @@ impl Preset {
     ///
     /// The shape: top-level key 4 is an array indexed by source ordinal, so
     /// entry 1 is everything Expression Pedal 1 drives. Each item pairs a block
-    /// with the assignment itself.
-    pub fn assignments(&self) -> Vec<Assignment> {
+    /// with the assignment itself. Which source an ordinal is depends on the
+    /// device, so the caller says whose numbering the document uses.
+    pub fn assignments(&self, layout: crate::rpc::ControlLayout) -> Vec<Assignment> {
         let Some(Value::Array(by_source)) = self.tone.get(key::ASSIGNMENTS) else {
             return Vec::new();
         };
@@ -766,7 +772,7 @@ impl Preset {
                 continue;
             };
             // Slot 0 is the "nothing" ordinal and holds nothing to draw.
-            let Some(source) = crate::rpc::Source::from_ordinal(ordinal as i64) else {
+            let Some(source) = layout.source(ordinal as i64) else {
                 continue;
             };
             for entry in entries {
@@ -1429,9 +1435,11 @@ fn assignments_are_well_formed(tone: &Value) -> bool {
             Value::Array(entries) => entries,
             _ => return false,
         };
-        // HX Effects has six footswitches, so its list runs one longer than the
-        // ordinals `Source` knows: 10 is in use there, apparently for Snapshots.
-        if !entries.is_empty() && !(1..=10).contains(&ordinal) {
+        // How many sources there are is the device's business: HX Effects
+        // has six footswitches and uses 10, and a Helix Floor (3.80) lists 20
+        // and uses up to 19 (Snapshots). Only ordinal 0, "nothing", is never
+        // a source.
+        if !entries.is_empty() && ordinal == 0 {
             return false;
         }
         entries.iter().all(|entry| {
@@ -1442,13 +1450,19 @@ fn assignments_are_well_formed(tone: &Value) -> bool {
                 .get(key::ASSIGNED_ON)
                 .and_then(Value::as_i64)
                 .is_some_and(|block| block >= 0);
-            let valid_target = match what.get(key::ASSIGNED_BYPASS) {
-                Some(bypass) => bypass.as_i64().is_some_and(|target| target >= 0),
-                None => what
-                    .get(key::ASSIGNED_TARGET)
-                    .and_then(|target| target.get(key::ASSIGNED_PARAM))
+            let valid_target = match (
+                what.get(key::ASSIGNED_BYPASS),
+                what.get(key::ASSIGNED_TARGET),
+            ) {
+                (Some(bypass), _) => bypass.as_i64().is_some_and(|target| target >= 0),
+                (None, Some(target)) => target
+                    .get(key::ASSIGNED_PARAM)
                     .and_then(Value::as_i64)
                     .is_some_and(|parameter| parameter >= 0),
+                (None, None) => what
+                    .get(key::ASSIGNED_GLOBAL)
+                    .and_then(Value::as_i64)
+                    .is_some_and(|setting| setting >= 0),
             };
             let valid_ends = [key::ASSIGNED_MIN, key::ASSIGNED_MAX]
                 .into_iter()
@@ -1868,7 +1882,7 @@ mod tests {
             },
         };
 
-        let found = preset.assignments();
+        let found = preset.assignments(crate::rpc::ControlLayout::Stomp);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].target, Target::Param(1), "key 29, not key 28");
         assert_eq!(found[0].block, 3);
@@ -1923,7 +1937,7 @@ mod tests {
         };
 
         for cc in [0, 4, 42, 77, 127] {
-            let found = preset(cc).assignments();
+            let found = preset(cc).assignments(crate::rpc::ControlLayout::Stomp);
             assert_eq!(found.len(), 1, "a bypass on CC {cc} went missing");
             assert_eq!(found[0].target, Target::Bypass);
             assert_eq!(found[0].block, 2);
@@ -1961,7 +1975,7 @@ mod tests {
                 ]),
             },
         };
-        let found = preset.assignments();
+        let found = preset.assignments(crate::rpc::ControlLayout::Stomp);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].target, Target::Param(0));
         assert_eq!(
@@ -2015,7 +2029,7 @@ mod tests {
         };
 
         for cc in [4, 42, 43, 77] {
-            let found = under_midi(cc).assignments();
+            let found = under_midi(cc).assignments(crate::rpc::ControlLayout::Stomp);
             assert_eq!(found.len(), 1, "the assignment on CC {cc} went missing");
             assert_eq!(found[0].target, Target::Param(1));
             assert_eq!(found[0].block, 5);
@@ -2969,7 +2983,10 @@ mod tests {
             },
         };
         let parsed = Preset::parse(&document(under_footswitch(entry(reversed_switch)))).unwrap();
-        let assignment = parsed.assignments().pop().unwrap();
+        let assignment = parsed
+            .assignments(crate::rpc::ControlLayout::Stomp)
+            .pop()
+            .unwrap();
         assert_eq!((assignment.min, assignment.max), (1.0, 0.0));
 
         let missing_target = crate::msgmap! {
@@ -2988,7 +3005,7 @@ mod tests {
         by_source[8] = Value::Array(vec![entry(midi)]);
         assert!(Preset::parse(&document(Value::Array(by_source))).is_none());
 
-        // HX Effects uses ordinal 10; nothing uses 11.
+        // HX Effects uses ordinal 10, and a Helix Floor up to 19.
         let snapshot_driven = crate::msgmap! {
             key::ASSIGNED_KIND => Value::Int(4),
             key::ASSIGNED_MIN => Value::Int(0),
@@ -3001,8 +3018,47 @@ mod tests {
         let mut by_source = (0..11).map(|_| Value::Nil).collect::<Vec<_>>();
         by_source[10] = Value::Array(vec![entry(snapshot_driven.clone())]);
         assert!(Preset::parse(&document(Value::Array(by_source))).is_some());
-        let mut by_source = (0..12).map(|_| Value::Nil).collect::<Vec<_>>();
-        by_source[11] = Value::Array(vec![entry(snapshot_driven)]);
+        let mut by_source = (0..20).map(|_| Value::Nil).collect::<Vec<_>>();
+        by_source[19] = Value::Array(vec![entry(snapshot_driven.clone())]);
+        let floor = document(Value::Array(by_source));
+        let parsed = Preset::parse(&floor).expect("a Helix Floor's Snapshots ordinal parses");
+        assert_eq!(parsed.encode(), floor);
+        // A Stomp has no ordinal 19, so there it is not drawn as anything; a
+        // Helix Floor's 19 is Snapshots.
+        assert!(parsed
+            .assignments(crate::rpc::ControlLayout::Stomp)
+            .is_empty());
+        let floor = parsed.assignments(crate::rpc::ControlLayout::Helix);
+        assert_eq!(floor.len(), 1);
+        assert_eq!(floor[0].source, crate::rpc::Source::Snapshots);
+
+        // Ordinal 0 is "nothing" and holds no assignments.
+        let mut by_source = (0..20).map(|_| Value::Nil).collect::<Vec<_>>();
+        by_source[0] = Value::Array(vec![entry(snapshot_driven)]);
+        assert!(Preset::parse(&document(Value::Array(by_source))).is_none());
+
+        // A Variax model switched per snapshot targets neither a bypass nor a
+        // parameter, as a Helix Floor writes it.
+        let variax = crate::msgmap! {
+            0 => Value::Int(19),
+            key::ASSIGNED_KIND => Value::Int(4),
+            key::ASSIGNED_MIN => Value::Int(0),
+            key::ASSIGNED_MAX => Value::Int(60),
+            4 => Value::Int(1),
+            key::ASSIGNED_ON => Value::Int(0),
+            key::ASSIGNED_GLOBAL => Value::Int(45),
+            13 => Value::Bool(false),
+        };
+        let mut by_source = (0..20).map(|_| Value::Nil).collect::<Vec<_>>();
+        by_source[19] = Value::Array(vec![entry(variax.clone())]);
+        let floor = document(Value::Array(by_source));
+        let parsed = Preset::parse(&floor).expect("a Variax assignment parses");
+        assert_eq!(parsed.encode(), floor);
+
+        let mut negative = variax;
+        *negative.get_mut(key::ASSIGNED_GLOBAL).unwrap() = Value::Int(-1);
+        let mut by_source = (0..20).map(|_| Value::Nil).collect::<Vec<_>>();
+        by_source[19] = Value::Array(vec![entry(negative)]);
         assert!(Preset::parse(&document(Value::Array(by_source))).is_none());
     }
 

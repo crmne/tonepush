@@ -2189,7 +2189,11 @@ impl Worker {
             snapshot_details: preset.snapshot_details(),
             chain,
             layout: preset.layout(),
-            assignments: preset.assignments(),
+            assignments: preset.assignments(
+                self.device
+                    .as_ref()
+                    .map_or(hx_proto::rpc::ControlLayout::Stomp, |d| d.profile.controls),
+            ),
             dirty: self.dirty,
         });
     }

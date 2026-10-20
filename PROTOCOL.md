@@ -312,6 +312,60 @@ None**, 1–2 the expression pedals, 3–7 the footswitches, 8 MIDI CC, 9 Snapsh
 An HX Effects has six footswitches and its stored presets use ordinal **10** as
 well; from the data it looks like 3–8 footswitches, 9 MIDI CC and 10 Snapshots
 there, but that is not confirmed (#9).
+
+A Helix Floor (3.80) numbers its sources differently, and HX Edit's `.hlx`
+`@controller` is the same ordinal as the document's, which made the table
+readable from one Floor's 231 presets and its HX Edit backup (#28). Its
+controller table has 20 entries. **1 and 2 are EXP 1 and EXP 2** (both drive
+wah and volume `Pedal` parameters) and **19 is Snapshots** (parameters with no
+footswitch fields that change per snapshot). **Footswitches are their number
+plus 5**: Line 6's template preset labels 7–10 "Please / Use Snaps / w/ Manual /
+Return" and 13–16 "Tap Once / Then Use / Snapshot / View", and in stomp mode the
+Floor shows "Please" on FS2 and "Tap Once" on FS8 (FS1–FS6 is the top row, FS7–FS12
+the bottom). So FS1–FS12 are 6–17, and the ones not seen (6, 11, 12, 17) are the
+switches the Floor reserves by default: Bank up, Mode, Bank down and Tap.
+The front panel's controller menu lists the sources in ordinal order and
+fills in the rest: None, EXP Pedal 1–3, Variax Vol, Variax Tone, Footswitch
+1–11, MIDI CC, Snapshots. That is 19 choices for 20 ordinals, and Snapshots is
+19, so the one left out is 17, FS12 (Tap/Tuner), which takes no controller:
+
+| Ordinal | Source |
+|---|---|
+| 0 | None |
+| 1–3 | EXP Pedal 1–3 |
+| 4, 5 | Variax Vol, Variax Tone |
+| 6–16 | Footswitch 1–11 |
+| 17 | FS12, not offered |
+| 18 | MIDI CC |
+| 19 | Snapshots |
+
+1, 2, 7–10, 13–16 and 19 are confirmed by presets. 3, 4, 12 and 18 are confirmed
+on the hardware: assignments TonePush made to EXP 3, Variax Vol, Variax Tone
+and FS7 show on the Floor's own controller pages under those names, and a MIDI
+CC assignment made on the Floor's front panel is stored under 18. That covers 5
+as well, so every source the Floor offers is confirmed.
+
+**An assignment's target carries a flag at key 41.** The Floor's own Mic to EXP 3
+assignment on a cab is stored as `6: {28: 0, 29: 0, 41: true}`, travel 0 to 15;
+the cab's first ordinary parameter, Distance, is `{28: 0, 29: 0, 41: false}`. So
+`29: 0` alone does not say which parameter: with 41 set it is the cab's Mic. The
+parser ignores 41 and reads that assignment as Distance, and opcode 37 always
+sends its key 129 as false, which is probably the same switch. Seen on a Floor;
+an HX Stomp cab presumably stores its Mic the same way.
+
+Per-switch settings (name, light, latching, and what a switch turns on and off)
+are addressed by the Floor's own footswitch number, as on the Stomp: reading
+switch 9 of a preset returned the name the pedal shows on the second switch of
+the lower row, and switch 11 the one on the fourth. Switches 6 and 12, Mode and
+Tap by default, read back empty. A block's bypass on a footswitch shows up in
+that switch's list rather than in the controller table, which is why no Floor
+preset had a bypass entry there. Writing them works the same way: a name, a red
+light and momentary set on FS4, and blocks' bypasses put on FS4 and FS11, all
+read back as written, survived a save and showed and behaved so on the pedal. A Variax model
+switched per snapshot is an assignment with neither a bypass (key 9) nor a
+parameter target (key 6): `{5: 0, 8: 45}`, shown by HX Edit as
+`variax/@variax_model`. The parser accepts these; naming them, and writing
+assignments with the Floor's ordinals, is not done yet.
 Key **71 is not the constant it looks like**: it is the assignment's on switch,
 `4` when one is made and `0` when it is removed, and removing sends `{74: 0,
 71: 0}` rather than a separate opcode.

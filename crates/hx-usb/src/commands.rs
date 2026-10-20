@@ -18,7 +18,7 @@ use crate::{
     Session,
 };
 
-fn assignment_source(reply: &Value) -> Result<Option<rpc::Source>> {
+fn assignment_source(layout: rpc::ControlLayout, reply: &Value) -> Result<Option<rpc::Source>> {
     if matches!(reply, Value::Nil) {
         return Ok(None);
     }
@@ -34,7 +34,8 @@ fn assignment_source(reply: &Value) -> Result<Option<rpc::Source>> {
     if ordinal == rpc::Source::NONE {
         return Ok(None);
     }
-    rpc::Source::from_ordinal(ordinal)
+    layout
+        .source(ordinal)
         .map(Some)
         .ok_or_else(|| Error::Protocol(format!("the assignment has unknown source {ordinal}")))
 }
@@ -940,8 +941,15 @@ impl Session {
         source: Option<rpc::Source>,
     ) -> Result<()> {
         block_param(block, param)?;
+        // A source the device does not have is refused rather than sent as
+        // the nearest one it does: clamping once turned EXP 3 into EXP 2.
         let (flags, kind) = match source {
-            Some(source) => (source.ordinal(), 4),
+            Some(source) => {
+                let ordinal = self.profile.controls.ordinal(source).ok_or_else(|| {
+                    Error::Protocol(format!("{} has no {}", self.profile.name, source.label()))
+                })?;
+                (ordinal, 4)
+            }
             None => (rpc::Source::NONE, 0),
         };
         self.command(
@@ -1029,7 +1037,8 @@ impl Session {
         // every parameter came back unassigned, which is why an assignment that
         // the pedal had certainly made showed nothing at all in the editor.
         //
-        assignment_source(&reply).map(|source| source.map(|source| Assignment { source }))
+        assignment_source(self.profile.controls, &reply)
+            .map(|source| source.map(|source| Assignment { source }))
     }
 
     /// Make a footswitch toggle a block in and out.
@@ -1304,28 +1313,50 @@ mod tests {
 
     #[test]
     fn assignment_replies_distinguish_none_from_malformed() {
-        assert_eq!(assignment_source(&Value::Nil).unwrap(), None);
         assert_eq!(
-            assignment_source(&hx_proto::msgmap! {
-                rpc::key::ASSIGN_SOURCE => Value::Int(0),
-            })
+            assignment_source(rpc::ControlLayout::Stomp, &Value::Nil).unwrap(),
+            None
+        );
+        assert_eq!(
+            assignment_source(
+                rpc::ControlLayout::Stomp,
+                &hx_proto::msgmap! {
+                    rpc::key::ASSIGN_SOURCE => Value::Int(0),
+                }
+            )
             .unwrap(),
             None
         );
         assert_eq!(
-            assignment_source(&hx_proto::msgmap! {
-                rpc::key::ASSIGN_SOURCE => Value::Int(1),
-            })
+            assignment_source(
+                rpc::ControlLayout::Stomp,
+                &hx_proto::msgmap! {
+                    rpc::key::ASSIGN_SOURCE => Value::Int(1),
+                }
+            )
             .unwrap(),
             Some(rpc::Source::Expression(1))
         );
 
-        assert!(assignment_source(&Value::Map(Vec::new())).is_err());
-        assert!(assignment_source(&hx_proto::msgmap! {
-            rpc::key::ASSIGN_SOURCE => Value::Int(99),
-        })
+        assert!(assignment_source(rpc::ControlLayout::Stomp, &Value::Map(Vec::new())).is_err());
+        assert!(assignment_source(
+            rpc::ControlLayout::Stomp,
+            &hx_proto::msgmap! {
+                rpc::key::ASSIGN_SOURCE => Value::Int(99),
+            }
+        )
         .is_err());
-        assert!(assignment_source(&Value::Bool(false)).is_err());
+        assert!(assignment_source(rpc::ControlLayout::Stomp, &Value::Bool(false)).is_err());
+
+        // The same ordinal is another source on a Helix Floor.
+        assert_eq!(
+            assignment_source(
+                rpc::ControlLayout::Helix,
+                &hx_proto::msgmap! { rpc::key::ASSIGN_SOURCE => Value::Int(13) },
+            )
+            .unwrap(),
+            Some(rpc::Source::Footswitch(8))
+        );
     }
 }
 

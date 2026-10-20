@@ -64,10 +64,12 @@ fn controller_source(text: &str) -> std::result::Result<i64, String> {
     let value = text
         .parse::<i64>()
         .map_err(|_| format!("{text:?} is not a controller source"))?;
-    (0..=9)
+    // Which numbers name a source depends on the device, which is checked
+    // once it is known; a Helix Floor counts to 19.
+    (0..=19)
         .contains(&value)
         .then_some(value)
-        .ok_or_else(|| "a controller source is 0 to 9".to_owned())
+        .ok_or_else(|| "a controller source is 0 to 19".to_owned())
 }
 
 fn tempo_bpm(text: &str) -> std::result::Result<f32, String> {
@@ -750,7 +752,7 @@ fn run_on(s: &mut hx_usb::Session, cmd: &Cmd) -> Result<()> {
         Cmd::Fetch { id } => fetch(s, id),
         Cmd::Controllers => {
             let preset = s.read_preset()?;
-            for a in preset.assignments() {
+            for a in preset.assignments(s.profile.controls) {
                 println!(
                     "block {} {:?}  {}{}  {:.0}%..{:.0}%",
                     a.block,
@@ -793,7 +795,13 @@ fn run_on(s: &mut hx_usb::Session, cmd: &Cmd) -> Result<()> {
             param,
             source,
         } => {
-            let source = hx_proto::rpc::Source::from_ordinal(source);
+            let source =
+                match source {
+                    hx_proto::rpc::Source::NONE => None,
+                    n => Some(s.profile.controls.source(n).with_context(|| {
+                        format!("{} has no controller source {n}", s.profile.name)
+                    })?),
+                };
             s.assign_parameter(block - 1, param, source)?;
             Ok(())
         }
@@ -2129,7 +2137,7 @@ mod tests {
             &["tonepush", "tempo", "39.9"],
             &["tonepush", "tempo", "240.1"],
             &["tonepush", "assign-range", "1", "0", "1.1"],
-            &["tonepush", "assign-param", "1", "0", "10"],
+            &["tonepush", "assign-param", "1", "0", "20"],
             &["tonepush", "assign-cc", "1", "0", "128"],
             &["tonepush", "switch", "0"],
             &["tonepush", "switch-set", "1", "--colour=-1"],

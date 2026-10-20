@@ -5895,7 +5895,7 @@ impl App {
             .collect();
         found.sort_by_key(|a| {
             (
-                a.source.ordinal(),
+                a.source.rank(),
                 a.target != hx_proto::preset::Target::Bypass,
             )
         });
@@ -5960,13 +5960,21 @@ impl App {
         let bypass = target == Target::Bypass;
         let switches = self.switch_count();
         let driving = self.all_assignments();
-        let sources = Source::all()
+        let sources = self
+            .controls()
+            .sources()
             .into_iter()
             // A bypass is a switch, so a pedal that sweeps cannot drive it.
             .filter(|source| !bypass || source.switches())
-            // The protocol has room for five footswitches; a Stomp has three,
-            // and offering the two it does not have is offering nothing.
-            .filter(|source| !matches!(source, Source::Footswitch(n) if *n > switches))
+            // A bypass goes onto a switch by the switch's own number, which
+            // only reaches the switches the profile reads; see offers_switch.
+            .filter(|source| {
+                if bypass {
+                    !matches!(source, Source::Footswitch(n) if *n > switches)
+                } else {
+                    self.offers_switch(*source)
+                }
+            })
             .map(|source| {
                 let mut carries: Vec<String> = driving
                     .iter()
@@ -6915,7 +6923,7 @@ impl App {
         marks
             .into_iter()
             .map(|(block, mut found)| {
-                found.sort_by_key(|(source, _)| source.ordinal());
+                found.sort_by_key(|(source, _)| source.rank());
                 let named = found
                     .into_iter()
                     .map(|(source, target)| {
@@ -6944,6 +6952,12 @@ impl App {
             }
             (Source::Expression(n), true) => {
                 format!("what it reads with Expression Pedal {n} at the toe")
+            }
+            (Source::VariaxVolume | Source::VariaxTone, false) => {
+                format!("what it reads with the {} at 0", source.label())
+            }
+            (Source::VariaxVolume | Source::VariaxTone, true) => {
+                format!("what it reads with the {} at 10", source.label())
             }
             (Source::MidiCc, false) => "what it reads when the CC sends 0".to_owned(),
             (Source::MidiCc, true) => "what it reads when the CC sends 127".to_owned(),

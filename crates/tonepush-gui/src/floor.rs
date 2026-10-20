@@ -191,11 +191,7 @@ impl App {
 /// One chip on the floor.
 fn floor_chip(ui: &mut Ui, rect: Rect, chip: &FloorChip) -> egui::Response {
     let response = ui
-        .interact(
-            rect,
-            ui.id().with(("floor", chip.source.ordinal())),
-            Sense::click(),
-        )
+        .interact(rect, ui.id().with(("floor", chip.source)), Sense::click())
         .on_hover_text(format!("Edit {}", source_tag(chip.source)));
     if chip.empty {
         theme::paint::dashed_rect(

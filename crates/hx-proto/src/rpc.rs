@@ -580,48 +580,49 @@ impl StreamReader {
     }
 }
 
-/// What can drive a parameter, in the order HX Edit lists the sources.
+/// What can drive a parameter.
 ///
-/// The wire carries the ordinal, so the order is the protocol rather than a
-/// presentation choice: 1 is EXP Pedal 1 and 9 is Snapshots on every device
-/// seen. `None` is the absence of an assignment and has no ordinal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The wire carries an ordinal for each, and which ordinal depends on the
+/// device: see [`ControlLayout`]. A source a device does not have, such as a
+/// third expression pedal on an HX Stomp, has no ordinal there at all.
+/// `None` is the absence of an assignment and has no source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Source {
     Expression(u8),
+    /// The volume knob of a Variax guitar on the Helix's VDI input.
+    VariaxVolume,
+    /// The tone knob of a Variax guitar.
+    VariaxTone,
     Footswitch(u8),
     MidiCc,
     Snapshots,
 }
 
 impl Source {
-    /// The ordinal for "nothing controls this". Removing an assignment is not
-    /// a separate opcode: it is opcode 37 with `{74: 0, 71: 0}`.
+    /// The ordinal for "nothing controls this", on every device. Removing an
+    /// assignment is not a separate opcode: it is opcode 37 with
+    /// `{74: 0, 71: 0}`.
     pub const NONE: i64 = 0;
 
-    /// The ordinal the device expects under `key::ASSIGN_FLAGS`.
-    pub fn ordinal(self) -> i64 {
+    /// Where the source sorts in a list, the same on every device: pedals,
+    /// Variax knobs, footswitches, MIDI, snapshots, which is the order every
+    /// device's own menu lists them in.
+    pub fn rank(self) -> u16 {
         match self {
-            // Two expression pedals, then five footswitches, then the rest.
-            Source::Expression(n) => n.clamp(1, 2) as i64,
-            Source::Footswitch(n) => 2 + n.clamp(1, 5) as i64,
-            Source::MidiCc => 8,
-            Source::Snapshots => 9,
-        }
-    }
-
-    pub fn from_ordinal(n: i64) -> Option<Source> {
-        match n {
-            1..=2 => Some(Source::Expression(n as u8)),
-            3..=7 => Some(Source::Footswitch((n - 2) as u8)),
-            8 => Some(Source::MidiCc),
-            9 => Some(Source::Snapshots),
-            _ => None,
+            Source::Expression(n) => u16::from(n),
+            Source::VariaxVolume => 100,
+            Source::VariaxTone => 101,
+            Source::Footswitch(n) => 200 + u16::from(n),
+            Source::MidiCc => 300,
+            Source::Snapshots => 400,
         }
     }
 
     pub fn label(self) -> String {
         match self {
             Source::Expression(n) => format!("Expression Pedal {n}"),
+            Source::VariaxVolume => "Variax Volume".into(),
+            Source::VariaxTone => "Variax Tone".into(),
             Source::Footswitch(n) => format!("Footswitch {n}"),
             Source::MidiCc => "MIDI CC".into(),
             Source::Snapshots => "Snapshots".into(),
@@ -633,6 +634,8 @@ impl Source {
     pub fn short(self) -> String {
         match self {
             Source::Expression(n) => format!("EXP{n}"),
+            Source::VariaxVolume => "VVOL".into(),
+            Source::VariaxTone => "VTON".into(),
             Source::Footswitch(n) => format!("FS{n}"),
             Source::MidiCc => "MIDI".into(),
             Source::Snapshots => "SNAP".into(),
@@ -641,17 +644,78 @@ impl Source {
 
     /// Whether this source can drive a block's on/off.
     ///
-    /// Bypass is a switch, so a pedal that sweeps cannot drive it, and
+    /// Bypass is a switch, so a pedal or knob that sweeps cannot drive it, and
     /// snapshots carry a block's state themselves rather than through an
     /// assignment. HX Edit lists pedals here and then steps over them, which is
     /// worse than not offering them.
     pub fn switches(self) -> bool {
         matches!(self, Source::Footswitch(_) | Source::MidiCc)
     }
+}
 
-    /// Every source, for offering a choice.
-    pub fn all() -> Vec<Source> {
-        (1..=9).filter_map(Source::from_ordinal).collect()
+/// How a device numbers its sources on the wire and in its documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlLayout {
+    /// Two expression pedals, five footswitches, MIDI CC at 8 and Snapshots
+    /// at 9: captured from HX Edit on an HX Stomp.
+    Stomp,
+    /// Three expression pedals, the Variax knobs at 4 and 5, footswitches 1
+    /// to 12 at 6 to 17, MIDI CC at 18 and Snapshots at 19. Read off a Helix
+    /// Floor (3.80): its presets, HX Edit's backup of them, the order of its
+    /// own controller menu, and assignments checked on the pedal itself
+    /// (PROTOCOL.md).
+    Helix,
+}
+
+impl ControlLayout {
+    /// The ordinal the device expects under `key::ASSIGN_FLAGS` and keeps in
+    /// a preset's controller table, or `None` for a source it does not have.
+    pub fn ordinal(self, source: Source) -> Option<i64> {
+        let n = match (self, source) {
+            (ControlLayout::Stomp, Source::Expression(n @ 1..=2)) => i64::from(n),
+            (ControlLayout::Stomp, Source::Footswitch(n @ 1..=5)) => 2 + i64::from(n),
+            (ControlLayout::Stomp, Source::MidiCc) => 8,
+            (ControlLayout::Stomp, Source::Snapshots) => 9,
+            (ControlLayout::Helix, Source::Expression(n @ 1..=3)) => i64::from(n),
+            (ControlLayout::Helix, Source::VariaxVolume) => 4,
+            (ControlLayout::Helix, Source::VariaxTone) => 5,
+            (ControlLayout::Helix, Source::Footswitch(n @ 1..=12)) => 5 + i64::from(n),
+            (ControlLayout::Helix, Source::MidiCc) => 18,
+            (ControlLayout::Helix, Source::Snapshots) => 19,
+            _ => return None,
+        };
+        Some(n)
+    }
+
+    /// The source an ordinal names on this device.
+    pub fn source(self, ordinal: i64) -> Option<Source> {
+        let small = |n: i64| u8::try_from(n).ok();
+        match (self, ordinal) {
+            (ControlLayout::Stomp, 1..=2) => small(ordinal).map(Source::Expression),
+            (ControlLayout::Stomp, 3..=7) => small(ordinal - 2).map(Source::Footswitch),
+            (ControlLayout::Stomp, 8) => Some(Source::MidiCc),
+            (ControlLayout::Stomp, 9) => Some(Source::Snapshots),
+            (ControlLayout::Helix, 1..=3) => small(ordinal).map(Source::Expression),
+            (ControlLayout::Helix, 4) => Some(Source::VariaxVolume),
+            (ControlLayout::Helix, 5) => Some(Source::VariaxTone),
+            (ControlLayout::Helix, 6..=17) => small(ordinal - 5).map(Source::Footswitch),
+            (ControlLayout::Helix, 18) => Some(Source::MidiCc),
+            (ControlLayout::Helix, 19) => Some(Source::Snapshots),
+            _ => None,
+        }
+    }
+
+    /// Every source the device offers to assign, in its menu's order. A
+    /// Helix Floor leaves its twelfth footswitch, Tap/Tuner, out.
+    pub fn sources(self) -> Vec<Source> {
+        let last = match self {
+            ControlLayout::Stomp => 9,
+            ControlLayout::Helix => 19,
+        };
+        (1..=last)
+            .filter_map(|n| self.source(n))
+            .filter(|source| !(self == ControlLayout::Helix && *source == Source::Footswitch(12)))
+            .collect()
     }
 }
 
@@ -659,16 +723,67 @@ impl Source {
 mod tests {
     #[test]
     fn sources_round_trip_through_their_ordinals() {
-        use super::Source;
+        use super::{ControlLayout, Source};
+        let stomp = ControlLayout::Stomp;
         for n in 1..=9 {
-            let source = Source::from_ordinal(n).expect("a source");
-            assert_eq!(source.ordinal(), n, "{source:?} does not round trip");
+            let source = stomp.source(n).expect("a source");
+            assert_eq!(
+                stomp.ordinal(source),
+                Some(n),
+                "{source:?} does not round trip"
+            );
         }
         // The ordering is the protocol's, captured from HX Edit.
-        assert_eq!(Source::from_ordinal(1), Some(Source::Expression(1)));
-        assert_eq!(Source::from_ordinal(3), Some(Source::Footswitch(1)));
-        assert_eq!(Source::from_ordinal(8), Some(Source::MidiCc));
-        assert_eq!(Source::all().len(), 9);
+        assert_eq!(stomp.source(1), Some(Source::Expression(1)));
+        assert_eq!(stomp.source(3), Some(Source::Footswitch(1)));
+        assert_eq!(stomp.source(8), Some(Source::MidiCc));
+        assert_eq!(stomp.sources().len(), 9);
+        // What a Stomp does not have is refused, not clamped onto what it has.
+        assert_eq!(stomp.ordinal(Source::Expression(3)), None);
+        assert_eq!(stomp.ordinal(Source::Footswitch(6)), None);
+        assert_eq!(stomp.ordinal(Source::VariaxVolume), None);
+        assert_eq!(stomp.source(10), None);
+    }
+
+    /// The table in PROTOCOL.md, as a Helix Floor numbers its sources.
+    #[test]
+    fn a_helix_floor_numbers_its_sources_its_own_way() {
+        use super::{ControlLayout, Source};
+        let helix = ControlLayout::Helix;
+        for n in 1..=19 {
+            let source = helix.source(n).expect("a source");
+            assert_eq!(
+                helix.ordinal(source),
+                Some(n),
+                "{source:?} does not round trip"
+            );
+        }
+        assert_eq!(helix.source(3), Some(Source::Expression(3)));
+        assert_eq!(helix.source(4), Some(Source::VariaxVolume));
+        assert_eq!(helix.source(5), Some(Source::VariaxTone));
+        // Line 6's template labels 7 and 13; the Floor shows them on FS2 and FS8.
+        assert_eq!(helix.source(7), Some(Source::Footswitch(2)));
+        assert_eq!(helix.source(13), Some(Source::Footswitch(8)));
+        assert_eq!(helix.source(18), Some(Source::MidiCc));
+        assert_eq!(helix.source(19), Some(Source::Snapshots));
+        assert_eq!(helix.source(20), None);
+        // Its menu: three pedals, two knobs, FS1 to FS11, MIDI, snapshots.
+        let menu = helix.sources();
+        assert_eq!(menu.len(), 18);
+        assert!(!menu.contains(&Source::Footswitch(12)));
+        assert!(menu.windows(2).all(|pair| pair[0].rank() < pair[1].rank()));
+    }
+
+    /// Lists sort by rank on every device, which on a Stomp is exactly the
+    /// order of its ordinals, as they always sorted.
+    #[test]
+    fn rank_keeps_a_stomps_ordinal_order() {
+        use super::ControlLayout;
+        let stomp = ControlLayout::Stomp;
+        let sources = stomp.sources();
+        assert!(sources
+            .windows(2)
+            .all(|pair| pair[0].rank() < pair[1].rank()));
     }
 
     use super::*;
