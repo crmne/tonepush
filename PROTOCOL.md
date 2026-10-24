@@ -150,6 +150,19 @@ follows the presets and settings timed out. Sending a keep-alive at most once a
 second during the backup's read loops, as the editor's poll loop already does,
 lets it finish: 231 presets in 8 setlists, 169 settings and 7 IRs in 24.5 s.
 
+**A notification can arrive scrambled. [confirmed on a Helix Floor]** A Helix
+Floor (3.80) sends event 22 `{82: 0, 68: 10, 121: 27}` on the events channel
+over and over, 21 bytes each, a few hundred of them over a whole-pedal backup.
+In a session that had just taken one, a notification arrived with the first four
+bytes of its stream header (`00 00 04 00`) after its body instead of before it:
+every byte present, frame sequence numbers in order, the stream out of step from
+there. Treating the unreadable events stream as a protocol error ended that
+session. Dropping what cannot be read and carrying on at the next message that
+reads keeps it: the same sequence, a backup and then a slot write, completed with
+ten such chunks dropped. Only the Floor's profile drops them so far; the other
+devices read the events channel as strictly as replies, until someone sees one
+there.
+
 Two things that look like fixes and are not:
 
 - **Acknowledging the channel a reply just arrived on, before returning.** The

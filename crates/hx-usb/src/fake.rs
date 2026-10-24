@@ -287,9 +287,21 @@ impl Pedal {
         self.outbox.push_back(frame);
     }
 
+    /// Say something unasked, scrambled the way a Helix Floor (3.80) sent
+    /// one notification among a flood of them: the first four bytes of its
+    /// stream header after its body. Every byte is there, out of order.
+    pub fn notify_scrambled(&mut self, event: i64, args: Value) {
+        let mut stream = stream_message(&Message::Notification { event, args });
+        stream.rotate_left(4);
+        self.send_stream(ChannelId::EVENTS.device, stream);
+    }
+
     /// Queue one message for the host, on the channel `node` names.
     fn reply(&mut self, node: u16, message: &Message) {
-        let body = Encoder::encode(&message.to_value());
+        self.send_stream(node, stream_message(message));
+    }
+
+    fn send_stream(&mut self, node: u16, stream: Vec<u8>) {
         let seq = self.seq.entry(node).or_insert(0);
         let mut payload = Vec::new();
         ChannelHeader {
@@ -299,10 +311,7 @@ impl Pedal {
         }
         .encode_into(&mut payload);
         *seq = seq.wrapping_add(1);
-        payload.extend_from_slice(&0u16.to_le_bytes());
-        payload.extend_from_slice(&0u16.to_le_bytes());
-        payload.extend_from_slice(&(body.len() as u32).to_le_bytes());
-        payload.extend_from_slice(&body);
+        payload.extend_from_slice(&stream);
         let host = ChannelId::ALL
             .iter()
             .find(|channel| channel.device == node)
@@ -316,6 +325,18 @@ impl Pedal {
             self.events_held.push_back(frame);
         }
     }
+}
+
+/// A message as the channel's byte stream carries it: flags, service and
+/// length, then the body.
+fn stream_message(message: &Message) -> Vec<u8> {
+    let body = Encoder::encode(&message.to_value());
+    let mut stream = Vec::new();
+    stream.extend_from_slice(&0u16.to_le_bytes());
+    stream.extend_from_slice(&0u16.to_le_bytes());
+    stream.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    stream.extend_from_slice(&body);
+    stream
 }
 
 /// The USB cable, as far as the session can tell.
