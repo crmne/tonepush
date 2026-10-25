@@ -38,6 +38,10 @@ jobs:
       id-token: write
       attestations: write
     runs-on: ${{ matrix.os }}
+    # The Windows jobs sign in to Azure Artifact Signing as the app
+    # registration that trusts only this environment, which deploys only
+    # from v* tags (PACKAGING.md, "Windows signing").
+    environment: ${{ startsWith(matrix.os, 'windows') && 'windows-signing' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +84,41 @@ jobs:
       # generate bindings, and on macOS, where the cross-target link finds no
       # Ruby symbols. Nothing shipped in a release comes from it.
       - run: cargo build --release -p tonepush-cli -p tonepush-gui --target ${{ matrix.target }}
+
+      # Signed before anything packs them, so the zip, the setup program and
+      # the MSI all carry signed binaries. Signing starts once the
+      # windows-signing environment names a certificate profile.
+      - name: Sign in to Azure for code signing
+        if: runner.os == 'Windows' && vars.AZURE_SIGNING_PROFILE != ''
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign binaries (Azure Artifact Signing)
+        if: runner.os == 'Windows' && vars.AZURE_SIGNING_PROFILE != ''
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files: |
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\tonepush.exe
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\tonepush-gui.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Tonepush
+          description-url: https://github.com/crmne/tonepush
+          # Only the Azure CLI sign-in above: no secrets, no other identity.
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
 
       - name: Package
         shell: bash
@@ -152,6 +191,43 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item "$env:RUNNER_TEMP\windows-packages\packages\$packageTarget\msi\*.msi" dist\
           Remove-Item -Recurse $payload
+
+      - name: Sign installers (Azure Artifact Signing)
+        if: runner.os == 'Windows' && vars.AZURE_SIGNING_PROFILE != ''
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\dist
+          files-folder-filter: exe,msi
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Tonepush
+          description-url: https://github.com/crmne/tonepush
+          # Only the Azure CLI sign-in above: no secrets, no other identity.
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+      - name: Check the signatures
+        if: runner.os == 'Windows' && vars.AZURE_SIGNING_PROFILE != ''
+        shell: pwsh
+        run: |
+          $release = "target\${{ matrix.target }}\release"
+          $files = @("$release\tonepush.exe", "$release\tonepush-gui.exe") + (Get-ChildItem dist\*-setup.exe, dist\*.msi).FullName
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature $file
+            if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate) {
+              throw "$file is not validly signed and timestamped: $($signature.Status) $($signature.StatusMessage)"
+            }
+            "$file signed by $($signature.SignerCertificate.Subject)"
+          }
 
       - name: Attest release packages
         uses: crmne/native-packages/.github/actions/attest@226fb48cb375c7cb309a3e642c7228a6e00e9ebf # v0.10.0

@@ -248,3 +248,33 @@ before archiving. The shared command signs and submits the exact executable and
 dylib tree in a temporary ZIP; only its returned signed copy enters the tarball.
 Raw executables use Gatekeeper's online ticket lookup because they cannot carry
 a stapled ticket. Both the CLI and GUI binary remain in the portable archive.
+
+## Windows signing
+
+Tag releases sign `tonepush.exe`, `tonepush-gui.exe`, the setup program and the MSI with Azure Artifact Signing, as
+**PlentyLabs UG (haftungsbeschränkt) & Co. KG**: SHA-256 Authenticode with
+Microsoft's RFC 3161 timestamp, and a check that every signed file is `Valid`
+before it is attested and uploaded. The account, `plentylabs` in West Europe,
+is shared by Carmine's Windows apps and managed in `crmne/terraform`
+(`azure/signing.tf`, its README's "Code signing").
+
+No secret is involved. The Windows build jobs run in this repository's
+`windows-signing` environment, which deploys only from `v*` tags, and sign in
+through GitHub's OIDC token as the Entra app `GitHub tonepush Windows signing`.
+That app trusts only `repo:crmne/tonepush:environment:windows-signing` and holds
+the "Artifact Signing Certificate Profile Signer" role on the account. The
+environment's variables, none of them secret, are `AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_SIGNING_ENDPOINT`,
+`AZURE_SIGNING_ACCOUNT` and `AZURE_SIGNING_PROFILE`.
+
+Signing starts once `AZURE_SIGNING_PROFILE` is set; until then releases build
+unsigned, as before. The certificate profile waits for PlentyLabs' Public Trust
+identity validation, after which:
+
+```sh
+echo plentylabs | gh variable set AZURE_SIGNING_PROFILE -R crmne/tonepush -e windows-signing
+```
+
+A signature doesn't silence SmartScreen at once: reputation builds as people
+download releases signed by the same publisher, so keep signing every release
+with this identity.
