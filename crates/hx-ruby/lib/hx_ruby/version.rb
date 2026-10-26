@@ -3,5 +3,5 @@
 module HxRuby
   # Kept in step with the Rust workspace version so the gem and the crate it
   # wraps move together.
-  VERSION = "0.9.1"
+  VERSION = "0.10.0"
 end

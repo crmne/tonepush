@@ -45,8 +45,10 @@ The common workflow is the same whichever supported pedal is connected:
 This is a young project, and it says so:
 
 - Hardware verification covers an HX Stomp on firmware 3.80 and a StompStation
-  PRO on firmware 1.5.12, 2.0.10 and 2.2.6. Helix and Helix LT parse and render (two DSP paths,
-  four lanes), but they have not met real hardware yet.
+  PRO on firmware 1.5.12, 2.0.10 and 2.2.6. A contributor tested a Helix Floor on
+  firmware 3.80: reading, backing up, editing and saving. Helix LT and Helix Rack
+  parse and render (two DSP paths, four lanes), but they have not met real
+  hardware yet.
 - The tuner is not here because it is not an HX Edit feature either: it lives on the hardware.
 - HX model names, ranges, and artwork come from HX Edit's own data files, which
   are Line 6's and are not redistributed. The PRO describes its controls and

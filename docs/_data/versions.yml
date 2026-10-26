@@ -1,7 +1,7 @@
-current: v0.9.1
+current: v0.10.0
 items:
-  - id: v0.9.1
-    title: v0.9.1 (latest)
+  - id: v0.10.0
+    title: v0.10.0 (latest)
     url: /download/
   - title: All releases
     url: https://github.com/crmne/tonepush/releases
