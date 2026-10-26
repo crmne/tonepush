@@ -114,8 +114,10 @@ pub(crate) fn nam_facts(document: &[u8]) -> SlotFacts {
 /// the slot adds, and its shape.
 pub(crate) fn ir_facts(blob: &[u8]) -> SlotFacts {
     let samples: Vec<f32> = blob
-        .chunks_exact(4)
-        .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| f32::from_le_bytes(*word))
         .collect();
     let frames = samples
         .iter()

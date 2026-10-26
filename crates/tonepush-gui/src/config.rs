@@ -115,6 +115,10 @@ impl Config {
 /// `~/.config/tonepush/config.json`, mirroring where extracted resources
 /// live. `None` only when there is no home to write into.
 fn config_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = tests::SCRATCH.with(|scratch| scratch.borrow().clone()) {
+        return Some(path);
+    }
     hx_catalog::home::config()
 }
 
@@ -171,8 +175,15 @@ impl Config {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    thread_local! {
+        /// Where this test thread's saves go. A thread's own, unlike
+        /// `TONEPUSH_CONFIG`, so tests running beside it cannot overwrite it.
+        pub(crate) static SCRATCH: std::cell::RefCell<Option<PathBuf>> =
+            const { std::cell::RefCell::new(None) };
+    }
 
     #[test]
     fn toggling_adds_then_removes() {

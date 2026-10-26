@@ -961,10 +961,11 @@ mod tests {
         use egui_kittest::kittest::Queryable;
         use egui_kittest::Harness;
 
-        // Every save in this test process goes to a scratch file, never to
-        // the machine's own config.
+        // Every save on this test's thread goes to a scratch file, never to
+        // the machine's own config or another test's.
         let dir = scratch("question");
-        std::env::set_var("TONEPUSH_CONFIG", dir.join("config.json"));
+        crate::config::tests::SCRATCH
+            .with(|scratch| *scratch.borrow_mut() = Some(dir.join("config.json")));
 
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1280.0, 760.0))

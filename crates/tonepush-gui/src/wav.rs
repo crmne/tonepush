@@ -149,23 +149,31 @@ impl Format {
 
         Ok(match (self.tag, self.bits) {
             (PCM, 16) => data
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| i16::from_le_bytes(*b) as f32 / 32768.0)
                 .collect(),
             (PCM, 24) => data
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|b| {
                     let v = i32::from_le_bytes([0, b[0], b[1], b[2]]) >> 8;
                     v as f32 / 8_388_608.0
                 })
                 .collect(),
             (PCM, 32) => data
-                .chunks_exact(4)
-                .map(|b| i32::from_le_bytes(b.try_into().unwrap()) as f32 / 2_147_483_648.0)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| i32::from_le_bytes(*b) as f32 / 2_147_483_648.0)
                 .collect(),
             (FLOAT, 32) => data
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect(),
             _ => unreachable!("the format was validated above"),
         })
