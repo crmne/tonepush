@@ -37,5 +37,5 @@ crate-type = ["cdylib"]
 # is checked out rather than what was last published.
 hx-catalog = "0.10.0"
 hx-proto = "0.10.0"
-magnus = "0.8"
+magnus = "0.9"
 serde_json = "1"
