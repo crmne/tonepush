@@ -695,28 +695,11 @@ impl Preset {
             return from == to || self.move_slot(from, to);
         }
 
-        // Into another lane: land on the gap's own slot, freeing it if
-        // something lives there; at a lane's end, on its first free slot.
-        let Some(bounds) = self.lane_bounds(anchor) else {
-            return false;
-        };
-        let target = if self.holds_blocks(before) {
-            before
-        } else {
-            match bounds
-                .clone()
-                .find(|p| self.slots.get(*p).is_some_and(|s| s.model.is_none()))
-            {
-                Some(free) => free,
-                None => return false,
-            }
-        };
-        if self.slots.get(target).is_some_and(|s| s.model.is_some())
-            && !self.make_room(target, bounds)
-        {
-            return false;
+        // Into another lane: into the gap, freeing a slot there if need be.
+        match self.room_before(before) {
+            Some(target) => self.swap_slots(from, target),
+            None => false,
         }
-        self.swap_slots(from, target)
     }
 
     /// Put every empty branch's bookkeeping back the way the device keeps it:
@@ -1389,6 +1372,7 @@ impl Preset {
         if !within.contains(&at) {
             return false;
         }
+        let within = self.segment(at, within);
         let Some(free) = (at..within.end).find(|p| {
             self.slots.get(*p).is_some_and(|s| {
                 s.model.is_none() && s.kind != Kind::Input && s.kind != Kind::Output
@@ -1414,6 +1398,90 @@ impl Preset {
         self.slots = collect_slots(&self.tone);
         self.follow_slots(|order| order[at..=free].rotate_right(1));
         true
+    }
+
+    /// Free a slot for a block going into the gap before `before`, and say
+    /// which: `before` is the slot of the block after the gap, or of the
+    /// endpoint or junction that ends its lane.
+    ///
+    /// The block has to land between the block before the gap and the one
+    /// after it. A free slot there is taken as it is. Otherwise the blocks
+    /// after the gap slide along into the lane's next free slot, or, when
+    /// there is none after it, the blocks before the gap slide back into one
+    /// before them. Taking the lane's first free slot instead put a block
+    /// added at the end of a row in front of blocks already there, and
+    /// looking only past the gap said "full" with room left before it.
+    pub fn room_before(&mut self, before: usize) -> Option<usize> {
+        let anchor = if self.holds_blocks(before) {
+            before
+        } else {
+            before.checked_sub(1)?
+        };
+        let bounds = self.lane_bounds(anchor)?;
+        let gap = before.min(bounds.end);
+        let free = |preset: &Preset, slot: usize| {
+            preset.holds_blocks(slot) && preset.slots[slot].model.is_none()
+        };
+        let previous = (bounds.start..gap)
+            .rev()
+            .find(|slot| self.slots[*slot].model.is_some());
+        let after_previous = previous.map_or(bounds.start, |slot| slot + 1);
+        if let Some(slot) = (after_previous..gap).find(|slot| free(self, *slot)) {
+            return Some(slot);
+        }
+        if self.holds_blocks(before) && self.make_room(before, bounds.clone()) {
+            return Some(before);
+        }
+        let previous = previous?;
+        let empty = (self.segment(previous, bounds.clone()).start..previous)
+            .rev()
+            .find(|slot| free(self, *slot))?;
+        let (_, path, from) = slot_location(&self.tone, empty)?;
+        let (_, to_path, to) = slot_location(&self.tone, previous)?;
+        if path != to_path {
+            return None;
+        }
+        let Some(Value::Array(items)) = self.tone.at_mut(&[path, key::SLOTS]) else {
+            return None;
+        };
+        // Slide the blocks from the empty slot up to the gap back by one,
+        // which leaves the empty one just before the gap.
+        items[from..=to].rotate_left(1);
+        self.slots = collect_slots(&self.tone);
+        self.follow_slots(|order| order[empty..=previous].rotate_left(1));
+        Some(previous)
+    }
+
+    /// The stretch of `within` that `position` is in, between the attach points
+    /// of a divided path's split and join. On the main row, the blocks before
+    /// the split's attach point, those up to the join's and those after it are
+    /// the head, the upper branch and the tail, so a slide that carried a block
+    /// across one of those points would move it between them and rewire the
+    /// preset.
+    fn segment(&self, position: usize, within: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        let cuts: Vec<usize> = self
+            .layout()
+            .paths
+            .iter()
+            .filter(|path| !path.lanes.is_empty())
+            .flat_map(|path| [path.split, path.join])
+            .flatten()
+            .filter_map(|junction| self.attach_of(junction))
+            .filter(|at| *at > within.start && *at < within.end)
+            .collect();
+        let start = cuts
+            .iter()
+            .copied()
+            .filter(|cut| *cut <= position)
+            .max()
+            .unwrap_or(within.start);
+        let end = cuts
+            .iter()
+            .copied()
+            .filter(|cut| *cut > position)
+            .min()
+            .unwrap_or(within.end);
+        start..end
     }
 
     /// The slot range a lane occupies, for bounding [`make_room`].
@@ -3142,6 +3210,167 @@ mod tests {
 
         assert!(preset.swap_slots(first, other));
         assert_eq!(marks(&preset), [vec![other], vec![other], vec![other]]);
+    }
+
+    /// A lane holding blocks at exactly these offsets from its start, each a
+    /// copy of the fixture's first block, and the lane's bounds.
+    fn lane_with(blocks: &[usize]) -> (Preset, std::ops::Range<usize>) {
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+        let bounds = preset.lane_bounds(1).unwrap();
+        assert!(bounds.len() >= 8, "a lane of eight slots: {bounds:?}");
+        let (first, _) = preset.blocks().next().unwrap();
+        let block = preset.copy_slot(first).unwrap();
+        let empty = (0..preset.slots.len())
+            .find(|p| preset.slots[*p].kind == Kind::Empty && preset.slots[*p].model.is_none())
+            .and_then(|p| preset.copy_slot(p))
+            .unwrap();
+        for p in bounds.clone() {
+            let body = if blocks.contains(&(p - bounds.start)) {
+                &block
+            } else {
+                &empty
+            };
+            assert!(preset.paste_slot(p, body));
+        }
+        (preset, bounds)
+    }
+
+    fn occupied(preset: &Preset, bounds: &std::ops::Range<usize>) -> Vec<usize> {
+        bounds
+            .clone()
+            .filter(|p| preset.slots[*p].model.is_some())
+            .map(|p| p - bounds.start)
+            .collect()
+    }
+
+    /// Blocks at 1, 2, 4, 5 and 6 of a Helix Floor row: one added after the
+    /// last went into 3, in front of three blocks, because the end of a row
+    /// took its first free slot.
+    #[test]
+    fn a_block_added_at_the_end_of_a_row_goes_after_its_last_block() {
+        let (mut preset, bounds) = lane_with(&[0, 1, 3, 4, 5]);
+        let before = preset.encode();
+        assert_eq!(preset.room_before(bounds.end), Some(bounds.start + 6));
+        assert_eq!(preset.encode(), before, "a free slot is taken as it is");
+    }
+
+    /// A gap with a free slot in it needs nothing moved.
+    #[test]
+    fn a_free_slot_in_the_gap_is_used_as_it_is() {
+        let (mut preset, bounds) = lane_with(&[0, 1, 3, 4, 5]);
+        let before = preset.encode();
+        assert_eq!(preset.room_before(bounds.start + 3), Some(bounds.start + 2));
+        assert_eq!(preset.encode(), before);
+    }
+
+    /// Blocks at both ends of the row and free slots between: adding before
+    /// the third block said the row was full, because only the slots after
+    /// it were looked at.
+    #[test]
+    fn room_before_a_block_is_found_in_front_of_it() {
+        let (mut preset, bounds) = lane_with(&[0, 1, 6, 7]);
+        assert_eq!(preset.room_before(bounds.start + 6), Some(bounds.start + 2));
+    }
+
+    /// No free slot between the blocks either side and none after: the
+    /// blocks before slide back into a free slot in front of them.
+    #[test]
+    fn with_no_room_after_the_blocks_before_slide_back() {
+        let (mut preset, bounds) = lane_with(&[0, 1, 5, 6, 7]);
+        let slot = preset.room_before(bounds.start + 6).expect("room");
+        assert_eq!(slot, bounds.start + 5);
+        assert!(preset.slots[slot].model.is_none());
+        // The block that was before the gap moved back one; nothing was lost.
+        assert_eq!(occupied(&preset, &bounds), [0, 1, 4, 6, 7]);
+    }
+
+    /// The end of a full-to-the-end row slides back the same way.
+    #[test]
+    fn the_end_of_a_row_full_to_its_end_slides_back() {
+        let (mut preset, bounds) = lane_with(&[0, 1, 7]);
+        assert_eq!(preset.room_before(bounds.end), Some(bounds.start + 7));
+        assert_eq!(occupied(&preset, &bounds), [0, 1, 6]);
+    }
+
+    /// What happened to a Helix Floor preset: the Volume Pedal at the end of
+    /// the row, under Expression Pedal 2, slid back to make room after it
+    /// and left the pedal on the empty slot.
+    #[test]
+    fn blocks_slid_back_take_their_controllers_along() {
+        let (mut preset, bounds) = lane_with(&[0, 1, 6, 7]);
+        let [hall, volume] = [bounds.start + 6, bounds.start + 7];
+        mark(&mut preset, &[hall, volume]);
+
+        assert_eq!(preset.room_before(bounds.end), Some(volume));
+        let slid = vec![hall - 1, volume - 1];
+        assert_eq!(marks(&preset), [slid.clone(), slid.clone(), slid]);
+    }
+
+    #[test]
+    fn a_full_row_has_no_room_anywhere() {
+        let (mut preset, bounds) = lane_with(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(preset.room_before(bounds.start + 3), None);
+        assert_eq!(preset.room_before(bounds.end), None);
+    }
+
+    /// The head, upper branch and tail of a split row, as `layout()` reads
+    /// them.
+    fn sections(preset: &Preset) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+        let path = &preset.layout().paths[0];
+        (
+            path.head.clone(),
+            path.lanes[0].blocks.clone(),
+            path.tail.clone(),
+        )
+    }
+
+    /// With no room left on the upper branch, adding after its last block
+    /// slid a branch block back over the split's attach point into the head.
+    #[test]
+    fn a_slide_back_stops_at_the_split() {
+        // Slot 1 free in the head, slot 2 a block there; the split attaches
+        // before 3, so 3 and 4 are the upper branch.
+        let mut preset = shaped_at(
+            &[IN, EMPTY, BLOCK, BLOCK, BLOCK, OUT, SPLIT, BLOCK, JOIN],
+            3,
+            usize::MAX,
+        );
+        assert_eq!(sections(&preset), (vec![2], vec![3, 4], vec![]));
+        let before = preset.encode();
+        assert_eq!(preset.room_before(5), None, "the branch is full");
+        assert_eq!(preset.encode(), before, "nothing moved");
+    }
+
+    /// Room on the branch itself is used, and the head stays as it was.
+    #[test]
+    fn a_slide_back_within_the_branch_still_makes_room() {
+        let mut preset = shaped_at(
+            &[
+                IN, BLOCK, BLOCK, EMPTY, BLOCK, BLOCK, OUT, SPLIT, BLOCK, JOIN,
+            ],
+            3,
+            usize::MAX,
+        );
+        assert_eq!(sections(&preset), (vec![1, 2], vec![4, 5], vec![]));
+        assert_eq!(preset.room_before(6), Some(5));
+        assert_eq!(sections(&preset), (vec![1, 2], vec![3, 4], vec![]));
+    }
+
+    /// Sliding the branch along to free its first slot used to push its last
+    /// block over the join's attach point into the tail.
+    #[test]
+    fn a_slide_along_stops_at_the_join() {
+        // The split attaches before 2 and the join before 4: 2 and 3 are the
+        // upper branch, and 4 is a free slot in the tail.
+        let mut preset = shaped_at(
+            &[IN, BLOCK, BLOCK, BLOCK, EMPTY, OUT, SPLIT, BLOCK, JOIN],
+            2,
+            4,
+        );
+        assert_eq!(sections(&preset), (vec![1], vec![2, 3], vec![]));
+        let before = preset.encode();
+        assert_eq!(preset.room_before(2), None, "the branch is full");
+        assert_eq!(preset.encode(), before, "nothing moved");
     }
 
     /// A full lane has nowhere to slide, and must say so rather than pushing a
