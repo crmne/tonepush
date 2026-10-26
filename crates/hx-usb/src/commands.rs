@@ -1399,19 +1399,46 @@ impl Landed {
     /// `active` is the snapshot whose tempo and bypass states the device
     /// keeps for itself; taken from the document written, so both sides of
     /// the comparison leave out the same one. `None` leaves out all of them.
+    ///
+    /// Two differences between a stored preset and the same preset loaded are
+    /// the pedal's own, so both sides read them the same way. A stored preset
+    /// leaves a snapshot's block state unset where the loaded one says off; and
+    /// it keeps values on the input and output of a path that holds no
+    /// blocks, which the loaded one drops. Seen on a Helix Floor at 3.80, where
+    /// restoring any stored preset failed this check although it landed.
     fn of(preset: &Preset, active: Option<usize>) -> Landed {
         let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect();
+        let idle_ends: BTreeSet<usize> = preset
+            .layout()
+            .paths
+            .iter()
+            .filter(|path| {
+                path.head.is_empty()
+                    && path.tail.is_empty()
+                    && path.lanes.iter().all(|lane| lane.blocks.is_empty())
+            })
+            .flat_map(|path| [path.input, path.output])
+            .flatten()
+            .collect();
         Landed {
             slots: preset
                 .slots
                 .iter()
-                .map(|slot| LandedSlot {
-                    kind: slot.kind,
-                    model: slot.model,
-                    paired: slot.paired,
-                    enabled: slot.enabled,
-                    values: bits(&slot.values),
-                    paired_values: bits(&slot.paired_values),
+                .enumerate()
+                .map(|(position, slot)| {
+                    let idle = idle_ends.contains(&position);
+                    LandedSlot {
+                        kind: slot.kind,
+                        model: slot.model,
+                        paired: slot.paired,
+                        enabled: slot.enabled,
+                        values: if idle { Vec::new() } else { bits(&slot.values) },
+                        paired_values: if idle {
+                            Vec::new()
+                        } else {
+                            bits(&slot.paired_values)
+                        },
+                    }
                 })
                 .collect(),
             tempo: preset.tempo().map(f32::to_bits),
@@ -1420,9 +1447,14 @@ impl Landed {
                 .into_iter()
                 .enumerate()
                 .map(|(index, s)| {
-                    let own = active
-                        .is_some_and(|active| active != index)
-                        .then(|| (s.tempo.map(f32::to_bits), s.enabled));
+                    let own = active.is_some_and(|active| active != index).then(|| {
+                        let enabled = s
+                            .enabled
+                            .iter()
+                            .map(|state| Some(state.unwrap_or(false)))
+                            .collect();
+                        (s.tempo.map(f32::to_bits), enabled)
+                    });
                     (s.name, own)
                 })
                 .collect(),
@@ -1883,5 +1915,68 @@ mod pedal_tests {
         assert_eq!(Landed::of(&kept, Some(active)), want);
         let lost = snapshot_tempo(other, 97.0);
         assert_ne!(Landed::of(&lost, Some(active)), want);
+    }
+
+    /// A stored preset leaves a snapshot's block state unset where the same
+    /// preset loaded says off. Restoring one must not read as a write that
+    /// never landed, while a state that really changed still does.
+    #[test]
+    fn an_unset_snapshot_state_reads_as_off() {
+        let written = Preset::parse(include_bytes!("../../hx-proto/tests/preset.bin")).unwrap();
+        let active = active_snapshot(&written).expect("the fixture names its active snapshot");
+        let other = (active + 1) % written.snapshot_details().len();
+        let slot = written.snapshot_details()[other]
+            .enabled
+            .iter()
+            .position(|state| *state == Some(false))
+            .expect("a block that snapshot turns off");
+        let state = |to: Value| {
+            let mut preset = Preset::parse(&written.encode()).unwrap();
+            let snapshots = preset.tone.get_mut(10).and_then(|s| s.get_mut(10)).unwrap();
+            let Value::Array(entries) = snapshots else {
+                panic!("snapshots are an array")
+            };
+            let Some(Value::Array(slots)) = entries[other].get_mut(3) else {
+                panic!("block states are an array")
+            };
+            let Value::Array(fields) = &mut slots[slot] else {
+                panic!("a block state is an array")
+            };
+            fields[1] = to;
+            preset
+        };
+        let stored = state(Value::Nil);
+        assert_eq!(stored.snapshot_details()[other].enabled[slot], None);
+        let want = Landed::of(&stored, Some(active));
+        assert_eq!(Landed::of(&written, Some(active)), want);
+        assert_ne!(Landed::of(&state(Value::Bool(true)), Some(active)), want);
+    }
+
+    /// The input and output of a path with no blocks keep values in a stored
+    /// preset that the loaded one drops; anywhere else, values still count.
+    #[test]
+    fn values_on_the_ends_of_an_empty_path_are_the_pedal_s_own() {
+        let empty = Preset::parse(include_bytes!(
+            "../../hx-proto/tests/fixtures/gen-01-empty.hxpreset"
+        ))
+        .expect("the empty fixture parses");
+        let input = empty.layout().paths[0].input.expect("an input");
+        assert!(
+            !empty.slots[input].values.is_empty(),
+            "the input has values"
+        );
+        let mut dropped = Preset::parse(&empty.encode()).unwrap();
+        dropped.slots[input].values.clear();
+        assert_eq!(Landed::of(&dropped, None), Landed::of(&empty, None));
+
+        let written = Preset::parse(include_bytes!("../../hx-proto/tests/preset.bin")).unwrap();
+        let input = written.layout().paths[0].input.expect("an input");
+        let mut dropped = Preset::parse(&written.encode()).unwrap();
+        dropped.slots[input].values.clear();
+        assert_ne!(
+            Landed::of(&dropped, None),
+            Landed::of(&written, None),
+            "a used path's input values count"
+        );
     }
 }
