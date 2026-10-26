@@ -23,7 +23,7 @@ serde_json = "1"
 # tree builds for macOS, Windows, Linux and Android.
 # The winit backends are named features from 0.30 on: with default features off
 # and neither named, winit compiles for no platform at all and says so.
-eframe = { version = "0.36.2", default-features = false, features = [
+eframe = { version = "0.37.0", default-features = false, features = [
     "glow",
     "default_fonts",
     "links",
