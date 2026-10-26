@@ -154,7 +154,7 @@ jobs:
           Remove-Item -Recurse $payload
 
       - name: Attest release packages
-        uses: crmne/native-packages/.github/actions/attest@226fb48cb375c7cb309a3e642c7228a6e00e9ebf # v0.10.0
+        uses: crmne/native-packages/.github/actions/attest@25a4214d2f203357c84b069f39de7c17c0be6253 # v0.11.0
         with:
           subject-path: |
             dist/*.tar.gz
@@ -242,7 +242,7 @@ jobs:
           tar czf "dist/$name.tar.gz" -C "$RUNNER_TEMP/signed-portable" "$name"
 
       - name: Attest macOS packages
-        uses: crmne/native-packages/.github/actions/attest@226fb48cb375c7cb309a3e642c7228a6e00e9ebf # v0.10.0
+        uses: crmne/native-packages/.github/actions/attest@25a4214d2f203357c84b069f39de7c17c0be6253 # v0.11.0
         with:
           subject-path: |
             dist/*.dmg
