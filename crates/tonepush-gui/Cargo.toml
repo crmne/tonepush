@@ -5,7 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-rust-version.workspace = true
+# fastframe needs 1.98; the libraries the Ruby gem uses still build on the
+# workspace's older minimum.
+rust-version = "1.98"
 
 [dependencies]
 hx-proto.workspace = true

@@ -102,8 +102,9 @@ Runtime:
 
 Build time:
 
-- Rust `1.87` or newer (the pinned toolchain in `rust-toolchain.toml` is what
-  CI uses; any newer stable works)
+- Rust `1.98` or newer for the editor, `1.87` for the command-line tool and
+  libraries (the pinned toolchain in `rust-toolchain.toml` is what CI uses; any
+  newer stable works)
 - on Linux, the GUI needs the usual egui build packages: `libxkbcommon-dev`,
   `libwayland-dev`, `libgl1-mesa-dev` or your distro's equivalents
 
