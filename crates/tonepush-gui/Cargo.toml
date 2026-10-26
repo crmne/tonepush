@@ -23,14 +23,14 @@ serde_json = "1"
 # tree builds for macOS, Windows, Linux and Android.
 # The winit backends are named features from 0.30 on: with default features off
 # and neither named, winit compiles for no platform at all and says so.
-eframe = { version = "0.36.2", default-features = false, features = [
+eframe = { version = "0.37.0", default-features = false, features = [
     "glow",
     "default_fonts",
     "links",
     "wayland",
     "x11",
 ] }
-egui = "0.36.2"
+egui = "0.37.0"
 # The shared foundation of the family's apps: Inter at the weights used here
 # with system fallbacks for other scripts, and the desktop's text rendering.
 fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.14.1" }
@@ -48,11 +48,11 @@ fastframe-update = { git = "https://github.com/crmne/fastframe", tag = "v0.14.1"
 fastframe-scroll = { git = "https://github.com/crmne/fastframe", tag = "v0.14.1" }
 # The error type fastframe-update's transport returns.
 anyhow.workspace = true
-egui_extras = { version = "0.36.2", features = ["image", "file", "svg"] }
+egui_extras = { version = "0.37.0", features = ["image", "file", "svg"] }
 # Virtualised rows and sticky columns for the library table. egui_extras'
 # TableBuilder builds every row whether or not it is on screen, which a library
 # of a few thousand tones cannot afford.
-egui_table = "0.10"
+egui_table = "0.11"
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Native file dialogs, so import and export use the system picker rather than a
 # path typed into a text box.
@@ -70,9 +70,9 @@ jiff = "0.2"
 [dev-dependencies]
 # Renders the editor offscreen on the GPU for the design screenshots (see
 # `src/screenshots.rs`); never part of the shipped program.
-egui_kittest = { version = "0.36.2", features = ["wgpu"] }
+egui_kittest = { version = "0.37.0", features = ["wgpu"] }
 # Chooses the GPU that renderer runs on.
-egui-wgpu = "0.36"
+egui-wgpu = "0.37"
 
 [lib]
 name = "tonepush_gui"
