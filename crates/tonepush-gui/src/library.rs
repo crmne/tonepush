@@ -53,6 +53,9 @@ pub(crate) fn atomic_write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> s
 /// Where kept tones live: `~/.local/share/tonepush/library`, beside the
 /// extracted resources. `None` only when there is no home to write into.
 pub fn dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    return tests::dir();
+    #[cfg(not(test))]
     hx_catalog::home::library()
 }
 
@@ -1773,6 +1776,21 @@ pub(crate) mod tests {
     /// other's. They take turns; the guard is held for the whole test.
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    thread_local! {
+        /// The library of the test running on this thread. A test that builds
+        /// an editor without a [`Scratch`] reads it at startup and may write it
+        /// back, so it must not find another test's library, or the machine's.
+        static HELD: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// This thread's [`Scratch`], or for the screenshot scenes, which run on
+    /// their own, the scratch library their environment names.
+    pub(super) fn dir() -> Option<PathBuf> {
+        HELD.with(|held| held.borrow().clone()).or_else(|| {
+            std::env::var_os("TONEPUSH_SCREENSHOTS").and_then(|_| hx_catalog::home::library())
+        })
+    }
+
     /// A library of its own for one test, found through the environment
     /// while the test holds it; tests elsewhere in the crate use it too.
     pub(crate) struct Scratch {
@@ -1793,6 +1811,7 @@ pub(crate) mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::env::set_var("TONEPUSH_LIBRARY", &dir);
+            HELD.with(|held| *held.borrow_mut() = Some(dir.clone()));
             Scratch { dir, _guard: guard }
         }
     }
@@ -1801,6 +1820,7 @@ pub(crate) mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
             std::env::remove_var("TONEPUSH_LIBRARY");
+            HELD.with(|held| *held.borrow_mut() = None);
         }
     }
 
@@ -1967,6 +1987,24 @@ pub(crate) mod tests {
         assert_eq!(saved.added_at, first.added_at);
         assert!(!saved.modified_at.is_empty());
         assert_eq!(meta_of(&hash).unwrap().rating, 4);
+    }
+
+    /// A test that holds no scratch library finds none, even while another
+    /// test's is in the environment, so building an editor cannot write over
+    /// that one or the machine's own.
+    #[test]
+    fn a_test_without_a_scratch_finds_no_library() {
+        let (held, holding) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let other = std::thread::spawn(move || {
+            let _scratch = Scratch::new("someone-else");
+            held.send(dir()).unwrap();
+            let _ = finished.recv();
+        });
+        assert!(holding.recv().unwrap().is_some());
+        assert_eq!(dir(), None);
+        done.send(()).unwrap();
+        other.join().unwrap();
     }
 
     /// Deleting a choice of tones takes each out of the library, all its
