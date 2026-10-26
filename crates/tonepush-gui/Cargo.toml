@@ -48,7 +48,7 @@ fastframe-update = { git = "https://github.com/crmne/fastframe", tag = "v0.14.1"
 fastframe-scroll = { git = "https://github.com/crmne/fastframe", tag = "v0.14.1" }
 # The error type fastframe-update's transport returns.
 anyhow.workspace = true
-egui_extras = { version = "0.36.2", features = ["image", "file", "svg"] }
+egui_extras = { version = "0.37.0", features = ["image", "file", "svg"] }
 # Virtualised rows and sticky columns for the library table. egui_extras'
 # TableBuilder builds every row whether or not it is on screen, which a library
 # of a few thousand tones cannot afford.
