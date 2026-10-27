@@ -513,39 +513,24 @@ mod tests {
     }
 
     /// The Windows installer's marker, in the form fastframe-update reads, so
-    /// an installed copy updates by running the next installer. The setup
-    /// script must install it, the editor and the command line, and the
-    /// release workflow must build and publish the installer.
+    /// an installed copy updates by running the next installer. Releases
+    /// publish only the Windows Installer package, so an installed copy
+    /// updates through it; the Inno Setup script stays only as the old
+    /// install the package takes over.
     #[test]
     fn the_windows_installer_carries_the_updaters_marker() {
         let marker = include_str!("../../../packaging/windows/tonepush-installer.txt");
         assert_eq!(marker.trim(), format!("{}-installer-v1", CONFIG.slug));
-        let script = include_str!("../../../packaging/windows/tonepush.iss");
-        assert!(
-            script.starts_with('\u{feff}'),
-            "Inno Setup needs a UTF-8 BOM"
-        );
-        for file in ["tonepush-installer.txt", "tonepush-gui.exe", "tonepush.exe"] {
-            assert!(script.contains(file), "tonepush.iss must install {file}");
-        }
-        assert!(script
-            .contains("OutputBaseFilename=tonepush-v{#Version}-{#Arch}-pc-windows-msvc-setup"));
-        // Setup closes a running TonePush on its own; Uninstall has to be
-        // told, or it removes what it can and leaves the rest behind.
-        assert!(script.contains("function InitializeUninstall: Boolean;"));
-        // The updater's working folders go on uninstall.
-        let staging = format!(".{}-update-*", CONFIG.slug);
-        assert!(script.contains(&format!("Name: \"{{app}}\\{staging}\"")));
         let release = include_str!("../../../.github/workflows/release.yml");
-        assert!(release.contains("packaging\\windows\\tonepush.iss"));
-        assert!(release.contains("dist/*-setup.exe"));
+        assert!(!release.contains("tonepush.iss"));
+        assert!(!release.contains("dist/*-setup.exe"));
     }
 
     /// The Windows Installer package, in the contract fastframe-update keeps:
     /// it installs the marker beside the editor into `INSTALLFOLDER`, which
     /// the updater sets to the folder the editor runs from, and it is
-    /// published as `<slug>-v<version>-<target>.msi` beside the setup
-    /// program, which it takes over.
+    /// published as `<slug>-v<version>-<target>.msi`, and takes over a copy
+    /// the Inno Setup program of earlier releases installed.
     #[test]
     fn the_windows_installer_package_keeps_the_updaters_contract() {
         let package = include_str!("../../../packaging/windows/tonepush.wxs");

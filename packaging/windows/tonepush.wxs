@@ -8,7 +8,8 @@
   - tonepush-installer.txt tells TonePush's updater that this copy came from
     an installer, so an update downloads and runs the next package with
     INSTALLFOLDER set to the folder the editor runs from.
-  - Takes over a copy installed by the Inno Setup installer of 0.9.x: it
+  - Takes over a copy installed by the Inno Setup installer of 0.9.x and
+    0.10.0: it
     installs into that folder, then removes Inno's uninstaller and its
     Settings > Apps entry. Settings and the library live elsewhere and stay.
   - Refuses to install or uninstall while TonePush or the tonepush command
