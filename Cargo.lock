@@ -1238,16 +1238,16 @@ dependencies = [
 
 [[package]]
 name = "fastframe-dirs"
-version = "0.15.0"
-source = "git+https://github.com/crmne/fastframe?tag=v0.15.0#b660405eedd1398186c6cc72985e129f9ca185d4"
+version = "0.15.2"
+source = "git+https://github.com/crmne/fastframe?tag=v0.15.2#4d115b5e5838c207c0879205e6b1bc16fc1e9a9c"
 dependencies = [
  "directories",
 ]
 
 [[package]]
 name = "fastframe-emoji"
-version = "0.15.0"
-source = "git+https://github.com/crmne/fastframe?tag=v0.15.0#b660405eedd1398186c6cc72985e129f9ca185d4"
+version = "0.15.2"
+source = "git+https://github.com/crmne/fastframe?tag=v0.15.2#4d115b5e5838c207c0879205e6b1bc16fc1e9a9c"
 dependencies = [
  "egui",
  "fastframe-fonts",
@@ -1264,8 +1264,8 @@ dependencies = [
 
 [[package]]
 name = "fastframe-fonts"
-version = "0.15.0"
-source = "git+https://github.com/crmne/fastframe?tag=v0.15.0#b660405eedd1398186c6cc72985e129f9ca185d4"
+version = "0.15.2"
+source = "git+https://github.com/crmne/fastframe?tag=v0.15.2#4d115b5e5838c207c0879205e6b1bc16fc1e9a9c"
 dependencies = [
  "directories",
  "egui",
@@ -1277,16 +1277,16 @@ dependencies = [
 
 [[package]]
 name = "fastframe-scroll"
-version = "0.15.0"
-source = "git+https://github.com/crmne/fastframe?tag=v0.15.0#b660405eedd1398186c6cc72985e129f9ca185d4"
+version = "0.15.2"
+source = "git+https://github.com/crmne/fastframe?tag=v0.15.2#4d115b5e5838c207c0879205e6b1bc16fc1e9a9c"
 dependencies = [
  "egui",
 ]
 
 [[package]]
 name = "fastframe-text"
-version = "0.15.0"
-source = "git+https://github.com/crmne/fastframe?tag=v0.15.0#b660405eedd1398186c6cc72985e129f9ca185d4"
+version = "0.15.2"
+source = "git+https://github.com/crmne/fastframe?tag=v0.15.2#4d115b5e5838c207c0879205e6b1bc16fc1e9a9c"
 dependencies = [
  "egui",
  "zbus",
@@ -1294,8 +1294,8 @@ dependencies = [
 
 [[package]]
 name = "fastframe-update"
-version = "0.15.0"
-source = "git+https://github.com/crmne/fastframe?tag=v0.15.0#b660405eedd1398186c6cc72985e129f9ca185d4"
+version = "0.15.2"
+source = "git+https://github.com/crmne/fastframe?tag=v0.15.2#4d115b5e5838c207c0879205e6b1bc16fc1e9a9c"
 dependencies = [
  "anyhow",
  "fastframe-dirs",
