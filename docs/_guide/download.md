@@ -41,9 +41,9 @@ The installer needs no administrator rights. It puts TonePush in the Start
 menu and installs the `tonepush` command-line tool beside it. A copy
 installed with an earlier TonePush setup program (`-setup.exe`, 0.9.0 to
 0.10.0) is updated in place, keeping its folder, its desktop shortcut and your
-settings. 0.9.1 and later move to it by themselves; from 0.9.0, run the
-installer once by hand, as that version no longer finds updates. Remove TonePush from
-Settings, Apps. Installing or removing it waits until TonePush and any
+settings. 0.9.1 and later move to the installer by themselves; from 0.9.0, run
+the installer once by hand, as that version no longer finds updates. Remove
+TonePush from Settings, Apps. Installing or removing it waits until TonePush and any
 `tonepush` command have quit: quit them and try again.
 
 To run TonePush without installing, unpack an archive and run

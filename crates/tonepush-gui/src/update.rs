@@ -521,6 +521,21 @@ mod tests {
     fn the_windows_installer_carries_the_updaters_marker() {
         let marker = include_str!("../../../packaging/windows/tonepush-installer.txt");
         assert_eq!(marker.trim(), format!("{}-installer-v1", CONFIG.slug));
+        // test-installer.ps1 still builds the setup program, to make an install
+        // the package takes over, so the script keeps what that install needs.
+        let script = include_str!("../../../packaging/windows/tonepush.iss");
+        assert!(
+            script.starts_with('\u{feff}'),
+            "Inno Setup needs a UTF-8 BOM"
+        );
+        for file in ["tonepush-installer.txt", "tonepush-gui.exe", "tonepush.exe"] {
+            assert!(script.contains(file), "tonepush.iss must install {file}");
+        }
+        assert!(script
+            .contains("OutputBaseFilename=tonepush-v{#Version}-{#Arch}-pc-windows-msvc-setup"));
+        assert!(script.contains("function InitializeUninstall: Boolean;"));
+        let staging = format!(".{}-update-*", CONFIG.slug);
+        assert!(script.contains(&format!("Name: \"{{app}}\\{staging}\"")));
         let release = include_str!("../../../.github/workflows/release.yml");
         assert!(!release.contains("tonepush.iss"));
         assert!(!release.contains("dist/*-setup.exe"));
