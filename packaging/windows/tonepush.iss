@@ -1,4 +1,8 @@
-﻿; Windows installer built from a release build with Inno Setup 6.3 or newer:
+﻿; No longer shipped: releases after 0.10.0 ship only the Windows Installer
+; package (tonepush.wxs), which takes over a copy this script installed.
+; test-installer.ps1 still builds it to make such a copy to take over.
+;
+; Windows installer built from a release build with Inno Setup 6.3 or newer:
 ;
 ;   iscc /DVersion=0.9.0 /DArch=x86_64 /DBinaries=...\target\x86_64-pc-windows-msvc\release ^
 ;        /DOutputDir=dist packaging\windows\tonepush.iss
