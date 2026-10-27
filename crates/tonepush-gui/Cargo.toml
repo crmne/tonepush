@@ -45,7 +45,7 @@ fastframe-emoji = { git = "https://github.com/crmne/fastframe", tag = "v0.15.0" 
 fastframe-update = { git = "https://github.com/crmne/fastframe", tag = "v0.15.0" }
 # Wheel notches of 120 points, and Linux touchpads scaled with a glide after
 # the fingers lift, as the other fastframe apps scroll.
-fastframe-scroll = { git = "https://github.com/crmne/fastframe", tag = "v0.15.0" }
+fastframe-scroll = { git = "https://github.com/crmne/fastframe", tag = "v0.15.2" }
 # The error type fastframe-update's transport returns.
 anyhow.workspace = true
 egui_extras = { version = "0.36.2", features = ["image", "file", "svg"] }
