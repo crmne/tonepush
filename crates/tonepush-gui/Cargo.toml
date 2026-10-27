@@ -38,7 +38,7 @@ fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.14.1" }
 # Colour emoji in the platform's own style (Apple Color Emoji, Segoe UI
 # Emoji, the desktop's colour emoji font), in every text through its egui
 # plugin. egui's bundled monochrome emoji face stays the fallback.
-fastframe-emoji = { git = "https://github.com/crmne/fastframe", tag = "v0.14.1" }
+fastframe-emoji = { git = "https://github.com/crmne/fastframe", tag = "v0.15.0" }
 # Self-update from GitHub releases: the daily check, refusing copies a package
 # manager owns, the signed download, and the helper that installs, relaunches
 # and rolls back. It talks through ureq below, so no second HTTP client.
