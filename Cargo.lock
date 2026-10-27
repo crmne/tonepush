@@ -1250,7 +1250,7 @@ version = "0.15.0"
 source = "git+https://github.com/crmne/fastframe?tag=v0.15.0#b660405eedd1398186c6cc72985e129f9ca185d4"
 dependencies = [
  "egui",
- "fastframe-fonts",
+ "fastframe-fonts 0.15.0",
  "harfrust",
  "log",
  "memmap2",
@@ -1266,6 +1266,19 @@ dependencies = [
 name = "fastframe-fonts"
 version = "0.15.0"
 source = "git+https://github.com/crmne/fastframe?tag=v0.15.0#b660405eedd1398186c6cc72985e129f9ca185d4"
+dependencies = [
+ "directories",
+ "egui",
+ "log",
+ "memmap2",
+ "skrifa",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "fastframe-fonts"
+version = "0.15.2"
+source = "git+https://github.com/crmne/fastframe?tag=v0.15.2#4d115b5e5838c207c0879205e6b1bc16fc1e9a9c"
 dependencies = [
  "directories",
  "egui",
@@ -4119,7 +4132,7 @@ dependencies = [
  "egui_kittest",
  "egui_table",
  "fastframe-emoji",
- "fastframe-fonts",
+ "fastframe-fonts 0.15.2",
  "fastframe-scroll",
  "fastframe-text",
  "fastframe-update",

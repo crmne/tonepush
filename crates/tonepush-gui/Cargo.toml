@@ -33,7 +33,7 @@ eframe = { version = "0.36.2", default-features = false, features = [
 egui = "0.36.2"
 # The shared foundation of the family's apps: Inter at the weights used here
 # with system fallbacks for other scripts, and the desktop's text rendering.
-fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.15.0" }
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.15.2" }
 fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.15.0" }
 # Colour emoji in the platform's own style (Apple Color Emoji, Segoe UI
 # Emoji, the desktop's colour emoji font), in every text through its egui
