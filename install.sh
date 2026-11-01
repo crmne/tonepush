@@ -147,7 +147,9 @@ PLIST
 # Without this rule everything fails with a permission error that looks like a
 # bug in this program, so it is worth doing at install time.
 install_udev_rule() {
-    if [ -f "$UDEV_RULE" ]; then
+    # A rule from before StompStation PRO support grants nothing on its serial
+    # port, so it is replaced rather than taken as done.
+    if grep -qs SONULAB "$UDEV_RULE"; then
         say "udev rule already present"
         return
     fi
