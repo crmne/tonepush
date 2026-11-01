@@ -209,7 +209,12 @@ pub struct Frame {
 
 impl Frame {
     pub fn parse(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let text = std::str::from_utf8(bytes)?;
+        // A stray byte in one string must not cost the whole reply: a browse
+        // answers with the pedal's entire tree in one frame, and firmware text
+        // is not always UTF-8 (#74). JSON's structure is ASCII, so a bad byte
+        // that isn't inside a string still fails below. Blobs travel as ASCII
+        // text, so the bytes a backup keeps are never touched by this.
+        let text = String::from_utf8_lossy(bytes);
         let mut records = Vec::new();
         for line in text
             // Firmware 1.5.12 answers ordinary requests with CRLF, but a
@@ -306,8 +311,6 @@ impl Decoder {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
-    #[error("VoidX frame was not UTF-8: {0}")]
-    Utf8(#[from] std::str::Utf8Error),
     #[error("malformed VoidX record {0:?}")]
     MalformedRecord(String),
     #[error("invalid JSON for VoidX subject {subject:?} near {context:?}: {source}")]
@@ -432,6 +435,26 @@ mod tests {
         let frame = Frame::parse(raw).unwrap();
         assert!(frame.records()[0].value()["value"].is_null());
         assert_eq!(frame.encode(), raw);
+    }
+
+    #[test]
+    fn a_byte_that_is_not_utf8_costs_one_character_not_the_frame() {
+        // Latin-1 degrees in firmware text, and a name cut through a
+        // two-byte character by a fixed-size field.
+        let raw = b"root\\app\\a:{\"desc\":\"Tilt 45\xB0\",\"value\":1}\r\n\
+root\\app\\b:{\"desc\":\"M\xC3\",\"value\":2}\r\n\
+root\\app\\c:{\"desc\":\"Plain\",\"value\":3}";
+        let frame = Frame::parse(raw).unwrap();
+        let records = frame.records();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].value()["desc"], "Tilt 45\u{FFFD}");
+        assert_eq!(records[1].value()["desc"], "M\u{FFFD}");
+        assert_eq!(records[2].value()["value"], 3);
+    }
+
+    #[test]
+    fn a_bad_byte_outside_a_string_is_still_refused() {
+        assert!(Frame::parse(b"root\\a:{\"value\":\xB0}").is_err());
     }
 
     #[test]
