@@ -652,12 +652,15 @@ impl Session {
         let active = active_snapshot(preset);
         let want = Landed::of(preset, active);
         let deadline = Instant::now() + Duration::from_secs(4);
+        let mut seen = None;
         loop {
             match retry_device_refusal(self.read_preset()) {
                 Ok(Some(back)) => {
-                    if Landed::of(&back, active) == want {
+                    let landed = Landed::of(&back, active);
+                    if landed == want {
                         return Ok(());
                     }
+                    seen = Some(landed);
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -668,9 +671,13 @@ impl Session {
                 }
             }
             if Instant::now() >= deadline {
-                return Err(Error::Protocol(
-                    "the device accepted a document and never showed it back".into(),
-                ));
+                return Err(Error::Protocol(match seen {
+                    Some(seen) => format!(
+                        "the device accepted a document and never showed it back: {}",
+                        want.difference(&seen)
+                    ),
+                    None => "the device accepted a document and never showed it back".into(),
+                }));
             }
             std::thread::sleep(Duration::from_millis(250));
         }
@@ -1312,6 +1319,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_write_that_did_not_land_says_which_field_differs() {
+        let slot = |value: u32| LandedSlot {
+            kind: hx_proto::preset::Kind::Block,
+            model: Some(1),
+            paired: None,
+            enabled: true,
+            values: vec![value],
+            paired_values: Vec::new(),
+        };
+        let landed = |value, tempo: u32, name: &str| Landed {
+            slots: vec![slot(1), slot(value)],
+            tempo: Some(tempo),
+            snapshots: vec![(name.to_owned(), None)],
+        };
+        let wrote = landed(2, 120, "ONE");
+
+        let slot_differs = wrote.difference(&landed(3, 120, "ONE"));
+        assert!(slot_differs.starts_with("slot 1 wrote"), "{slot_differs}");
+        let tempo = wrote.difference(&landed(2, 90, "ONE"));
+        assert!(tempo.starts_with("tempo wrote"), "{tempo}");
+        let snapshot = wrote.difference(&landed(2, 120, "TWO"));
+        assert!(snapshot.starts_with("snapshot 0 wrote"), "{snapshot}");
+    }
+
+    #[test]
     fn assignment_replies_distinguish_none_from_malformed() {
         assert_eq!(
             assignment_source(rpc::ControlLayout::Stomp, &Value::Nil).unwrap(),
@@ -1459,6 +1491,37 @@ impl Landed {
                 })
                 .collect(),
         }
+    }
+
+    /// The first field that kept a write from counting as landed, for the
+    /// error: a pedal this has not been seen on can only be diagnosed from
+    /// what its owner reads out of that message.
+    fn difference(&self, back: &Landed) -> String {
+        if self.slots.len() != back.slots.len() {
+            return format!(
+                "{} slots written, {} read back",
+                self.slots.len(),
+                back.slots.len()
+            );
+        }
+        for (position, (wrote, read)) in self.slots.iter().zip(&back.slots).enumerate() {
+            if wrote != read {
+                return format!("slot {position} wrote {wrote:?}, read back {read:?}");
+            }
+        }
+        if self.tempo != back.tempo {
+            return format!("tempo wrote {:?}, read back {:?}", self.tempo, back.tempo);
+        }
+        for (index, (wrote, read)) in self.snapshots.iter().zip(&back.snapshots).enumerate() {
+            if wrote != read {
+                return format!("snapshot {index} wrote {wrote:?}, read back {read:?}");
+            }
+        }
+        format!(
+            "{} snapshots written, {} read back",
+            self.snapshots.len(),
+            back.snapshots.len()
+        )
     }
 }
 
