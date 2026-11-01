@@ -29,7 +29,7 @@ pub enum Step {
         block: i64,
         index: i64,
         value: f32,
-        switch: bool,
+        kind: hx_catalog::Kind,
         name: String,
     },
     Enabled {
@@ -412,7 +412,7 @@ fn read_block(
         };
 
         // .hlx stores values in the same native units the wire uses, so no
-        // conversion - but a switch is written as a bool.
+        // conversion - but the wire type follows the kind (`Kind::wire`).
         let native = match value {
             serde_json::Value::Bool(b) => *b as u8 as f32,
             serde_json::Value::Number(n) => match n.as_f64() {
@@ -442,7 +442,7 @@ fn read_block(
             block: position,
             index: index as i64,
             value: native,
-            switch: param.kind == hx_catalog::Kind::Switch,
+            kind: param.kind,
             name: param.name.clone(),
         });
     }
@@ -525,6 +525,40 @@ mod tests {
             block: 2,
             enabled: true
         }));
+    }
+
+    #[test]
+    fn a_menu_keeps_its_kind_so_the_device_gets_an_integer() {
+        let Some(catalog) = catalog() else { return };
+        // Any menu will do: each one sent as a float is refused with -3 (#44).
+        let (number, index) = (0..2000)
+            .find_map(|model| {
+                (0..32)
+                    .find(|&index| {
+                        catalog
+                            .param(model, index)
+                            .is_some_and(|p| p.kind == hx_catalog::Kind::Enum)
+                    })
+                    .map(|index| (model, index))
+            })
+            .expect("the catalog holds menus");
+        let symbol = catalog.symbol(number).unwrap().symbol.clone();
+        let key = catalog.param(number, index).unwrap().id.clone();
+        let json = serde_json::json!({
+            "data": { "tone": { "dsp0": { "block0": {
+                "@model": symbol,
+                (key): 1,
+            } } } }
+        });
+
+        let plan = plan(&json, &catalog).unwrap();
+        let wire = plan.steps.iter().find_map(|step| match step {
+            Step::Param { kind, value, .. } if *kind == hx_catalog::Kind::Enum => {
+                Some(kind.wire(*value))
+            }
+            _ => None,
+        });
+        assert_eq!(wire, Some(hx_proto::msgpack::Value::Int(1)));
     }
 
     #[test]

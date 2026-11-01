@@ -1898,7 +1898,6 @@ fn show_import(file: &std::path::Path) -> Result<()> {
 }
 
 fn apply_import(session: &mut hx_usb::Session, file: &std::path::Path) -> Result<()> {
-    use hx_proto::msgpack::Value;
     // Read the chain first: a `.hlx` gives a block's place along its branch's
     // row, and only the target's own layout says which slot that is.
     let layout = session.read_preset()?.layout();
@@ -1916,16 +1915,9 @@ fn apply_import(session: &mut hx_usb::Session, file: &std::path::Path) -> Result
                 block,
                 index,
                 value,
-                switch,
+                kind,
                 ..
-            } => {
-                let wire = if *switch {
-                    Value::Bool(*value >= 0.5)
-                } else {
-                    Value::F32(*value)
-                };
-                session.set_param(*block, *index, wire)?;
-            }
+            } => session.set_param(*block, *index, kind.wire(*value))?,
             hlx::Step::Enabled { block, enabled } => session.set_enabled(*block, *enabled)?,
         }
     }
