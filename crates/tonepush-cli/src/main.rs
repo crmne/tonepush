@@ -109,6 +109,12 @@ struct Cli {
 
 #[derive(Subcommand, Clone)]
 enum Cmd {
+    /// Run many commands, one per line, over a single HX connection. A failed
+    /// line is reported and the rest still run; `sleep <ms>` waits, `#` comments
+    Batch {
+        /// The file of commands; standard input without one
+        file: Option<std::path::PathBuf>,
+    },
     /// Work with a Sonulab StompStation PRO over VoidX USB serial.
     Pro {
         #[command(subcommand)]
@@ -497,6 +503,7 @@ fn main() -> Result<()> {
     }
     match Cli::parse().cmd {
         Cmd::Pro { command } => voidx::run(command),
+        Cmd::Batch { file } => run_batch(file.as_deref()),
         // Everything that needs no device, handled before we touch USB.
         Cmd::Decode { log } => decode_capture(&log),
         Cmd::Models { category, model } => browse_models(category, model),
@@ -560,16 +567,127 @@ fn list_devices() -> Result<()> {
     Ok(())
 }
 
-/// Open the first attached device and run one command against it.
+/// Open the first attached device.
 ///
 /// The reconnect retry lives in `hx-usb`, so every consumer gets it.
-fn on_device(cmd: Cmd) -> Result<()> {
+fn open_session() -> Result<hx_usb::Session> {
     let devices = hx_usb::list().context("enumerating USB devices")?;
     let Some(device) = devices.first() else {
         bail!("no HX device found - check the USB cable");
     };
-    let mut session = device.open().context("opening the device")?;
-    run_on(&mut session, &cmd)
+    device.open().context("opening the device")
+}
+
+/// Open the first attached device and run one command against it.
+fn on_device(cmd: Cmd) -> Result<()> {
+    run_on(&mut open_session()?, &cmd)
+}
+
+/// One line of a batch that does something.
+enum BatchStep {
+    Run {
+        line: usize,
+        text: String,
+        cmd: Box<Cmd>,
+    },
+    /// Some operations commit after they answer: the pedal stores a snapshot's
+    /// block states as you leave it, so a batch that switches snapshots has to
+    /// give it time, or each one silently holds the previous one's states.
+    Sleep(std::time::Duration),
+}
+
+/// Split a batch line into words. Quotes keep spaces, so `"Scream 808"` and
+/// `"1200 Hz"` arrive whole; a backslash is literal, for Windows paths.
+fn batch_words(line: &str) -> Result<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut quote = None;
+    for c in line.chars() {
+        match (quote, c) {
+            (Some(q), c) if q == c => quote = None,
+            (Some(_), c) => word.get_or_insert_default().push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                word.get_or_insert_default();
+            }
+            (None, c) if c.is_whitespace() => words.extend(word.take()),
+            (None, c) => word.get_or_insert_default().push(c),
+        }
+    }
+    if quote.is_some() {
+        bail!("a quote is never closed");
+    }
+    words.extend(word);
+    Ok(words)
+}
+
+/// Read a whole batch, so a typo on line 40 is found before the pedal is
+/// half rewritten.
+fn parse_batch(text: &str) -> Result<Vec<BatchStep>> {
+    let mut steps = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let number = number + 1;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let words = batch_words(line).with_context(|| format!("line {number}: {line}"))?;
+        if let [sleep, ms] = words.as_slice() {
+            if sleep == "sleep" {
+                let ms: u64 = ms
+                    .parse()
+                    .with_context(|| format!("line {number}: {ms:?} is not milliseconds"))?;
+                steps.push(BatchStep::Sleep(std::time::Duration::from_millis(ms)));
+                continue;
+            }
+        }
+        let cli = Cli::try_parse_from(std::iter::once("tonepush".to_owned()).chain(words))
+            .with_context(|| format!("line {number}: {line}"))?;
+        match cli.cmd {
+            Cmd::Batch { .. } | Cmd::Pro { .. } | Cmd::Watch => {
+                bail!("line {number}: {line} cannot run inside a batch")
+            }
+            cmd => steps.push(BatchStep::Run {
+                line: number,
+                text: line.to_owned(),
+                cmd: Box::new(cmd),
+            }),
+        }
+    }
+    Ok(steps)
+}
+
+fn run_batch(file: Option<&std::path::Path>) -> Result<()> {
+    let text = match file {
+        Some(file) => {
+            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?
+        }
+        None => std::io::read_to_string(std::io::stdin()).context("reading standard input")?,
+    };
+    let steps = parse_batch(&text)?;
+    if steps.is_empty() {
+        return Ok(());
+    }
+
+    let mut session = open_session()?;
+    let mut failed = 0;
+    let mut commands = 0;
+    for step in &steps {
+        match step {
+            BatchStep::Sleep(pause) => std::thread::sleep(*pause),
+            BatchStep::Run { line, text, cmd } => {
+                commands += 1;
+                if let Err(error) = run_on(&mut session, cmd) {
+                    failed += 1;
+                    eprintln!("line {line}: {text}: {error:#}");
+                }
+            }
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} of {commands} commands failed");
+    }
+    Ok(())
 }
 
 /// Run one command against an open session.
@@ -746,6 +864,10 @@ fn run_on(s: &mut hx_usb::Session, cmd: &Cmd) -> Result<()> {
         }
         Cmd::Irs => list_irs(s),
         Cmd::IrClear { slot } => clear_ir(s, slot),
+        Cmd::Import {
+            file,
+            dry_run: true,
+        } => show_import(&file),
         Cmd::Import { file, .. } => apply_import(s, &file),
         Cmd::Export { file } => export_to_file(s, &file),
         Cmd::Backup { file } => backup(s, &file),
@@ -862,6 +984,7 @@ fn run_on(s: &mut hx_usb::Session, cmd: &Cmd) -> Result<()> {
         Cmd::ExportHxb { bundle, output } => export_hxb(&bundle, &output),
         Cmd::IrInfo { file } => ir_info(&file),
         Cmd::Pro { command } => voidx::run(command),
+        Cmd::Batch { .. } => bail!("a batch cannot run inside a batch"),
     }
 }
 
@@ -2114,6 +2237,47 @@ fn parse_hexdumps(text: &str) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_batch_keeps_quoted_words_whole() {
+        assert_eq!(
+            batch_words(r#"model 2 "Scream 808""#).unwrap(),
+            ["model", "2", "Scream 808"]
+        );
+        assert_eq!(
+            batch_words(r#"set 2 'Hi Cut' "" C:\\ir.wav"#).unwrap(),
+            ["set", "2", "Hi Cut", "", r"C:\\ir.wav"]
+        );
+        assert!(batch_words(r#"model 2 "Scream"#).is_err());
+    }
+
+    #[test]
+    fn a_batch_is_read_whole_before_anything_runs() {
+        let steps = parse_batch("# a build\n\nselect 03B\n  sleep 600\nenable 2 on\n").unwrap();
+        assert_eq!(steps.len(), 3);
+        assert!(matches!(
+            &steps[0],
+            BatchStep::Run { line: 3, text, cmd }
+                if text == "select 03B" && matches!(**cmd, Cmd::Select { .. })
+        ));
+        assert!(matches!(
+            steps[1],
+            BatchStep::Sleep(pause) if pause.as_millis() == 600
+        ));
+        assert!(matches!(steps[2], BatchStep::Run { line: 5, .. }));
+
+        let typo = parse_batch("select 03B\nslect 03C\n").err().unwrap();
+        assert!(format!("{typo:#}").contains("line 2"), "{typo:#}");
+        assert!(parse_batch("sleep soon\n").is_err());
+    }
+
+    #[test]
+    fn what_needs_its_own_connection_stays_out_of_a_batch() {
+        for line in ["batch other.txt", "watch", "pro info"] {
+            let refused = parse_batch(line).err().unwrap();
+            assert!(refused.to_string().contains("cannot run"), "{refused}");
+        }
+    }
 
     #[test]
     fn a_save_defaults_to_the_loaded_setlist_as_well_as_the_loaded_slot() {

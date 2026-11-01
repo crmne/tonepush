@@ -67,6 +67,27 @@ tonepush assignments 4 6         # what controls block 4's first six parameters
 
 Blocks are numbered from 1 everywhere, as `tonepush chain` prints them; `enable 4`, `assign 4` and `switch-assign 4 2` all mean the same block. Parameters are numbered from 0, in the device's own order. Earlier versions took a zero-based block for `switch-assign`, `assign-param`, `assign-cc`, `assign-range`, `assignment-raw` and `assignments`, so scripts written for them need their block numbers raised by one.
 
+## Many commands at once
+
+Every command opens its own USB session, and on some pedals that takes seconds. `batch` runs a file of commands, one per line, over a single session:
+
+```sh
+tonepush batch build.txt
+tonepush batch < build.txt
+```
+
+```text
+# A preset build. Quotes keep spaces in a value.
+select 03B
+model 2 "Scream 808"
+set 2 Gain 0.4
+snapshot 2
+sleep 600
+enable 2 off
+```
+
+The whole file is read first, so a typo stops it before the pedal is touched. A line that fails on the pedal is reported with its number and the rest still run, and the command then exits non-zero with how many failed. `sleep <ms>` waits: the pedal stores a snapshot's block states as you leave it, so allow about 600 ms either side of a snapshot switch. `watch`, `pro` and `batch` itself cannot run inside a batch.
+
 ## Watching and poking
 
 ```sh
