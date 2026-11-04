@@ -39,6 +39,11 @@ jobs:
       - name: Test workspace
         if: runner.os != 'Windows'
         run: mbx test --workspace
+      # The tests link the extension's code into a test binary, never into the
+      # library Ruby loads, so on macOS a library that fails to link passes them.
+      - name: Build the Ruby extension
+        if: runner.os == 'macOS'
+        run: mbx build -p hx-ruby
       - name: Test workspace without the Rails extension
         if: runner.os == 'Windows'
         run: mbx test --workspace --exclude hx-ruby
