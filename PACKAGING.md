@@ -193,6 +193,7 @@ Configured packaging destinations (publication is a separate step):
 | Flatpak bundle | Configured | `rocks.tonepush.TonePush`, a release asset built by native-packages (below). |
 | FlatPark | Prepared | A FlatPark entry for `rocks.tonepush.TonePush` that repackages the Linux tarballs (below). |
 | Flathub | Not planned here | Flathub does not accept AI-assisted submissions; the maintainer handles it by hand. |
+| winget | Prepared | `crmne.TonePush` manifests from `packaging/winget/` (below); submitting them to microsoft/winget-pkgs is the maintainer's call. |
 | Nixpkgs | Not started | |
 | Alpine aports | Not started | |
 | Debian and Ubuntu | Configured | nFPM DEB files attached after stable release packaging succeeds. |
@@ -241,6 +242,25 @@ sed -e "s/@VERSION@/X.Y.Z/g" -e "s/@DATE@/$(LC_ALL=C date '+%a %b %d %Y')/" \
 spectool -g -R tonepush.spec && rpmbuild -bs tonepush.spec
 copr-cli build paolino/tonepush ~/rpmbuild/SRPMS/tonepush-X.Y.Z-1.*.src.rpm
 ```
+
+## winget
+
+`packaging/winget/` holds the manifests for the `crmne.TonePush` package in
+[microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs). They install
+the per-user MSI of each stable release; its fixed UpgradeCode tells winget
+which installed program is TonePush. Submission is a manual step for the
+maintainer, after the release's assets and `checksums.txt` exist. Write the
+manifests from the published release, then validate, test and submit them from
+a fork of winget-pkgs:
+
+```sh
+python3 packaging/winget/manifests.py vX.Y.Z /path/to/winget-pkgs
+winget validate --manifest /path/to/winget-pkgs/manifests/c/crmne/TonePush/X.Y.Z
+winget install --manifest /path/to/winget-pkgs/manifests/c/crmne/TonePush/X.Y.Z
+```
+
+Commit only that version's directory and open a pull request to
+`microsoft/winget-pkgs` (or use `wingetcreate submit` on the directory).
 
 ## Smoke Tests
 
