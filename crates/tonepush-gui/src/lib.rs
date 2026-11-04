@@ -1378,6 +1378,8 @@ impl App {
     pub fn new(ctx: &egui::Context, to_device: Sender<Cmd>, from_device: Receiver<Evt>) -> Self {
         let config = config::Config::load();
         theme::install(ctx, config.appearance);
+        let mut updates = update::Updates::default();
+        updates.configure(config.installs_updates(), config.newest_run.clone());
         let mut app = App {
             scrolling: fastframe_scroll::Scrolling::default(),
             to_device,
@@ -1546,7 +1548,7 @@ impl App {
             closing: false,
             confirm_switch: None,
             renaming_header: None,
-            updates: update::Updates::default(),
+            updates,
             cloud_check: None,
             cloud_files: None,
             portable_hashes: std::collections::HashMap::new(),

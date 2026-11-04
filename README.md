@@ -118,14 +118,17 @@ Ubuntu: `libxkbcommon-dev libwayland-dev libgl1-mesa-dev`.
 ### Updates
 
 TonePush asks GitHub (`api.github.com`) once a day whether a newer release
-exists, and nothing else leaves your machine for it. When one does, the foot of
-the sidebar says so, and the settings beside it make the offer. The macOS app
-from the DMG, the Windows installer, and the editor unpacked from a Linux or
-Windows archive can update themselves: click **Update to** the new version, then **Restart to update**. The download is checked against TonePush's release
-signature first, and if the new version does not start the old one comes back.
-Copies installed with Homebrew, the AUR or a .deb/.rpm are left to that package
-manager, and the settings say which. An AppImage is replaced by downloading
-the new one.
+exists, and nothing else leaves your machine for it. It mentions a release only
+once its signature checks out. The foot of the sidebar then says so, and the
+settings beside it give the details. The macOS app from the DMG, the Windows
+installer, the AppImage, and the editor unpacked from a Linux or Windows
+archive update themselves. A new version on the same major release downloads
+in the background and installs the next time TonePush starts. If it does not
+start, the old one comes back. **Restart to update** installs it right away. A
+new major version waits for you, and so does every version once
+**Install updates automatically** is off. Copies installed with Homebrew, the
+AUR, the COPR, a .deb/.rpm or the Flatpak are left to that package manager.
+The settings show the command that updates them, with a **Copy** button.
 
 ### Crash reports
 

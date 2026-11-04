@@ -1,5 +1,12 @@
 //! Is there a newer TonePush than the one running, and can this copy become it?
 //!
+//! Updates install themselves by fastframe-update's `policy`, shared with
+//! the other fastframe apps: a newer release on the same major version
+//! downloads in the background and installs at the next start, before any
+//! window opens, while Install updates automatically is on (the default). A
+//! new major version, the switch off, or a person who went back to an older
+//! version waits for Restart to update.
+//!
 //! The check is a courtesy, not a feature: it asks GitHub once a day, off the
 //! UI thread, and if the answer does not arrive - no network, rate limited,
 //! GitHub down - nothing is said. An editor that nags about its own version
@@ -19,6 +26,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use egui::RichText;
+use fastframe_update::policy::{self, Offer};
 pub use fastframe_update::{DownloadState, ManagedUpdate, Receipt, Release, Unsupported};
 use fastframe_update::{
     MacConfig, PackageManager, Request, Response, Transport, UpdateConfig, Updater, CHECK_INTERVAL,
@@ -58,6 +66,49 @@ pub const CONFIG: UpdateConfig = UpdateConfig {
 /// downloaded TonePush with `--version` and accepts it only on this answer.
 pub fn version_line() -> String {
     format!("{} {VERSION}", CONFIG.slug)
+}
+
+/// At start, before any window opens: installs the update an earlier run
+/// downloaded when it installs on its own (a newer release on this major
+/// version, automatic updates on, not one the person went back from). Hands
+/// it to the helper, which waits for this process to quit, installs it and
+/// starts the new version, rolling back if it does not start; the caller
+/// quits when this answers true. Also remembers the newest version that ran.
+pub fn install_kept(arguments: &[String]) -> bool {
+    let mut config = crate::config::Config::load();
+    let before = config.newest_run.clone();
+    let newest = policy::newest_run(VERSION, before.as_deref());
+    if before.as_deref() != Some(newest.as_str()) {
+        config.newest_run = Some(newest);
+        config.save();
+    }
+    let updater = updater();
+    let kept = match updater.kept() {
+        Ok(Some(kept)) => kept,
+        Ok(None) => return false,
+        Err(error) => {
+            eprintln!("the downloaded update did not check out: {error:#}");
+            return false;
+        }
+    };
+    // Nothing is open yet, so nothing can be disturbed.
+    if !policy::installs_at_start(
+        VERSION,
+        kept.version(),
+        config.installs_updates(),
+        before.as_deref(),
+        true,
+    ) {
+        return false;
+    }
+    eprintln!("installing TonePush {} before it starts", kept.version());
+    match updater.handoff(kept, arguments.to_vec()) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("could not install the downloaded update: {error:#}");
+            false
+        }
+    }
 }
 
 /// The updater, over the same HTTP client the rest of TonePush uses.
@@ -185,6 +236,10 @@ pub struct Updates {
     receipt: Option<Receipt>,
     /// The helper's message when it had to put the previous version back.
     problem: Option<String>,
+    /// Install updates automatically, from the config.
+    automatic: bool,
+    /// The newest version that ran before this one, from the config.
+    newest_run: Option<String>,
     tx: Sender<Message>,
     rx: Receiver<Message>,
 }
@@ -202,6 +257,8 @@ impl Default for Updates {
             relaunch: Vec::new(),
             receipt: None,
             problem: None,
+            automatic: true,
+            newest_run: None,
             tx,
             rx,
         }
@@ -220,6 +277,44 @@ impl Updates {
         self.receipt = receipt;
         self.problem = error;
         self.relaunch = arguments;
+    }
+
+    /// The person's choice and history, from the config: whether updates
+    /// install themselves, and the newest version that ran here.
+    pub fn configure(&mut self, automatic: bool, newest_run: Option<String>) {
+        self.automatic = automatic;
+        self.newest_run = newest_run;
+    }
+
+    /// Switches automatic updates on or off for this run; the caller keeps
+    /// the choice in the config.
+    pub fn set_automatic(&mut self, ctx: &egui::Context, on: bool) {
+        self.automatic = on;
+        if on && self.offer() == Some(Offer::Automatic) {
+            self.download(ctx);
+        }
+    }
+
+    /// Whether this copy can update itself, once a release is on offer: the
+    /// settings show the automatic switch only then, or before any release.
+    pub fn replaces_itself(&self) -> bool {
+        !matches!(self.support, Some(Support::Refused(..)))
+    }
+
+    /// How the release on offer reaches this copy, by fastframe-update's
+    /// policy; `None` until a verified release is installable here.
+    fn offer(&self) -> Option<Offer> {
+        let release = self.release.as_ref()?;
+        if self.support != Some(Support::Installable) {
+            return None;
+        }
+        Some(policy::offer(
+            VERSION,
+            &release.version,
+            self.automatic,
+            Ok(()),
+            self.newest_run.as_deref(),
+        ))
     }
 
     /// The rolled-back update's message, once.
@@ -281,6 +376,15 @@ impl Updates {
                     self.release = Some(release);
                     self.download = DownloadState::Idle;
                     self.support = Some(support);
+                    // Downloading disturbs nothing TonePush does: it reads
+                    // the network, not the pedal. It installs at the next
+                    // start, or when the person restarts.
+                    if self
+                        .offer()
+                        .is_some_and(|offer| policy::may_download(&offer, true))
+                    {
+                        self.download(ctx);
+                    }
                 }
             }
             Message::Unverified(release) => {
@@ -489,6 +593,14 @@ impl Updates {
                     theme::progress(ui, progress, 6.0, None);
                 }
                 DownloadState::Ready(_) => {
+                    if self.offer() == Some(Offer::Automatic) {
+                        theme::label(
+                            ui,
+                            "It installs the next time TonePush starts.",
+                            theme::regular(12.0),
+                            theme::muted(),
+                        );
+                    }
                     if theme::Button::new("Restart to update")
                         .primary()
                         .small()
@@ -863,12 +975,55 @@ mod tests {
     #[test]
     fn a_found_release_is_on_offer() {
         let ctx = egui::Context::default();
-        let mut updates = Updates::default();
+        // Switched off, so the test downloads nothing.
+        let mut updates = Updates {
+            automatic: false,
+            ..Updates::default()
+        };
         assert_eq!(updates.available(), None);
         updates.receive(&ctx, Message::Checked(Some(release())));
         assert_eq!(updates.available(), None);
         updates.receive(&ctx, Message::Verified(release(), Support::Installable));
         assert_eq!(updates.available(), Some("99.0.0"));
+    }
+
+    /// A newer release on this major version installs itself; the switch
+    /// off, a new major version, or a person who went back asks instead.
+    #[test]
+    fn a_verified_release_installs_itself_by_the_shared_policy() {
+        let verified = |automatic, newest_run: Option<&str>, version: &str| Updates {
+            automatic,
+            newest_run: newest_run.map(str::to_owned),
+            release: Some(Release {
+                version: version.into(),
+                ..release()
+            }),
+            support: Some(Support::Installable),
+            ..Updates::default()
+        };
+        let major: u64 = VERSION.split('.').next().unwrap().parse().unwrap();
+        let next_minor = format!("{major}.999.0");
+        let next_major = format!("{}.0.0", major + 1);
+        assert_eq!(
+            verified(true, None, &next_minor).offer(),
+            Some(Offer::Automatic)
+        );
+        assert!(matches!(
+            verified(false, None, &next_minor).offer(),
+            Some(Offer::Ask(_))
+        ));
+        assert!(matches!(
+            verified(true, None, &next_major).offer(),
+            Some(Offer::Ask(_))
+        ));
+        assert!(matches!(
+            verified(true, Some(&next_minor), &next_minor).offer(),
+            Some(Offer::Ask(_))
+        ));
+        let mut refused = verified(true, None, &next_minor);
+        refused.support = Some(Support::Refused(Unsupported::Homebrew, None));
+        assert_eq!(refused.offer(), None);
+        assert!(!refused.replaces_itself());
     }
 
     /// A release whose signed checksums do not verify is never offered.

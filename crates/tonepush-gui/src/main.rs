@@ -34,7 +34,7 @@ fn main() -> eframe::Result<()> {
         panic!("TonePush crash report test");
     }
     // An update relaunches with the arguments this launch had.
-    let relaunch = launch
+    let relaunch: Vec<String> = launch
         .arguments
         .iter()
         .skip(1)
@@ -48,6 +48,12 @@ fn main() -> eframe::Result<()> {
     // it the truth.
     for dir in hx_catalog::home::adopt_former_name() {
         eprintln!("brought {} across from the old name", dir.display());
+    }
+    // An update an earlier run downloaded installs now, before any window
+    // opens and before the pedal is reached: the helper installs it and
+    // starts the new version, so this one only quits.
+    if tonepush_gui::update::install_kept(&relaunch) {
+        return Ok(());
     }
     // A library written before tones were stored by content moves across now,
     // once, silently: a few file renames and a rewritten index. It happens here

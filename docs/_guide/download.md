@@ -122,22 +122,26 @@ which covers offline builds from the vendored-dependencies archive.
 ## Updating
 
 TonePush asks GitHub once a day whether a newer version exists; nothing else
-is sent. When there is one, the foot of the sidebar says so in amber (for
-example **0.8.0 is out**). Click it, or the settings button beside it, for the
-offer.
+is sent. It mentions a new version only once that version's signature checks
+out. The foot of the sidebar then says so in amber (for example **0.12.0 is
+out**). Click it, or the settings button beside it, for the details.
 
-- **The Windows installer:** click **Update to 0.8.0**. TonePush downloads
-  the next installer, checks it against its release signature, installs it
-  and opens the new version. The command-line tool updates with it.
-- **The macOS app from the DMG, and the Windows and Linux archives:** click
-  **Update to 0.8.0**. TonePush downloads the new version, checks it against
-  its release signature, and offers **Restart to update**. It closes, lets the
-  pedal go and opens the new version; if that does not start, the previous one
-  comes back. From an archive only the editor updates itself: keep
-  `tonepush-portable.txt` next to `tonepush-gui`, and replace the `tonepush`
-  command-line tool from a new archive when you want it newer too.
-- **Homebrew, the AUR, the COPR, .deb or .rpm:** update through that package
-  manager (`brew upgrade`, your AUR helper, dnf or apt). The settings say which.
+- **The macOS app from the DMG, the Windows installer, the AppImage, and the
+  Windows and Linux archives:** TonePush updates itself. A new version on the
+  same major release downloads in the background, is checked against its
+  release signature, and installs the next time TonePush starts, before the
+  window opens. If the new version does not start, the previous one comes
+  back. To update straight away, click **Restart to update**: TonePush closes,
+  lets the pedal go and opens the new version. A new major version (1.0 after
+  0.x) waits until you click **Update to**. To be asked about every version,
+  set **Install updates automatically** to **Off** in the settings. From an
+  archive only the editor updates itself: keep `tonepush-portable.txt` next
+  to `tonepush-gui`, and replace the `tonepush` command-line tool from a new
+  archive when you want it newer too.
+- **Homebrew, the AUR, the COPR, .deb, .rpm or the Flatpak:** update through
+  that package manager. The settings show the command that updates your copy,
+  such as `yay -Syu tonepush-bin`, with a **Copy** button. TonePush never runs
+  it for you.
 
 ## After installing
 

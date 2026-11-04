@@ -80,6 +80,22 @@ pub struct Config {
     /// the app asks once. See `crate::crash_reports`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crash_reports: Option<bool>,
+    /// Install updates automatically: a newer release on the same major
+    /// version downloads in the background and installs at the next start.
+    /// `None` is on, the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_updates: Option<bool>,
+    /// The newest TonePush that ran on this computer, so a person who went
+    /// back to an older version is not updated past it on their behalf.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_run: Option<String>,
+}
+
+impl Config {
+    /// Whether updates install themselves: on unless switched off.
+    pub fn installs_updates(&self) -> bool {
+        self.automatic_updates.unwrap_or(true)
+    }
 }
 
 /// The library pane at one size of window.
@@ -270,6 +286,14 @@ pub(crate) mod tests {
     fn an_empty_or_broken_file_is_just_no_favorites() {
         let back: Config = serde_json::from_str("{}").unwrap();
         assert!(back.favorites.is_empty());
+    }
+
+    #[test]
+    fn updates_install_themselves_until_switched_off() {
+        let back: Config = serde_json::from_str("{}").unwrap();
+        assert!(back.installs_updates());
+        let off: Config = serde_json::from_str(r#"{"automatic_updates":false}"#).unwrap();
+        assert!(!off.installs_updates());
     }
 
     #[test]

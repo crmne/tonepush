@@ -2298,6 +2298,35 @@ impl App {
         ui.add_space(6.0);
         theme::caption(ui, "TonePush");
         self.updates.offer_ui(ui);
+        self.automatic_updates_setting(ui);
+    }
+
+    /// Install updates automatically: Off or On, kept in the config. Only
+    /// for a copy that replaces itself; a package manager's copy updates
+    /// with the package manager.
+    fn automatic_updates_setting(&mut self, ui: &mut Ui) {
+        if !self.updates.replaces_itself() {
+            return;
+        }
+        ui.add_space(6.0);
+        theme::caption(ui, "Install updates automatically");
+        let segments = [theme::Segment::new("Off"), theme::Segment::new("On")];
+        let chosen = Some(usize::from(self.config.installs_updates()));
+        if let Some(index) =
+            theme::segmented(ui, "automatic-updates", &segments, chosen, true).clicked
+        {
+            let on = index == 1;
+            self.config.automatic_updates = Some(on);
+            self.config.save();
+            self.updates.set_automatic(ui.ctx(), on);
+        }
+        theme::label(
+            ui,
+            "A new version on the same major release downloads in the background and \
+             installs the next time TonePush starts. A new major version waits for you.",
+            theme::regular(11.5),
+            theme::muted(),
+        );
     }
 
     /// Crash reports: Off or On, kept in the config. The environment
