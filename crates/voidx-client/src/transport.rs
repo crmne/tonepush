@@ -1,5 +1,7 @@
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
