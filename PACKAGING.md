@@ -67,6 +67,11 @@ Each tagged release publishes:
 - `tonepush-v<version>-aarch64-pc-windows-msvc.zip`
 - `tonepush-v<version>-x86_64-pc-windows-msvc.msi`
 - `tonepush-v<version>-aarch64-pc-windows-msvc.msi`
+- `tonepush_<version>_amd64.deb`, `tonepush_<version>_arm64.deb`,
+  `tonepush-<version>-1.x86_64.rpm`, `tonepush-<version>-1.aarch64.rpm`,
+  `tonepush-<version>-x86_64.AppImage`, `tonepush-<version>-aarch64.AppImage`
+- `tonepush-<version>-x86_64.flatpak`, `tonepush-<version>-aarch64.flatpak`
+  (single-file Flatpak bundles of the same binaries, below)
 - `tonepush-v<version>-vendor.tar.xz`
 - `checksums.txt`
 - `checksums.txt.sig` (an Ed25519 signature over `checksums.txt`, made with the
@@ -185,8 +190,10 @@ Configured packaging destinations (publication is a separate step):
 | Arch AUR | Configured | `tonepush`, `tonepush-bin` and `tonepush-git` templates live in `packaging/arch/`. |
 | Homebrew | Configured | The `tonepush` cask (the app, from the DMG) and the `tonepush` formula (the universal binaries) in `crmne/homebrew-tap`; templates live in `packaging/homebrew/`. |
 | Fedora COPR | Not started | |
+| Flatpak bundle | Configured | `rocks.tonepush.TonePush`, a release asset built by native-packages (below). |
+| FlatPark | Prepared | A FlatPark entry for `rocks.tonepush.TonePush` that repackages the Linux tarballs (below). |
+| Flathub | Not planned here | Flathub does not accept AI-assisted submissions; the maintainer handles it by hand. |
 | Nixpkgs | Not started | |
-| Gentoo GURU | Not started | |
 | Alpine aports | Not started | |
 | Debian and Ubuntu | Configured | nFPM DEB files attached after stable release packaging succeeds. |
 | RPM downloads | Configured | nFPM RPM files attached after stable release packaging succeeds. |
@@ -195,6 +202,26 @@ Configured packaging destinations (publication is a separate step):
 Edit recipes in this repository, then stage the generated files into their
 downstream repositories. Upstream distribution acceptance remains separate from
 building downloadable packages.
+
+## Flatpak
+
+native-packages turns each Linux target's package contents into a Flatpak
+bundle, `tonepush-<version>-<arch>.flatpak`, from the `flatpak` section of
+`native-packages.yaml`: the same binaries on `org.freedesktop.Platform` 26.08,
+with no flatpak-builder or rebuild. The metainfo is
+`packaging/flatpak/rocks.tonepush.TonePush.metainfo.xml`; add each release to
+its `<releases>` when tagging. The sandbox reaches Wayland (X11 as the
+fallback), the network, and every device (`--device=all`), which is the only
+grant that reaches both the HX pedals' raw USB and the StompStation PRO's serial
+port. Files go through the file chooser portal. A Flatpak cannot install the
+udev rule, and the sandbox cannot see the host's, so the connect page tells
+Flatpak users to add it by hand rather than reporting it missing.
+
+[FlatPark](https://flatpark.org), a Flatpak remote that welcomes AI-assisted
+apps, can list the same app from the release tarballs (an `extra-data`
+package, fetched and unpacked at install time). Its entry is prepared in a
+checkout of flatpark/flatpark; opening the pull request is the maintainer's
+call.
 
 ## Smoke Tests
 

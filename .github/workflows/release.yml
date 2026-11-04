@@ -100,7 +100,7 @@ jobs:
           ruby-version: '4.0'
       - name: Install native-packages
         if: runner.os == 'Windows'
-        run: gem install native-packages --version 0.11.0 --no-document
+        run: gem install native-packages --version 0.12.0 --no-document
       - name: Sign in to Azure for code signing
         if: runner.os == 'Windows' && vars.AZURE_SIGNING_PROFILE != ''
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
@@ -166,7 +166,7 @@ jobs:
           Copy-Item "$env:RUNNER_TEMP\windows-packages\packages\$packageTarget\msi\*.msi" dist\
           Remove-Item -Recurse $payload
       - name: Attest release packages
-        uses: crmne/native-packages/.github/actions/attest@25a4214d2f203357c84b069f39de7c17c0be6253 # v0.11.0
+        uses: crmne/native-packages/.github/actions/attest@51500464793687a52be65abb1b4dfc23639e3f48 # v0.12.0
         with:
           subject-path: |
             dist/*.tar.gz
@@ -225,7 +225,7 @@ jobs:
         with:
           ruby-version: '4.0'
       - name: Install native packaging
-        run: gem install native-packages --version 0.11.0 --no-document
+        run: gem install native-packages --version 0.12.0 --no-document
 
       - name: App bundle
         run: |
@@ -252,7 +252,7 @@ jobs:
           tar czf "dist/$name.tar.gz" -C "$RUNNER_TEMP/signed-portable" "$name"
 
       - name: Attest macOS packages
-        uses: crmne/native-packages/.github/actions/attest@25a4214d2f203357c84b069f39de7c17c0be6253 # v0.11.0
+        uses: crmne/native-packages/.github/actions/attest@51500464793687a52be65abb1b4dfc23639e3f48 # v0.12.0
         with:
           subject-path: |
             dist/*.dmg
@@ -474,7 +474,7 @@ jobs:
         env:
           TONEPUSH_UPDATE_SIGNING_KEY: ${{ secrets.TONEPUSH_UPDATE_SIGNING_KEY }}
         run: |
-          gem install native-packages --version 0.11.0 --no-document
+          gem install native-packages --version 0.12.0 --no-document
           native-packages sign-checksums dist/checksums.txt \
             --public-key key/assets/update-public-key.hex \
             --key-env TONEPUSH_UPDATE_SIGNING_KEY

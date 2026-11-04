@@ -29,20 +29,45 @@ const UDEV_RULES: [&str; 3] = [
     "/lib/udev/rules.d/70-line6-hx.rules",
 ];
 
+/// What the connect page can say about the access rule for USB pedals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UsbAccess {
+    /// The rule is installed.
+    Ready,
+    /// The rule is missing.
+    Missing,
+    /// Flatpak's sandbox hides the host's udev rules, so the rule can be
+    /// neither seen nor installed from inside it.
+    Unseen,
+}
+
 /// Whether this computer lets TonePush open a USB pedal without asking:
 /// `None` where nothing needs setting up.
-fn usb_access() -> Option<bool> {
+fn usb_access() -> Option<UsbAccess> {
     #[cfg(target_os = "linux")]
     {
-        Some(
+        Some(usb_access_from(
+            std::path::Path::new("/.flatpak-info").is_file(),
             UDEV_RULES
                 .iter()
                 .any(|path| std::path::Path::new(path).is_file()),
-        )
+        ))
     }
     #[cfg(not(target_os = "linux"))]
     {
         None
+    }
+}
+
+/// What a look for the rule found, inside Flatpak or not.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn usb_access_from(flatpak: bool, rule_found: bool) -> UsbAccess {
+    if rule_found {
+        UsbAccess::Ready
+    } else if flatpak {
+        UsbAccess::Unseen
+    } else {
+        UsbAccess::Missing
     }
 }
 
@@ -431,25 +456,31 @@ impl App {
                                             reason,
                                         );
                                     }
-                                    if let Some(access) = usb_access() {
-                                        if access {
-                                            check(
+                                    match usb_access() {
+                                        Some(UsbAccess::Ready) => check(
                             ui,
                             Icon::CircleCheck,
                             theme::ok(),
                             "This computer can talk to USB pedals",
                             "The access rule for Line 6 and Sonulab pedals is installed.",
-                        );
-                                        } else {
-                                            check(
+                        ),
+                                        Some(UsbAccess::Missing) => check(
                             ui,
                             Icon::CircleAlert,
                             theme::hot(),
                             "USB pedals need an access rule on this computer",
                             "install.sh installs it, and the guide shows how by hand. Replug the \
                              pedal afterwards.",
-                        );
-                                        }
+                        ),
+                                        Some(UsbAccess::Unseen) => check(
+                            ui,
+                            Icon::Info,
+                            theme::info(),
+                            "USB pedals need an access rule on this computer",
+                            "The Flatpak can't install it or see it. The guide shows how to add it \
+                             by hand; replug the pedal afterwards.",
+                        ),
+                                        None => {}
                                     }
                                     check(
                                         ui,
@@ -819,6 +850,14 @@ fn pro_drawing(ui: &Ui, rect: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_access_rule_is_unseen_rather_than_missing_inside_flatpak() {
+        assert_eq!(usb_access_from(false, true), UsbAccess::Ready);
+        assert_eq!(usb_access_from(true, true), UsbAccess::Ready);
+        assert_eq!(usb_access_from(false, false), UsbAccess::Missing);
+        assert_eq!(usb_access_from(true, false), UsbAccess::Unseen);
+    }
 
     fn listed(hx: &[&str], pro: &[&str], update: &[&str]) -> Listed {
         let set = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect();

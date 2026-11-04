@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>rocks.tonepush.TonePush</id>
+  <name>TonePush</name>
+  <summary>Editor and tone library for Line 6 HX pedals and the StompStation PRO</summary>
+  <developer id="me.paolino">
+    <name>Carmine Paolino</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>An open-source editor for Line 6 HX-family devices and the Sonulab
+    StompStation PRO, written in Rust.</p>
+    <p>Edit presets block by block, keep your tones in a library you can search,
+    audition a tone on the pedal before you keep it, build setlists, and back up
+    the pedal. TonePush is an independent project, not affiliated with Line 6,
+    Yamaha or Sonulab.</p>
+    <p>On Linux, USB pedals need TonePush's access rule on the computer. The
+    Flatpak cannot install it: the guide shows how to add it.</p>
+  </description>
+  <launchable type="desktop-id">rocks.tonepush.TonePush.desktop</launchable>
+  <url type="homepage">https://docs.tonepush.rocks/</url>
+  <url type="bugtracker">https://github.com/crmne/tonepush/issues</url>
+  <url type="help">https://docs.tonepush.rocks/getting-started/</url>
+  <url type="vcs-browser">https://github.com/crmne/tonepush</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Editing a preset on an HX pedal, with the tone library below</caption>
+      <image>https://raw.githubusercontent.com/crmne/tonepush/main/docs/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <requires>
+    <display_length compare="ge">760</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <releases>
+    <release version="0.11.0" date="2026-11-01">
+      <url>https://github.com/crmne/tonepush/releases/tag/v0.11.0</url>
+    </release>
+    <release version="0.10.0" date="2026-10-26">
+      <url>https://github.com/crmne/tonepush/releases/tag/v0.10.0</url>
+    </release>
+    <release version="0.9.1" date="2026-10-14">
+      <url>https://github.com/crmne/tonepush/releases/tag/v0.9.1</url>
+    </release>
+  </releases>
+</component>

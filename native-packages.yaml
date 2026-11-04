@@ -1,8 +1,8 @@
-# Shared CLI: gem install native-packages --version 0.11.0
+# Shared CLI: gem install native-packages --version 0.12.0
 ---
 schema: 1
 tool:
-  version: 0.11.0
+  version: 0.12.0
   nfpm: 2.47.0
 nfpm:
   name: tonepush
@@ -110,6 +110,7 @@ targets:
     - deb
     - rpm
     - appimage
+    - flatpak
     input:
       local: dist/tonepush-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
       release_asset: tonepush-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
@@ -122,9 +123,29 @@ targets:
     - deb
     - rpm
     - appimage
+    - flatpak
     input:
       local: dist/tonepush-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
       release_asset: tonepush-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
+# The Flatpak bundle: the same binaries in Flatpak's sandbox, installed with
+# `flatpak install --user`. It reaches the display, the GPU and the network
+# (the cloud library and update checks), and USB and serial devices for the
+# pedals; files go through the portal's file picker. The host still needs the
+# udev rule (packaging/udev), which a Flatpak cannot install.
+flatpak:
+  id: rocks.tonepush.TonePush
+  runtime: org.freedesktop.Platform
+  runtime_version: '26.08'
+  sdk: org.freedesktop.Sdk
+  command: tonepush-gui
+  metainfo: packaging/flatpak/rocks.tonepush.TonePush.metainfo.xml
+  runtime_repo: https://dl.flathub.org/repo/flathub.flatpakrepo
+  finish_args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=all
+  - --share=network
 release:
   repository: crmne/tonepush
   checksums: checksums.txt
