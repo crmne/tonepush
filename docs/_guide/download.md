@@ -64,9 +64,19 @@ udev rule and desktop entry:
 yay -S tonepush-bin     # ready made; tonepush builds the release from source, tonepush-git the latest commit
 ```
 
-On Debian, Ubuntu and their derivatives, or on Fedora and other RPM
-distros, install the package for your machine, which also sets up the udev
+On Fedora, install from the
+[COPR repository](https://copr.fedorainfracloud.org/coprs/paolino/tonepush/),
+so dnf updates TonePush with the rest of your system. It also sets up the udev
 rule and desktop entry:
+
+```sh
+sudo dnf copr enable paolino/tonepush
+sudo dnf install tonepush
+```
+
+On Debian, Ubuntu and their derivatives, or on openSUSE and other RPM
+distros, or to install one release by hand, install the package for your
+machine, which also sets up the udev rule and desktop entry:
 
 - [tonepush_{{ v }}_amd64.deb]({{ base }}/tonepush_{{ v }}_amd64.deb) ·
   [tonepush_{{ v }}_arm64.deb]({{ base }}/tonepush_{{ v }}_arm64.deb)
@@ -126,8 +136,8 @@ offer.
   comes back. From an archive only the editor updates itself: keep
   `tonepush-portable.txt` next to `tonepush-gui`, and replace the `tonepush`
   command-line tool from a new archive when you want it newer too.
-- **Homebrew, the AUR, .deb or .rpm:** update through that package manager
-  (`brew upgrade`, your AUR helper, apt or dnf). The settings say which.
+- **Homebrew, the AUR, the COPR, .deb or .rpm:** update through that package
+  manager (`brew upgrade`, your AUR helper, dnf or apt). The settings say which.
 
 ## After installing
 

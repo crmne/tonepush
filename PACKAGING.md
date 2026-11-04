@@ -189,7 +189,7 @@ Configured packaging destinations (publication is a separate step):
 |---|---|---|
 | Arch AUR | Configured | `tonepush`, `tonepush-bin` and `tonepush-git` templates live in `packaging/arch/`. |
 | Homebrew | Configured | The `tonepush` cask (the app, from the DMG) and the `tonepush` formula (the universal binaries) in `crmne/homebrew-tap`; templates live in `packaging/homebrew/`. |
-| Fedora COPR | Not started | |
+| Fedora COPR | Configured | `paolino/tonepush`, built from the release source with `packaging/rpm/tonepush.spec` (below). |
 | Flatpak bundle | Configured | `rocks.tonepush.TonePush`, a release asset built by native-packages (below). |
 | FlatPark | Prepared | A FlatPark entry for `rocks.tonepush.TonePush` that repackages the Linux tarballs (below). |
 | Flathub | Not planned here | Flathub does not accept AI-assisted submissions; the maintainer handles it by hand. |
@@ -222,6 +222,25 @@ apps, can list the same app from the release tarballs (an `extra-data`
 package, fetched and unpacked at install time). Its entry is prepared in a
 checkout of flatpark/flatpark; opening the pull request is the maintainer's
 call.
+
+## Fedora COPR
+
+`packaging/rpm/tonepush.spec` builds TonePush from its release source for the
+[paolino/tonepush](https://copr.fedorainfracloud.org/coprs/paolino/tonepush/)
+COPR. Fill in `@VERSION@` and `@DATE@` (in RPM changelog form, such as
+`Tue Nov 03 2026`), then build a source RPM and submit it. Cargo fetches the
+locked dependencies during the build, so the COPR project has network access
+turned on for builds. Fedora 44 and newer ship a new enough Rust. Submissions
+are a manual maintainer step that needs a COPR API token: `~/.config/copr`,
+also in 1Password as "Fedora COPR API". `copr-cli` is not packaged for Arch,
+so run it from a Fedora container with the config mounted read-only.
+
+```sh
+sed -e "s/@VERSION@/X.Y.Z/g" -e "s/@DATE@/$(LC_ALL=C date '+%a %b %d %Y')/" \
+  packaging/rpm/tonepush.spec > tonepush.spec
+spectool -g -R tonepush.spec && rpmbuild -bs tonepush.spec
+copr-cli build paolino/tonepush ~/rpmbuild/SRPMS/tonepush-X.Y.Z-1.*.src.rpm
+```
 
 ## Smoke Tests
 
