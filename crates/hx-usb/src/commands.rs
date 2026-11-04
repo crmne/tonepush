@@ -317,9 +317,7 @@ impl Session {
     /// is an empty slot; the checksum is `None` when the device leaves it out.
     pub fn ir_descriptor(&mut self, slot: i64) -> Result<Option<(String, Option<u64>)>> {
         non_negative(slot, "impulse response slot")?;
-        self.bootstrap()?;
-        let descriptor = self.request(
-            ChannelId::CONTROL,
+        let descriptor = self.read_ir_part(
             rpc::op::IR_DESCRIPTOR,
             hx_proto::msgmap! { rpc::key::IR_SLOT => Value::Int(slot) },
         )?;
@@ -340,9 +338,7 @@ impl Session {
     /// returns them.
     pub fn read_ir_samples(&mut self, slot: i64) -> Result<Vec<f32>> {
         non_negative(slot, "impulse response slot")?;
-        self.bootstrap()?;
-        let samples = self.request(
-            ChannelId::CONTROL,
+        let samples = self.read_ir_part(
             rpc::op::IR_SAMPLES,
             hx_proto::msgmap! {
                 rpc::key::IR_SLOT => Value::Int(slot),
@@ -355,6 +351,16 @@ impl Session {
             ));
         };
         decode_ir_samples(bytes)
+    }
+
+    /// One read of an IR slot, closed with END where the profile says so.
+    fn read_ir_part(&mut self, opcode: i64, args: Value) -> Result<Value> {
+        self.bootstrap()?;
+        let reply = self.request(ChannelId::CONTROL, opcode, args)?;
+        if self.profile.closes_ir_reads {
+            self.command(ChannelId::CONTROL, rpc::op::END, hx_proto::msgmap! {})?;
+        }
+        Ok(reply)
     }
 
     /// Rename an impulse response slot, leaving its samples alone.
@@ -1892,6 +1898,39 @@ mod pedal_tests {
                 "returned before the write landed"
             );
             assert_eq!(pedal.irs[&3], ("Cab".into(), sum_of(&SAMPLES)));
+        }
+    }
+
+    /// Reading an IR slot puts "transferring data" on an HX Stomp's screen
+    /// until an END follows: after a backup it still showed it once the
+    /// session had closed. A device whose profile does not say so reads as
+    /// before. An empty slot is a read too.
+    #[test]
+    fn an_ir_read_is_closed_where_the_profile_says_so() {
+        type Read = fn(&mut Session) -> Result<()>;
+        let reads: [(&str, Read); 3] = [
+            ("descriptor", |s| s.ir_descriptor(2).map(drop)),
+            ("samples", |s| s.read_ir_samples(2).map(drop)),
+            ("empty slot", |s| s.ir_descriptor(5).map(drop)),
+        ];
+        for profile in hx_proto::PROFILES {
+            for (what, read) in reads {
+                let pedal = Pedal::new();
+                pedal.lock().unwrap().irs.insert(2, ("Cab".into(), 7));
+                let mut session = fake::session_as(&pedal, *profile);
+
+                read(&mut session).unwrap_or_else(|e| panic!("{} {what}: {e}", profile.name));
+
+                let opcodes = pedal.lock().unwrap().opcodes();
+                let begun = opcodes.iter().rposition(|&o| o == rpc::op::BEGIN);
+                let ended = opcodes.iter().rposition(|&o| o == rpc::op::END);
+                let closed = matches!((begun, ended), (Some(b), Some(e)) if e > b);
+                assert_eq!(
+                    closed, profile.closes_ir_reads,
+                    "{} {what}: {opcodes:?}",
+                    profile.name
+                );
+            }
         }
     }
 

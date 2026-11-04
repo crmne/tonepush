@@ -791,6 +791,12 @@ they echo back verbatim.
 
 Opcode 15 `{112: slot}` empties a slot.
 
+**A read ends with END too. [confirmed on an HX Stomp]** Opcodes 12 and 11
+leave an HX Stomp (3.80) showing "transferring data" until it hears END, as an
+upload's opcode 9 does: it was still on that screen after a backup had finished
+and its session closed, and an END after each read cleared it. Other devices
+are unmeasured, so only the Stomp's profile closes its reads.
+
 ### Writing a preset document back [confirmed]
 
 Opcode 21 takes a whole preset document. It is unforgiving: the preset carries a

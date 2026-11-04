@@ -78,6 +78,10 @@ pub struct DeviceProfile {
     pub dsp_budget: Option<u32>,
     /// How the device numbers what can drive a parameter.
     pub controls: rpc::ControlLayout,
+    /// Whether an impulse response read is closed with END, as an upload is.
+    /// Without it an HX Stomp (3.80) stays on "transferring data" after the
+    /// read, even once the session has closed. Unmeasured elsewhere.
+    pub closes_ir_reads: bool,
 }
 
 impl DeviceProfile {
@@ -102,6 +106,7 @@ pub const HX_STOMP: DeviceProfile = DeviceProfile {
     snapshot_colours: false,
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
+    closes_ir_reads: true,
 };
 pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     product_id: 0x4253,
@@ -113,6 +118,7 @@ pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     snapshot_colours: false,
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
+    closes_ir_reads: false,
 };
 pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     product_id: 0x4248,
@@ -131,6 +137,7 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     // path. The Rack and LT are likely the same, but nobody has measured.
     dsp_budget: Some(7500),
     controls: rpc::ControlLayout::Helix,
+    closes_ir_reads: false,
 };
 pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     product_id: 0x4249,
@@ -142,6 +149,7 @@ pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     snapshot_colours: false,
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
+    closes_ir_reads: false,
 };
 pub const HELIX_LT: DeviceProfile = DeviceProfile {
     product_id: 0x424A,
@@ -153,6 +161,7 @@ pub const HELIX_LT: DeviceProfile = DeviceProfile {
     snapshot_colours: false,
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
+    closes_ir_reads: false,
 };
 pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     product_id: 0x4245,
@@ -164,6 +173,7 @@ pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     snapshot_colours: false,
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
+    closes_ir_reads: false,
 };
 
 /// Every device profile we recognise.

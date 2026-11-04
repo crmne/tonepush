@@ -352,6 +352,10 @@ impl Wire for Cable {
 
 /// A session with `pedal` on the other end of the cable.
 pub fn session(pedal: &Arc<Mutex<Pedal>>) -> Session {
-    Session::replaying(Box::new(Cable(pedal.clone())), hx_proto::HX_STOMP)
-        .expect("the pretend pedal answers")
+    session_as(pedal, hx_proto::HX_STOMP)
+}
+
+/// A session with the pretend pedal answering as another device.
+pub fn session_as(pedal: &Arc<Mutex<Pedal>>, profile: hx_proto::DeviceProfile) -> Session {
+    Session::replaying(Box::new(Cable(pedal.clone())), profile).expect("the pretend pedal answers")
 }
