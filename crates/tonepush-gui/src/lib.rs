@@ -649,6 +649,8 @@ pub struct App {
     status: String,
     /// A backup or restore in flight: what it is doing, and how far along.
     working: Option<(String, f32)>,
+    /// The connection's backup while it runs: raising it skips the rest.
+    backup_skip: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Current value of each named global setting, by object id.
     settings: std::collections::BTreeMap<i64, f32>,
     /// The IR slot being renamed in place, and the name so far.
@@ -1540,6 +1542,7 @@ impl App {
             log: Vec::new(),
             status: "Looking for a device…".into(),
             working: None,
+            backup_skip: None,
             settings: Default::default(),
             renaming_ir: None,
             favourites: Vec::new(),
@@ -1631,11 +1634,15 @@ impl App {
                     let _ = self.to_device.send(Cmd::ListIrs);
                     let _ = self.to_device.send(Cmd::ListSetlists);
                     // One automatic backup per session, taken as soon as the
-                    // pedal is there. It costs a few seconds and means the copy
-                    // on disk is never older than the day's work; every save
-                    // after this refreshes just the preset it changed.
+                    // pedal is there, so the copy on disk is never older than
+                    // the day's work; every save after this refreshes just the
+                    // preset it changed. A pedal backed up earlier today that
+                    // still holds the same presets is not read again, and the
+                    // backup can be skipped while it runs.
                     if let Some(dir) = session::automatic_dir() {
-                        let _ = self.to_device.send(Cmd::BackUp(dir));
+                        let skip = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        self.backup_skip = Some(skip.clone());
+                        let _ = self.to_device.send(Cmd::BackUpOnConnect { dir, skip });
                     }
                     if self.page == shell::Page::Pedal {
                         self.read_pedal_page();
@@ -1643,6 +1650,7 @@ impl App {
                 }
                 Ok(Evt::Disconnected) => {
                     self.connection = Connection::Offline;
+                    self.backup_skip = None;
                     // Nothing is restored onto a pedal that has gone.
                     self.restoring = None;
                     // A write waiting on a capture of a pedal that has gone
@@ -1703,6 +1711,23 @@ impl App {
                         Some((what, progress))
                     };
                 }
+                Ok(Evt::BackupSkipped { captured }) => {
+                    self.working = None;
+                    self.backup_skip = None;
+                    self.note(match captured.and_then(backups_clock) {
+                        Some(when) => format!("skipped the backup; the one from {when} is kept"),
+                        None => "skipped the backup".to_owned(),
+                    });
+                }
+                Ok(Evt::BackupCurrent { captured }) => {
+                    self.backup_skip = None;
+                    self.note(match backups_clock(captured) {
+                        Some(when) => format!(
+                            "the pedal was backed up at {when} and still matches that backup"
+                        ),
+                        None => "the pedal still matches today's backup".to_owned(),
+                    });
+                }
                 Ok(Evt::BackedUp {
                     dir,
                     presets,
@@ -1710,6 +1735,7 @@ impl App {
                     irs,
                 }) => {
                     self.working = None;
+                    self.backup_skip = None;
                     self.refresh_mirror();
                     self.forget_backups();
                     self.remember_backup_file(&dir);
@@ -1889,6 +1915,19 @@ impl App {
         arguments: Vec<String>,
     ) {
         self.updates.launched(receipt, error, arguments);
+    }
+
+    /// Whether the connection's backup is running and can be skipped.
+    pub(crate) fn backup_skippable(&self) -> bool {
+        self.backup_skip.is_some() && self.working.is_some()
+    }
+
+    /// Stop the connection's backup between two requests. The bundle it was
+    /// refreshing stays as it was, and the next connection backs up again.
+    pub(crate) fn skip_backup(&mut self) {
+        if let Some(skip) = &self.backup_skip {
+            skip.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     fn note(&mut self, line: String) {
@@ -2267,6 +2306,9 @@ impl App {
     fn hold_close_while_busy(&mut self, ctx: &egui::Context) {
         let busy = self.busy_since.is_some() || self.working.is_some();
         if busy && ctx.input(|input| input.viewport().close_requested()) {
+            // The connection's backup is the one wait that can be cut short.
+            self.skip_backup();
+            self.pro.skip_check();
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.closing = true;
         } else if self.closing && !busy {
@@ -7521,6 +7563,12 @@ fn cloud_presence(
         Some(files) if files.contains(portable) => theme::Sync::Same,
         Some(_) => theme::Sync::Absent,
     }
+}
+
+/// A backup's time as the state line says it: the time today, else the day.
+fn backups_clock(captured: u64) -> Option<String> {
+    let time = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(captured))?;
+    shell::clock(time).map(|(when, _)| when)
 }
 
 #[cfg(test)]

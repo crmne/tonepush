@@ -798,6 +798,9 @@ pub(crate) enum State {
     Note(String),
     /// Work in hand: a spinner and what it is.
     Busy(String),
+    /// Work in hand that can be left, the connection's backup: a spinner,
+    /// what it is, and Skip.
+    Skippable(String),
     /// A tone auditioned in the loaded preset's place: amber, a speaker.
     Audition(String),
 }
@@ -810,9 +813,10 @@ enum Lead {
 }
 
 /// The deck's second line: the state in words, parts apart by a dot, cut to
-/// `width`.
-pub(crate) fn state_line(ui: &mut Ui, parts: &[State], width: f32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 16.0), Sense::hover());
+/// `width`. Returns whether Skip was clicked, on a [`State::Skippable`].
+pub(crate) fn state_line(ui: &mut Ui, parts: &[State], width: f32) -> bool {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 16.0), Sense::hover());
+    let mut skipped = false;
     let y = rect.center().y;
     let mut x = rect.left();
     for (index, part) in parts.iter().enumerate() {
@@ -836,7 +840,9 @@ pub(crate) fn state_line(ui: &mut Ui, parts: &[State], width: f32) -> Response {
                 false,
             ),
             State::Note(text) => (None, text, theme::muted(), false),
-            State::Busy(text) => (Some(Lead::Spinner), text, theme::muted(), false),
+            State::Busy(text) | State::Skippable(text) => {
+                (Some(Lead::Spinner), text, theme::muted(), false)
+            }
             State::Audition(text) => (Some(Lead::Icon(Icon::Volume)), text, theme::accent(), true),
         };
         match lead {
@@ -860,12 +866,36 @@ pub(crate) fn state_line(ui: &mut Ui, parts: &[State], width: f32) -> Response {
         } else {
             theme::regular(12.0)
         };
-        let words = elided(ui, text.clone(), font, ink, rect.right() - x);
+        // Skip keeps its room at the end; the words before it give way.
+        let skip = matches!(part, State::Skippable(_))
+            .then(|| galley(ui, "Skip", theme::medium(12.0), theme::accent()));
+        let skip_room = skip.as_ref().map_or(0.0, |skip| skip.size().x + 10.0);
+        let words = elided(ui, text.clone(), font, ink, rect.right() - x - skip_room);
         let width = words.size().x;
         paint_line(ui, words, x, y);
         x += width;
+        if let Some(skip) = skip {
+            let place = Rect::from_min_size(
+                Pos2::new(x + 6.0, rect.top() - 2.0),
+                Vec2::new(skip.size().x + 8.0, rect.height() + 4.0),
+            );
+            let response = ui
+                .interact(place, ui.id().with("skip-backup"), Sense::click())
+                .on_hover_text(
+                    "Use the pedal now. The last backup is kept, and TonePush backs \
+                     the pedal up next time it connects.",
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if response.hovered() {
+                ui.painter()
+                    .rect_filled(place, CornerRadius::same(4), theme::raised());
+            }
+            paint_line(ui, skip, place.left() + 4.0, y);
+            skipped |= response.clicked();
+            x = place.right();
+        }
     }
-    response
+    skipped
 }
 
 /// What a board's header says while a tone is auditioned, after its own
@@ -2547,7 +2577,9 @@ impl App {
                             Some(shown) => shown.state(tier),
                             None => self.hx_state(tier),
                         };
-                        state_line(ui, &parts, width);
+                        if state_line(ui, &parts, width) {
+                            self.skip_backup();
+                        }
                     },
                 );
             },
@@ -2573,11 +2605,18 @@ impl App {
             return parts;
         }
         if let Some((what, progress)) = &self.working {
-            parts.push(State::Busy(format!(
-                "{} · {:.0}%",
-                sentence_case(what),
-                progress * 100.0
-            )));
+            if self.backup_skippable() {
+                parts.push(State::Skippable(format!(
+                    "Backing up {what} · {:.0}%",
+                    progress * 100.0
+                )));
+            } else {
+                parts.push(State::Busy(format!(
+                    "{} · {:.0}%",
+                    sentence_case(what),
+                    progress * 100.0
+                )));
+            }
         } else if self.loading {
             parts.push(State::Busy("Loading from the pedal".to_owned()));
         } else if self

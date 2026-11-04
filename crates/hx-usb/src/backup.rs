@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use atomic_write_file::AtomicWriteFile;
 use hx_proto::msgpack::Value;
@@ -333,22 +333,165 @@ pub fn capture(
     session: &mut Session,
     dir: &Path,
     captured: u64,
+    progress: impl FnMut(Step),
+) -> Result<Manifest> {
+    capture_with(session, dir, captured, Capture::default(), progress)
+}
+
+/// How a capture may save itself work, and how it is stopped.
+#[derive(Clone, Copy, Default)]
+pub struct Capture<'a> {
+    /// Copy an impulse response from the bundle already at `dir` instead of
+    /// reading its samples again, when the pedal's descriptor for that slot
+    /// still gives the name and checksum the bundle recorded. IRs are most of
+    /// what a whole-pedal read moves, and they change only by an upload, which
+    /// declares a new checksum.
+    pub reuse_irs: bool,
+    /// Checked between requests. Once it is set the capture stops with
+    /// [`Error::Cancelled`] and the bundle at `dir` is left as it was.
+    pub cancelled: Option<&'a AtomicBool>,
+}
+
+impl Capture<'_> {
+    fn check(&self) -> Result<()> {
+        match self.cancelled {
+            Some(flag) if flag.load(Ordering::Relaxed) => Err(Error::Cancelled),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// [`capture`], reusing what it may and stopping when asked to.
+pub fn capture_with(
+    session: &mut Session,
+    dir: &Path,
+    captured: u64,
+    options: Capture,
     mut progress: impl FnMut(Step),
 ) -> Result<Manifest> {
     recover_bundle(dir)?;
+    // What the bundle there already holds, read before the staging copy
+    // takes its place.
+    let earlier = if options.reuse_irs {
+        earlier_irs(dir)
+    } else {
+        BTreeMap::new()
+    };
     let staging = StagingBundle::new(dir)?;
-    let manifest = capture_into(session, &staging.path, captured, &mut progress)?;
+    let manifest = capture_into(
+        session,
+        &staging.path,
+        captured,
+        &options,
+        &earlier,
+        &mut progress,
+    )?;
     staging.commit(dir)?;
     progress(Step::Done);
     Ok(manifest)
+}
+
+/// The file beside the manifest that keeps each IR's checksum, slot number to
+/// the checksum its descriptor gave. A bundle without it is read whole.
+const IR_CHECKSUMS: &str = "ir-checksums.json";
+
+/// The file beside the manifest that keeps every setlist's preset list as
+/// the pedal gave it when the bundle was taken.
+const LISTED_NAMES: &str = "listed-names.json";
+
+/// An IR a bundle holds: its name, checksum and samples file, by slot.
+struct EarlierIr {
+    name: String,
+    checksum: u64,
+    file: PathBuf,
+}
+
+fn earlier_irs(dir: &Path) -> BTreeMap<i64, EarlierIr> {
+    let Ok(manifest) = open(dir) else {
+        return BTreeMap::new();
+    };
+    let Some(checksums) = std::fs::read(dir.join(IR_CHECKSUMS))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<BTreeMap<String, u64>>(&bytes).ok())
+    else {
+        return BTreeMap::new();
+    };
+    manifest
+        .irs
+        .iter()
+        .filter_map(|(slot, name)| {
+            let checksum = *checksums.get(slot)?;
+            let slot: i64 = slot.parse().ok()?;
+            let file = dir
+                .join("irs")
+                .join(format!("{slot:02} {}.f32", sanitise(name)));
+            // Whole samples, and some: anything else is not worth trusting.
+            let length = std::fs::metadata(&file).ok()?.len();
+            (length > 0 && length % 4 == 0).then(|| {
+                (
+                    slot,
+                    EarlierIr {
+                        name: name.clone(),
+                        checksum,
+                        file,
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
+/// Whether the bundle at `dir` was taken since `since` (seconds since the
+/// epoch) from this pedal, at this firmware, and still names exactly what the
+/// pedal holds: the same presets in every setlist and the same impulse
+/// responses. A few list requests, against the minutes a whole read can take,
+/// so a pedal connected again the same day need not be read again. Every save
+/// refreshes its own preset in the bundle, so edits made through TonePush
+/// keep it current.
+pub fn still_current(session: &mut Session, dir: &Path, since: u64) -> Result<bool> {
+    recover_bundle(dir)?;
+    let Ok(manifest) = open(dir) else {
+        return Ok(false);
+    };
+    if manifest.captured < since || !manifest.holds_every_setlist() {
+        return Ok(false);
+    }
+    let (device, firmware) = identify(session)?;
+    if device != manifest.device || firmware != manifest.firmware {
+        return Ok(false);
+    }
+    let Some(listed) = std::fs::read(dir.join(LISTED_NAMES))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<Vec<String>>>(&bytes).ok())
+    else {
+        return Ok(false);
+    };
+    let setlists = session.setlists()?;
+    if setlists != manifest.setlists || listed.len() != setlists.len().max(1) {
+        return Ok(false);
+    }
+    for (setlist, held) in listed.iter().enumerate() {
+        if session.presets(setlist as i64)? != *held {
+            return Ok(false);
+        }
+    }
+    let irs = session
+        .irs()?
+        .into_iter()
+        .map(|(slot, name)| (slot.to_string(), name))
+        .collect::<BTreeMap<_, _>>();
+    Ok(irs == manifest.irs)
 }
 
 fn capture_into(
     session: &mut Session,
     dir: &Path,
     captured: u64,
+    options: &Capture,
+    earlier: &BTreeMap<i64, EarlierIr>,
     progress: &mut impl FnMut(Step),
 ) -> Result<Manifest> {
+    options.check()?;
     let (device, firmware) = identify(session)?;
     let setlists = session.setlists()?;
     // Every setlist, not just the first: a Helix Floor, LT or Rack has eight,
@@ -357,11 +500,19 @@ fn capture_into(
     let all_names = (0..setlists.len().max(1))
         .map(|setlist| session.presets(setlist as i64))
         .collect::<Result<Vec<_>>>()?;
+    // The lists exactly as the pedal gave them, default names for empty slots
+    // and all, for `still_current` to compare with.
+    atomic_write(
+        dir.join(LISTED_NAMES),
+        serde_json::to_vec(&all_names).map_err(json_err)?,
+    )
+    .map_err(io("writing the preset lists"))?;
     let mut alive = KeepAlive::new();
     let (names, more_setlists) = capture_presets(
         dir,
         all_names,
         |setlist, index| {
+            options.check()?;
             alive.tick(session)?;
             session.read_preset_at(setlist as i64, index as i64)
         },
@@ -373,6 +524,7 @@ fn capture_into(
     progress(Step::Globals);
     let mut globals = BTreeMap::new();
     for id in 0..GLOBAL_IDS {
+        options.check()?;
         alive.tick(session)?;
         let value = match session.object(id) {
             Ok(value) => value,
@@ -398,30 +550,7 @@ fn capture_into(
     // later restore erase every IR that the incomplete backup happened not to
     // mention.
     let slots = session.irs()?;
-    let mut irs = BTreeMap::new();
-    if !slots.is_empty() {
-        std::fs::create_dir_all(dir.join("irs")).map_err(io("creating the IR folder"))?;
-    }
-    for (done, (slot, _)) in slots.iter().enumerate() {
-        progress(Step::Irs {
-            done,
-            total: slots.len(),
-        });
-        let (name, samples) = session.read_ir(*slot)?.ok_or_else(|| {
-            Error::Protocol(format!(
-                "impulse response slot {slot} disappeared during the backup"
-            ))
-        })?;
-        let mut bytes = Vec::with_capacity(samples.len() * 4);
-        for s in &samples {
-            bytes.extend_from_slice(&s.to_le_bytes());
-        }
-        let path = dir
-            .join("irs")
-            .join(format!("{slot:02} {}.f32", sanitise(&name)));
-        atomic_write(&path, bytes).map_err(io("writing an impulse response"))?;
-        irs.insert(slot.to_string(), name);
-    }
+    let irs = capture_irs(session, dir, &slots, options, earlier, &mut alive, progress)?;
 
     let manifest = Manifest {
         version: 1,
@@ -440,6 +569,70 @@ fn capture_into(
     )
     .map_err(io("writing the manifest"))?;
     Ok(manifest)
+}
+
+/// Every impulse response in `slots` into the bundle at `dir`: its samples,
+/// copied from `earlier` when that holds the same name and checksum, and the
+/// checksums beside the manifest so the next backup can do the same. Returns
+/// slot numbers to names, as the manifest keeps them.
+fn capture_irs(
+    session: &mut Session,
+    dir: &Path,
+    slots: &[(i64, String)],
+    options: &Capture,
+    earlier: &BTreeMap<i64, EarlierIr>,
+    alive: &mut KeepAlive,
+    progress: &mut impl FnMut(Step),
+) -> Result<BTreeMap<String, String>> {
+    let mut irs = BTreeMap::new();
+    if !slots.is_empty() {
+        std::fs::create_dir_all(dir.join("irs")).map_err(io("creating the IR folder"))?;
+    }
+    let mut checksums = BTreeMap::new();
+    for (done, (slot, _)) in slots.iter().enumerate() {
+        progress(Step::Irs {
+            done,
+            total: slots.len(),
+        });
+        options.check()?;
+        // The IR reads are all on the control channel: the other two would
+        // go quiet for as long as they take, and a pedal with dozens of IRs
+        // then stops answering them (#79).
+        alive.tick(session)?;
+        let (name, checksum) = session.ir_descriptor(*slot)?.ok_or_else(|| {
+            Error::Protocol(format!(
+                "impulse response slot {slot} disappeared during the backup"
+            ))
+        })?;
+        let path = dir
+            .join("irs")
+            .join(format!("{slot:02} {}.f32", sanitise(&name)));
+        let kept = earlier
+            .get(slot)
+            .filter(|ir| ir.name == name && checksum == Some(ir.checksum));
+        let copied = kept.is_some_and(|ir| std::fs::copy(&ir.file, &path).is_ok());
+        if !copied {
+            let samples = session.read_ir_samples(*slot)?;
+            let mut bytes = Vec::with_capacity(samples.len() * 4);
+            for s in &samples {
+                bytes.extend_from_slice(&s.to_le_bytes());
+            }
+            atomic_write(&path, bytes).map_err(io("writing an impulse response"))?;
+        }
+        if let Some(checksum) = checksum {
+            checksums.insert(slot.to_string(), checksum);
+        }
+        irs.insert(slot.to_string(), name);
+    }
+    if !checksums.is_empty() {
+        atomic_write(
+            dir.join(IR_CHECKSUMS),
+            serde_json::to_vec_pretty(&checksums).map_err(json_err)?,
+        )
+        .map_err(io("writing the IR checksums"))?;
+    }
+
+    Ok(irs)
 }
 
 /// Write every setlist's presets into a bundle, each in its own directory,
@@ -840,6 +1033,19 @@ pub fn capture_one_in(session: &mut Session, dir: &Path, setlist: i64, index: i6
         serde_json::to_vec_pretty(&manifest).map_err(json_err)?,
     )
     .map_err(io("writing the manifest"))?;
+    // The list the pedal gives now, so a connection later today still finds
+    // the bundle current. A bundle without the lists is left without them.
+    let lists = dir.join(LISTED_NAMES);
+    if let Some(mut listed) = std::fs::read(&lists)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<Vec<String>>>(&bytes).ok())
+    {
+        if let Some(held) = listed.get_mut(setlist_index) {
+            *held = names;
+            atomic_write(&lists, serde_json::to_vec(&listed).map_err(json_err)?)
+                .map_err(io("writing the preset lists"))?;
+        }
+    }
     remove_other_slot_files(&presets_dir, slot, keep.as_deref())
 }
 
@@ -1478,6 +1684,112 @@ mod tests {
         .unwrap();
         let made = snapshot(&bundle, "2026-10-01 120000", 3).unwrap().unwrap();
         assert!(made.join("presets-1/001 Wall.hxpreset").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An IR the last backup holds under the same name and checksum is
+    /// copied from it; one replaced under the same name has a new checksum
+    /// and is read again.
+    #[test]
+    fn irs_the_last_backup_holds_are_copied_rather_than_read_again() {
+        let pedal = crate::fake::Pedal::new();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.irs.insert(0, ("Fredman".into(), 11));
+            pedal.irs.insert(3, ("Room".into(), 22));
+        }
+        let mut session = crate::fake::session(&pedal);
+        let samples_read = || {
+            pedal
+                .lock()
+                .unwrap()
+                .opcodes()
+                .iter()
+                .filter(|op| **op == hx_proto::rpc::op::IR_SAMPLES)
+                .count()
+        };
+        let root = scratch("ir-reuse");
+        let first = root.join("first.hxbundle");
+        let slots = session.irs().unwrap();
+        let mut alive = KeepAlive::new();
+        let none = BTreeMap::new();
+        let irs = capture_irs(
+            &mut session,
+            &first,
+            &slots,
+            &Capture::default(),
+            &none,
+            &mut alive,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(samples_read(), 2, "the first backup reads every IR");
+        let mut saved = manifest();
+        saved.irs = irs;
+        std::fs::write(
+            first.join("manifest.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+
+        let earlier = earlier_irs(&first);
+        assert_eq!(earlier.len(), 2, "both are known by their checksums");
+        pedal.lock().unwrap().irs.insert(3, ("Room".into(), 23));
+        let second = root.join("second.hxbundle");
+        let slots = session.irs().unwrap();
+        capture_irs(
+            &mut session,
+            &second,
+            &slots,
+            &Capture::default(),
+            &earlier,
+            &mut alive,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(samples_read(), 3, "only the replaced one is read again");
+        assert_eq!(
+            std::fs::read(second.join("irs/00 Fredman.f32")).unwrap(),
+            std::fs::read(first.join("irs/00 Fredman.f32")).unwrap()
+        );
+        let room = std::fs::read(second.join("irs/03 Room.f32")).unwrap();
+        assert_eq!(f32::from_le_bytes(room[..4].try_into().unwrap()), 23.0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Skip stops a backup before its next request, and the session it was
+    /// using goes on: nothing was left half asked.
+    #[test]
+    fn a_skipped_backup_stops_before_its_next_request_and_keeps_the_session() {
+        let pedal = crate::fake::Pedal::new();
+        pedal.lock().unwrap().irs.insert(0, ("Fredman".into(), 11));
+        let mut session = crate::fake::session(&pedal);
+        let slots = session.irs().unwrap();
+        let root = scratch("ir-skip");
+        let skip = AtomicBool::new(true);
+        let options = Capture {
+            reuse_irs: true,
+            cancelled: Some(&skip),
+        };
+        let asked = pedal.lock().unwrap().requests.len();
+        let none = BTreeMap::new();
+        let outcome = capture_irs(
+            &mut session,
+            &root.join("pedal.hxbundle"),
+            &slots,
+            &options,
+            &none,
+            &mut KeepAlive::new(),
+            &mut |_| {},
+        );
+        assert!(matches!(outcome, Err(Error::Cancelled)));
+        assert!(!Error::Cancelled.loses_session());
+        assert_eq!(
+            pedal.lock().unwrap().requests.len(),
+            asked,
+            "nothing more was asked"
+        );
+        session.irs().expect("the session still answers");
         let _ = std::fs::remove_dir_all(root);
     }
 

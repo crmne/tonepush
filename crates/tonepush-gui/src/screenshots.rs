@@ -40,6 +40,10 @@ const SIZES: [(u32, u32); 3] = [(1024, 640), (1280, 760), (2560, 1440)];
 enum Scene {
     /// An HX Stomp with 01B Plexi Crunch loaded and its amp selected.
     HxEdit,
+    /// The HX Stomp just connected, backing up, with Skip beside it.
+    HxConnectBackup,
+    /// The StompStation PRO just connected, checking its backup, with Skip.
+    ProConnectCheck,
     /// A StompStation PRO with 03B Velvet Drive loaded.
     ProEdit,
     /// Nothing plugged in yet: TonePush looking for either family.
@@ -177,8 +181,10 @@ enum Scene {
 }
 
 impl Scene {
-    const ALL: [Scene; 67] = [
+    const ALL: [Scene; 69] = [
         Scene::HxEdit,
+        Scene::HxConnectBackup,
+        Scene::ProConnectCheck,
         Scene::ProEdit,
         Scene::NoDevice,
         Scene::SetlistConfirm,
@@ -250,6 +256,8 @@ impl Scene {
     fn name(self) -> &'static str {
         match self {
             Scene::HxEdit => "hx-edit",
+            Scene::HxConnectBackup => "hx-connect-backup",
+            Scene::ProConnectCheck => "pro-connect-check",
             Scene::ProEdit => "pro-edit",
             Scene::NoDevice => "no-device",
             Scene::SetlistConfirm => "setlist-confirm",
@@ -381,6 +389,15 @@ impl Scene {
                 hx_stomp(app);
                 app.library_device_filter = None;
                 app.lib_reveal = true;
+            }
+            Scene::HxConnectBackup => {
+                hx_stomp(app);
+                app.working = Some(("presets".to_owned(), 0.42));
+                app.backup_skip = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            }
+            Scene::ProConnectCheck => {
+                pro(app);
+                app.pro.skippable = true;
             }
             Scene::Settings => hx_stomp(app),
             Scene::ProEdit => pro(app),

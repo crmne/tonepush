@@ -51,6 +51,28 @@ of that, **Back up…** and **Restore…** on the preset list do it on demand.
 So the copy on disk is never older than the last thing you did, and nothing
 ever interrupts playing.
 
+A pedal with many impulse responses made that first read long, so three
+things keep it short:
+
+- **Once a day.** A bundle taken today, from this pedal at this firmware, that
+  still names exactly what the pedal lists (every setlist's presets, as the
+  pedal gives them, and every IR) is not read again. That costs a few list
+  requests. Every save refreshes its preset and the list in the bundle, so
+  edits made through TonePush keep it current; a change made on the pedal
+  itself, or in HX Edit, changes a list and the next connection reads it.
+- **IRs are not read twice.** The `op12` descriptor carries the checksum the
+  upload declared, and the bundle keeps each IR's in `ir-checksums.json`. An
+  IR whose slot, name and checksum match the last bundle is copied from it;
+  only new or replaced ones have their samples read.
+- **Skip.** The connection's backup can be skipped while it runs, between two
+  requests, so the session goes on. The bundle that was there is kept, and
+  the next connection backs up again. Closing the window skips it too.
+
+The IR reads all go over the control channel, so a backup keeps the other two
+channels alive between IRs as it does between presets: a pedal with dozens of
+IRs otherwise stopped answering them part way and dropped the session
+([#79](https://github.com/crmne/tonepush/issues/79)).
+
 ## Where a bundle may go [built]
 
 `tonepush back-up DIR` (and the editor's **Back up…**) writes the bundle as

@@ -106,6 +106,10 @@ pub enum Error {
     Backup(String),
     #[error("file format error: {0}")]
     Format(String),
+    /// [`Device::set_interrupt`]'s flag was raised, between two requests:
+    /// the session is aligned and can go on being used.
+    #[error("stopped before it finished")]
+    Cancelled,
 }
 
 impl Error {

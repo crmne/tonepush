@@ -227,6 +227,27 @@ impl Pedal {
                 ));
                 (1, Value::Nil)
             }
+            op::IR_DESCRIPTOR => match self.irs.get(&number(key::IR_SLOT)) {
+                Some((name, sum)) => (
+                    0,
+                    hx_proto::msgmap! {
+                        key::IR_SLOT => Value::Int(number(key::IR_SLOT)),
+                        key::IR_CHECKSUM => Value::UInt(*sum),
+                        key::NAME => Value::Str(name.clone()),
+                    },
+                ),
+                None => (0, Value::Nil),
+            },
+            op::IR_SAMPLES => {
+                // A recognisable impulse: its checksum as the first sample.
+                let sum = self
+                    .irs
+                    .get(&number(key::IR_SLOT))
+                    .map_or(0, |(_, sum)| *sum);
+                let mut bytes = (sum as f32).to_le_bytes().to_vec();
+                bytes.resize(2048 * 4, 0);
+                (0, Value::Bin(bytes, 2))
+            }
             op::CLEAR_IR => {
                 self.irs.remove(&number(key::IR_SLOT));
                 (0, Value::Nil)

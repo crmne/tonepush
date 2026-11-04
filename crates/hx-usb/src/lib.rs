@@ -70,15 +70,20 @@ pub enum Error {
     Protocol(String),
     #[error("timed out waiting for a reply to transaction {0}")]
     Timeout(i64),
+    /// The caller asked for the work to stop, between two requests: the
+    /// session is aligned and can go on being used.
+    #[error("stopped before it finished")]
+    Cancelled,
 }
 
 impl Error {
     /// Whether continuing on this open session risks speaking on a transport
     /// whose sequence/transaction state is no longer known. A device refusal
-    /// is a complete, aligned reply and is therefore the sole recoverable
-    /// command error; transport silence and malformed protocol are not.
+    /// is a complete, aligned reply, and a cancellation stops between two
+    /// requests, so those two are recoverable; transport silence and
+    /// malformed protocol are not.
     pub fn loses_session(&self) -> bool {
-        !matches!(self, Self::Device(_))
+        !matches!(self, Self::Device(_) | Self::Cancelled)
     }
 }
 

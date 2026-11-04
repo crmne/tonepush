@@ -52,6 +52,13 @@ pub enum Cmd {
     Quit,
     /// Read the whole pedal into a bundle directory.
     BackUp(std::path::PathBuf),
+    /// The backup a connection takes: none when the bundle already matches a
+    /// pedal backed up today, and it stops when `skip` is raised, keeping the
+    /// bundle that was there.
+    BackUpOnConnect {
+        dir: std::path::PathBuf,
+        skip: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    },
     /// Write a bundle back onto the pedal.
     RestoreAll(std::path::PathBuf),
     Rename {
@@ -373,6 +380,16 @@ pub enum Evt {
     Working {
         what: String,
         progress: f32,
+    },
+    /// The connection's backup was skipped; the copy from `captured` (seconds
+    /// since the epoch) is still the latest, when there is one.
+    BackupSkipped {
+        captured: Option<u64>,
+    },
+    /// The automatic backup taken earlier today still matches the pedal, so
+    /// the connection did not read it again.
+    BackupCurrent {
+        captured: u64,
     },
     /// A backup finished, with where it went and what it holds.
     BackedUp {
@@ -1037,7 +1054,8 @@ impl Worker {
             }
             // Asked for as the pedal connects, or to a file of the person's
             // choosing, where there is nothing to set aside.
-            Cmd::BackUp(dir) => self.back_up(&dir, &Why::Connected),
+            Cmd::BackUp(dir) => self.back_up(&dir, &Why::Connected, None),
+            Cmd::BackUpOnConnect { dir, skip } => self.back_up_on_connect(&dir, &skip),
             Cmd::RestoreAll(dir) => self.restore_all(&dir),
             Cmd::SavePreset => {
                 self.save();
@@ -2058,7 +2076,7 @@ impl Worker {
             return;
         };
         if hx_usb::backup::exists(&dir) {
-            self.back_up(&dir, why);
+            self.back_up(&dir, why, None);
         }
     }
 
@@ -2084,13 +2102,42 @@ impl Worker {
     }
 
     /// Read the preset back from the device and show it.
-    /// Read the whole pedal into a bundle directory.
-    fn back_up(&mut self, dir: &std::path::Path, why: &Why) {
+    /// The backup a connection takes. A bundle of this pedal taken today
+    /// that still names what it holds is kept as it is: every save since
+    /// refreshed its own preset in it. Otherwise the pedal is read, IRs it
+    /// already holds copied rather than read again, until `skip` says stop.
+    fn back_up_on_connect(&mut self, dir: &std::path::Path, skip: &std::sync::atomic::AtomicBool) {
+        if let Some(since) = start_of_today() {
+            let current = self.try_on_device(|d| hx_usb::backup::still_current(d, dir, since));
+            if current == Some(true) {
+                if let Ok(manifest) = hx_usb::backup::open(dir) {
+                    self.send(Evt::BackupCurrent {
+                        captured: manifest.captured,
+                    });
+                    return;
+                }
+            }
+            if self.device.is_none() {
+                return;
+            }
+        }
+        self.back_up(dir, &Why::Connected, Some(skip));
+    }
+
+    /// Read the whole pedal into a bundle directory, stopping when `skip` is
+    /// raised.
+    fn back_up(
+        &mut self,
+        dir: &std::path::Path,
+        why: &Why,
+        skip: Option<&std::sync::atomic::AtomicBool>,
+    ) {
         let stamp = now();
         // Put the copy that is there aside before overwriting it. Corruption is
         // noticed later than it happens, and a single bundle that every
         // connection refreshes is always the pedal as it is now - which is no
         // use at all when what you need is the pedal as it was on Tuesday.
+        let mut set_aside = None;
         if Some(dir) == self.automatic.as_deref() {
             match hx_usb::backup::snapshot(dir, &datestamp(), KEEP_SNAPSHOTS) {
                 // Why it was set aside goes with it, for the Backups history;
@@ -2101,19 +2148,38 @@ impl Worker {
                             "could not note why a copy was kept: {e}"
                         )));
                     }
+                    set_aside = Some(copy);
                 }
                 Ok(None) => {}
                 Err(e) => self.send(Evt::Activity(format!("could not keep a snapshot: {e}"))),
             }
         }
         let events = self.events.clone();
+        let options = hx_usb::backup::Capture {
+            reuse_irs: true,
+            cancelled: skip,
+        };
         let outcome = self.try_on_device(|d| {
-            hx_usb::backup::capture(d, dir, stamp, |step| {
+            hx_usb::backup::capture_with(d, dir, stamp, options, |step| {
                 if let Some(evt) = working(&step) {
                     events.send(evt);
                 }
             })
         });
+        if outcome.is_none()
+            && skip.is_some_and(|skip| skip.load(std::sync::atomic::Ordering::Relaxed))
+            && self.device.is_some()
+        {
+            // The bundle is as it was, so the copy set aside from it is a
+            // second copy of the same thing.
+            if let Some(copy) = set_aside {
+                let _ = std::fs::remove_dir_all(copy);
+            }
+            self.send(Evt::BackupSkipped {
+                captured: hx_usb::backup::open(dir).ok().map(|m| m.captured),
+            });
+            return;
+        }
         if let Some(manifest) = outcome {
             self.send(Evt::BackedUp {
                 dir: dir.to_owned(),
@@ -2340,6 +2406,8 @@ impl Worker {
         };
         match result {
             Ok(value) => Some(value),
+            // Asked for: the caller says what became of the work.
+            Err(hx_usb::Error::Cancelled) => None,
             Err(e) => {
                 let lost = loses_session(&e, untouched);
                 self.events.send(Evt::Failed(e.to_string()));
@@ -2467,6 +2535,12 @@ fn loses_session(error: &hx_usb::Error, untouched: bool) -> bool {
 }
 
 /// Seconds since the epoch, for stamping a bundle.
+/// When today began here, in seconds since the epoch.
+fn start_of_today() -> Option<u64> {
+    let start = jiff::Zoned::now().start_of_day().ok()?;
+    u64::try_from(start.timestamp().as_second()).ok()
+}
+
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2591,6 +2665,7 @@ fn ends_audition(cmd: &Cmd) -> bool {
             | Cmd::Disconnect
             | Cmd::Quit
             | Cmd::BackUp(_)
+            | Cmd::BackUpOnConnect { .. }
             | Cmd::RestoreAll(_)
             | Cmd::Rename { .. }
             | Cmd::RenameLoaded(_)
@@ -2860,6 +2935,12 @@ mod tests {
                         .collect();
                     (0, Value::Array(names))
                 }
+                op::LIST_SETLISTS => (
+                    0,
+                    Value::Array(vec![hx_proto::msgmap! {
+                        0 => Value::Str("PRESETS".into()),
+                    }]),
+                ),
                 op::LIST_IRS if self.irs.is_empty() => (0, Value::Nil),
                 op::LIST_IRS => {
                     let listed = self
@@ -3001,6 +3082,94 @@ mod tests {
         worker.opened(session(pedal));
         let _ = events.try_iter().count();
         (worker, events)
+    }
+
+    fn scratch_bundle(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "tonepush-connect-backup-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root.join("automatic.hxbundle")
+    }
+
+    /// Skip ends the connection's backup with the pedal still connected and
+    /// the last backup as it was; nothing is reported as having gone wrong.
+    #[test]
+    fn a_skipped_connection_backup_keeps_the_pedal_and_the_last_backup() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        let dir = scratch_bundle("skip");
+        worker.automatic = Some(dir.clone());
+        let skip = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        worker.handle(Cmd::BackUpOnConnect {
+            dir: dir.clone(),
+            skip,
+        });
+        let seen: Vec<Evt> = events.try_iter().collect();
+        assert!(seen
+            .iter()
+            .any(|evt| matches!(evt, Evt::BackupSkipped { captured: None })));
+        assert!(!seen.iter().any(|evt| matches!(
+            evt,
+            Evt::Failed(_) | Evt::Disconnected | Evt::BackedUp { .. }
+        )));
+        assert!(worker.device.is_some(), "the pedal stays connected");
+        assert!(!dir.exists(), "no half backup is left behind");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// A pedal backed up earlier today that still holds the same presets and
+    /// IRs is not read again when it connects.
+    #[test]
+    fn a_pedal_backed_up_today_is_not_read_again_on_connect() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        let dir = scratch_bundle("today");
+        worker.automatic = Some(dir.clone());
+        worker.handle(Cmd::BackUp(dir.clone()));
+        assert!(
+            events
+                .try_iter()
+                .any(|evt| matches!(evt, Evt::BackedUp { .. })),
+            "the first connection backs up"
+        );
+        let fetched = || {
+            pedal
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .filter(|(opcode, _)| *opcode == op::FETCH_OBJECT)
+                .count()
+        };
+        let before = fetched();
+        let skip = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        worker.handle(Cmd::BackUpOnConnect {
+            dir: dir.clone(),
+            skip: skip.clone(),
+        });
+        let seen: Vec<Evt> = events.try_iter().collect();
+        assert!(seen
+            .iter()
+            .any(|evt| matches!(evt, Evt::BackupCurrent { .. })));
+        assert_eq!(fetched(), before, "no settings were read again");
+
+        // A preset renamed on the pedal itself: it is read whole again.
+        pedal
+            .lock()
+            .unwrap()
+            .stored
+            .insert(0, ("Elsewhere".into(), document(99.0)));
+        worker.handle(Cmd::BackUpOnConnect {
+            dir: dir.clone(),
+            skip,
+        });
+        assert!(events
+            .try_iter()
+            .any(|evt| matches!(evt, Evt::BackedUp { .. })));
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
     /// Writing a setlist sets the automatic backup aside first, with the

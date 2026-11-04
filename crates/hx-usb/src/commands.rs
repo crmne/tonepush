@@ -306,6 +306,16 @@ impl Session {
     /// [`crate::ir::prepare`] performs it before an ordinary WAV is uploaded.
     /// `None` is an empty slot.
     pub fn read_ir(&mut self, slot: i64) -> Result<Option<(String, Vec<f32>)>> {
+        let Some((name, _)) = self.ir_descriptor(slot)? else {
+            return Ok(None);
+        };
+        Ok(Some((name, self.read_ir_samples(slot)?)))
+    }
+
+    /// An impulse response slot's name and the checksum its upload declared,
+    /// without its samples: one small reply, against the samples' 8 KB. `None`
+    /// is an empty slot; the checksum is `None` when the device leaves it out.
+    pub fn ir_descriptor(&mut self, slot: i64) -> Result<Option<(String, Option<u64>)>> {
         non_negative(slot, "impulse response slot")?;
         self.bootstrap()?;
         let descriptor = self.request(
@@ -316,8 +326,21 @@ impl Session {
         let Some(name) = descriptor.get(rpc::key::NAME).and_then(Value::as_str) else {
             return Ok(None);
         };
-        let name = name.to_owned();
+        let checksum = descriptor
+            .get(rpc::key::IR_CHECKSUM)
+            .and_then(|value| match value {
+                Value::UInt(u) | Value::Wide(u, _) => Some(*u),
+                Value::Int(i) | Value::WideInt(i, _) => u64::try_from(*i).ok(),
+                _ => None,
+            });
+        Ok(Some((name.to_owned(), checksum)))
+    }
 
+    /// An impulse response slot's samples, as [`read_ir`](Self::read_ir)
+    /// returns them.
+    pub fn read_ir_samples(&mut self, slot: i64) -> Result<Vec<f32>> {
+        non_negative(slot, "impulse response slot")?;
+        self.bootstrap()?;
         let samples = self.request(
             ChannelId::CONTROL,
             rpc::op::IR_SAMPLES,
@@ -331,7 +354,7 @@ impl Session {
                 "the device returned invalid impulse response samples".into(),
             ));
         };
-        Ok(Some((name, decode_ir_samples(bytes)?)))
+        decode_ir_samples(bytes)
     }
 
     /// Rename an impulse response slot, leaving its samples alone.

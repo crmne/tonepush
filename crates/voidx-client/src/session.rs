@@ -254,6 +254,11 @@ impl<L: Link> Session<L> {
         self.notifications.drain(..).collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn link(&self) -> &L {
+        &self.link
+    }
+
     pub(crate) fn description(&self) -> &str {
         self.link.description()
     }

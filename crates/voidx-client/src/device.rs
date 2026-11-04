@@ -109,6 +109,7 @@ pub struct Device<L> {
     write_safety: WriteSafety,
     writes_enabled: bool,
     live_edits_enabled: bool,
+    interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl<L: Link> Device<L> {
@@ -134,6 +135,7 @@ impl<L: Link> Device<L> {
             write_safety,
             writes_enabled: false,
             live_edits_enabled: false,
+            interrupt: None,
         })
     }
 
@@ -259,6 +261,20 @@ impl<L: Link> Device<L> {
     /// Read one occupied list slot in small protocol batches. Every response
     /// still has to echo the requested slot and chunk before its fixed-size,
     /// padded device bytes are accepted.
+    /// Let a flag stop the slot reads that follow: while it is raised, every
+    /// blob read returns [`Error::Cancelled`] before it sends anything. For a
+    /// long check or backup someone may want to leave; `None` takes it away.
+    pub fn set_interrupt(&mut self, flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+        self.interrupt = flag;
+    }
+
+    fn interrupted(&self) -> Result<()> {
+        match &self.interrupt {
+            Some(flag) if flag.load(std::sync::atomic::Ordering::Relaxed) => Err(Error::Cancelled),
+            _ => Ok(()),
+        }
+    }
+
     pub fn read_blob(&mut self, list: &BlobList, index: usize) -> Result<Vec<u8>> {
         self.read_blob_with_progress(list, index, |_, _| {})
     }
@@ -322,6 +338,7 @@ impl<L: Link> Device<L> {
         index: usize,
         chunk: usize,
     ) -> Result<Vec<u8>> {
+        self.interrupted()?;
         let command = Command::data_read(path.clone(), index, chunk)?;
         let subject = command.response_subject();
         let frame = self.session.request(command)?;
@@ -349,6 +366,7 @@ impl<L: Link> Device<L> {
         index: usize,
         chunks: &[usize],
     ) -> Result<Vec<Vec<u8>>> {
+        self.interrupted()?;
         let commands = chunks
             .iter()
             .map(|chunk| Command::data_read(path.clone(), index, *chunk))
@@ -1051,6 +1069,32 @@ mod tests {
             WriteSafety::ReadOnly { .. }
         ));
         assert!(future.enable_writes().is_err());
+    }
+
+    /// A raised interrupt stops blob reads before anything is sent, so the
+    /// session stays aligned for whatever comes next.
+    #[test]
+    fn a_raised_interrupt_stops_slot_reads_before_they_are_sent() {
+        let link = Scripted {
+            input: Cursor::new(identity_frames("1.5.12")),
+            output: vec![],
+        };
+        let mut device = Device::connect(link).unwrap();
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        device.set_interrupt(Some(flag.clone()));
+        let sent = |device: &Device<Scripted>| device.session.link().output.len();
+        let before = sent(&device);
+        let path = NodePath::new("root\\presets").unwrap();
+        assert!(matches!(
+            device.read_blob_chunk(&path, 0, 1),
+            Err(Error::Cancelled)
+        ));
+        assert!(matches!(
+            device.read_blob_chunks(&path, 0, &[1, 2]),
+            Err(Error::Cancelled)
+        ));
+        assert_eq!(sent(&device), before, "nothing reached the pedal");
+        assert!(!Error::Cancelled.loses_session());
     }
 
     #[test]

@@ -38,7 +38,9 @@ operation against the hardware:
   settings while keeping its name, reorder, clear, and undo. The preset carries
   a directory of byte offsets into itself, so these were impossible until that
   table was decoded and could be recomputed.
-- **Backups with a history.** The whole pedal is read on every connect and
+- **Backups with a history.** The whole pedal is read when it connects (not
+  again the same day if it still holds the same presets, impulse responses
+  already backed up are not read again, and Skip leaves it for next time) and
   kept current after every save, and the copy it replaces is set aside first,
   with why: the pedal connecting, a setlist or presets being written, a
   restore. The pedal's Backups page compares any copy with the pedal now and
@@ -69,7 +71,8 @@ model-shelf and pedal-knob design instead of reproducing VoidX Control's UI:
   bytes for presets, both IR channels and every NAM slot plus safe global
   settings. Every size and SHA-256 is checked before use. Persistent GUI edits
   stay disabled until a current rollback bundle matches the connected pedal;
-  the newest matching bundle is armed automatically on connection. Refreshes
+  the newest matching bundle is armed automatically on connection, or the
+  check skipped to play straight away, with saving waiting. Refreshes
   reuse unchanged verified slots, and full reads batch strictly validated
   chunks instead of waiting for one USB round trip per chunk.
 - **Conservative compatibility.** Reads work with self-described protocol

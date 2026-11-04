@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -202,6 +202,8 @@ enum ReadTarget {
 
 enum Evt {
     Connected(Snapshot),
+    /// The check or backup that unlocks saving started (true) or ended.
+    Skippable(bool),
     /// A Connect has been handled, whatever came of it. The connect page
     /// watches USB only while no look is in flight.
     Looked,
@@ -334,6 +336,11 @@ pub(crate) struct Panel {
     /// asked for behind a backup and withdrawn, or overtaken by a newer one,
     /// is passed over rather than played minutes later.
     wanted: Arc<AtomicI64>,
+    /// Raised to stop the check or backup a connection runs before saving
+    /// is unlocked. Shared with the worker, which reads it between slots.
+    skip: Arc<AtomicBool>,
+    /// Whether that check or backup is running now, so Skip is offered.
+    pub(crate) skippable: bool,
     /// What the editor auditions in the loaded preset's place, for the
     /// deck, the board and the sidebar to say; set by the app each frame.
     pub(crate) hearing: Option<crate::audition::Shown>,
@@ -382,10 +389,19 @@ pub(crate) struct Panel {
 }
 
 impl Panel {
+    /// Stop the connection's check or backup between two slot reads. Live
+    /// editing goes on; saving waits for a backup.
+    pub(crate) fn skip_check(&mut self) {
+        if self.skippable {
+            self.skip.store(true, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn new(ctx: egui::Context) -> Self {
         let (tx, commands) = mpsc::channel();
         let (events, rx) = mpsc::channel();
         let wanted = Arc::new(AtomicI64::new(0));
+        let skip = Arc::new(AtomicBool::new(false));
         if cfg!(test) {
             // A test builds an App, and an App builds this panel: nothing a
             // test asks of it may reach a StompStation PRO that happens to
@@ -399,9 +415,11 @@ impl Panel {
             });
         } else {
             let wanted = wanted.clone();
+            let skip = skip.clone();
             std::thread::spawn(move || {
                 let mut worker = Worker::new(commands, events, ctx);
                 worker.wanted = wanted;
+                worker.skip = skip;
                 worker.run();
             });
         }
@@ -446,6 +464,8 @@ impl Panel {
             audition_events: Vec::new(),
             audition_failures: Vec::new(),
             wanted,
+            skip,
+            skippable: false,
             hearing: None,
             put_targets: Vec::new(),
             dropping: false,
@@ -622,6 +642,7 @@ impl Panel {
                 Ok(Evt::Working { what, progress }) => {
                     self.working = Some((what, progress.clamp(0.0, 1.0)));
                 }
+                Ok(Evt::Skippable(skippable)) => self.skippable = skippable,
                 Ok(Evt::Success(line)) => {
                     self.working = None;
                     self.failed = false;
@@ -643,6 +664,7 @@ impl Panel {
                     self.read_only = None;
                     self.preset_hashes.clear();
                     self.working = None;
+                    self.skippable = false;
                     self.typing = None;
                     self.facts = LibraryFacts::default();
                     self.update_mode = false;
@@ -1955,6 +1977,8 @@ struct Worker {
     audition: Option<SetAside>,
     /// The audition the editor still wants, shared with the panel.
     wanted: Arc<AtomicI64>,
+    /// The panel's Skip for the connection's check or backup.
+    skip: Arc<AtomicBool>,
     history: Vec<Vec<NodeEdit>>,
     future: Vec<Vec<NodeEdit>>,
     last_edit_at: Option<Instant>,
@@ -1998,6 +2022,7 @@ impl Worker {
             audition_original: Vec::new(),
             audition: None,
             wanted: Arc::new(AtomicI64::new(0)),
+            skip: Arc::new(AtomicBool::new(false)),
             history: Vec::new(),
             future: Vec::new(),
             last_edit_at: None,
@@ -2641,7 +2666,34 @@ impl Worker {
         // Matching a rollback checks every slot's contents and global settings. It
         // is important, but it should not make a healthy pedal look absent
         // while it runs: publish the live editor first, then unlock writes.
+        self.skip.store(false, Ordering::Relaxed);
+        if let Some(device) = self.device.as_mut() {
+            device.set_interrupt(Some(self.skip.clone()));
+        }
+        self.send(Evt::Skippable(true));
+        let guarded = self.guard_on_connect(can_refresh_backup);
+        if let Some(device) = self.device.as_mut() {
+            device.set_interrupt(None);
+        }
+        self.send(Evt::Skippable(false));
+        let _ = version;
+        guarded
+    }
+
+    /// Unlock saving: arm the newest backup that still matches the pedal,
+    /// or take a fresh one when an earlier backup of it exists. Either stops
+    /// when Skip is raised, leaving live editing on and saving waiting.
+    fn guard_on_connect(&mut self, can_refresh_backup: bool) -> WorkResult<()> {
+        let skipped = |worker: &Self| worker.skip.load(Ordering::Relaxed);
         let guarded = self.device.as_mut().and_then(latest_matching_rollback);
+        if guarded.is_none() && skipped(self) {
+            self.rollback = None;
+            self.rollback_path = None;
+            self.send(Evt::Success(
+                "Skipped the backup check · saving waits for a backup".into(),
+            ));
+            return Ok(());
+        }
         if let Some((path, rollback, preset_hashes, facts)) = guarded {
             self.rollback = Some(rollback);
             self.rollback_path = Some(path.clone());
@@ -2654,14 +2706,19 @@ impl Worker {
             self.rollback = None;
             self.rollback_path = None;
             if can_refresh_backup && hx_catalog::home::backups().is_some() {
-                self.back_up_automatically()?;
+                match self.back_up_automatically() {
+                    Ok(_) => {}
+                    Err(_) if skipped(self) => self.send(Evt::Success(
+                        "Skipped the backup · saving waits for a backup".into(),
+                    )),
+                    Err(error) => return Err(error),
+                }
             } else {
                 self.send(Evt::Success(
                     "Live editing ready · back up to unlock saving".into(),
                 ));
             }
         }
-        let _ = version;
         Ok(())
     }
 
@@ -3243,8 +3300,11 @@ fn latest_matching_rollback(
             continue;
         };
         let facts = libraries::facts_of(&bundle);
-        if let Ok(rollback) = bundle.arm(device) {
-            return Some((path, rollback, preset_hashes, facts));
+        match bundle.arm(device) {
+            Ok(rollback) => return Some((path, rollback, preset_hashes, facts)),
+            // Skipped: no other candidate is tried either.
+            Err(voidx_client::Error::Cancelled) => return None,
+            Err(_) => {}
         }
     }
     None

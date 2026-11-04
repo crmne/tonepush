@@ -652,11 +652,23 @@ impl Panel {
             }));
             return parts;
         }
+        // The check or backup that unlocks saving can be left for later.
+        let busy = |text: String| {
+            if self.skippable {
+                State::Skippable(text)
+            } else {
+                State::Busy(text)
+            }
+        };
         if let Some((what, progress)) = &self.working {
-            parts.push(State::Busy(format!("{what} · {:.0}%", progress * 100.0)));
-        } else if self.busy {
-            parts.push(State::Busy(if self.status.is_empty() {
-                "Talking to the pedal".to_owned()
+            parts.push(busy(format!("{what} · {:.0}%", progress * 100.0)));
+        } else if self.busy || self.skippable {
+            parts.push(busy(if self.status.is_empty() {
+                if self.skippable {
+                    "Checking the backup against the pedal".to_owned()
+                } else {
+                    "Talking to the pedal".to_owned()
+                }
             } else {
                 self.status.clone()
             }));
@@ -868,7 +880,9 @@ impl Panel {
                             Some(shown) => shown.state(tier),
                             None => self.state(tier),
                         };
-                        shell::state_line(ui, &parts, width);
+                        if shell::state_line(ui, &parts, width) {
+                            self.skip_check();
+                        }
                     },
                 );
             },

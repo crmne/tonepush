@@ -732,9 +732,10 @@ impl App {
                     Icon::ShieldCheck,
                     format!("Everything on this {device} is backed up"),
                     format!(
-                        "TonePush reads the whole pedal when it connects and keeps that copy \
-                         current after every save: {presets}, {} impulse responses and {} \
-                         settings, byte for byte.",
+                        "TonePush reads the whole pedal when it connects, at most once a \
+                         day while nothing else changes it, and keeps that copy current after \
+                         every save: {presets}, {} impulse responses and {} settings, byte \
+                         for byte.",
                         manifest.irs.len(),
                         manifest.globals,
                     ),
