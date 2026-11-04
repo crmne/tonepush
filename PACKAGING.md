@@ -191,9 +191,8 @@ Configured packaging destinations (publication is a separate step):
 | Homebrew | Configured | The `tonepush` cask (the app, from the DMG) and the `tonepush` formula (the universal binaries) in `crmne/homebrew-tap`; templates live in `packaging/homebrew/`. |
 | Fedora COPR | Configured | `paolino/tonepush`, built from the release source with `packaging/rpm/tonepush.spec` (below). |
 | Flatpak bundle | Configured | `rocks.tonepush.TonePush`, a release asset built by native-packages (below). |
-| FlatPark | Prepared | A FlatPark entry for `rocks.tonepush.TonePush` that repackages the Linux tarballs (below). |
-| Flathub | Not planned here | Flathub does not accept AI-assisted submissions; the maintainer handles it by hand. |
-| winget | Prepared | `crmne.TonePush` manifests from `packaging/winget/` (below); submitting them to microsoft/winget-pkgs is the maintainer's call. |
+| Flathub | Planned, by hand | The maintainer writes and submits the manifest by hand: Flathub's policy forbids AI-generated or AI-assisted submissions. |
+| winget | Configured | `crmne.TonePush` in microsoft/winget-pkgs, from the manifests in `packaging/winget/` (below). |
 | Nixpkgs | Not started | |
 | Alpine aports | Not started | |
 | Debian and Ubuntu | Configured | nFPM DEB files attached after stable release packaging succeeds. |
@@ -217,12 +216,6 @@ grant that reaches both the HX pedals' raw USB and the StompStation PRO's serial
 port. Files go through the file chooser portal. A Flatpak cannot install the
 udev rule, and the sandbox cannot see the host's, so the connect page tells
 Flatpak users to add it by hand rather than reporting it missing.
-
-[FlatPark](https://flatpark.org), a Flatpak remote that welcomes AI-assisted
-apps, can list the same app from the release tarballs (an `extra-data`
-package, fetched and unpacked at install time). Its entry is prepared in a
-checkout of flatpark/flatpark; opening the pull request is the maintainer's
-call.
 
 ## Fedora COPR
 
