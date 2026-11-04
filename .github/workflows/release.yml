@@ -523,3 +523,61 @@ jobs:
     with:
       version: ${{ github.ref_name }}
     secrets: inherit
+
+  # packaging.yml builds the AppImages from the published archives, after
+  # checksums.txt was signed. Add them to the signed checksums.txt, so an
+  # AppImage updates itself: fastframe-update refuses an AppImage its release
+  # doesn't sign and tells people to update from the release page instead.
+  # The rest of checksums.txt is kept as published: it and every file it
+  # lists are verified first, and only the AppImage lines are added before it
+  # is signed again.
+  sign-appimages:
+    name: Sign the AppImages
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    needs: packaging
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Only this job and release can read the release signing key.
+    environment: release-signing
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: assets/update-public-key.hex
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+      - name: Add the AppImages to checksums.txt and sign it again
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          TONEPUSH_UPDATE_SIGNING_KEY: ${{ secrets.TONEPUSH_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          gem install native-packages --version 0.12.0 --no-document
+          key="$PWD/assets/update-public-key.hex"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release
+          native-packages verify-checksums release/checksums.txt --public-key "$key"
+          cd release
+          shopt -s nullglob
+          images=(*.AppImage)
+          [ "${#images[@]}" -gt 0 ] || { echo "::error::The release has no AppImage to sign"; exit 1; }
+          for image in "${images[@]}"; do
+            if grep -q "  ${image}$" checksums.txt; then
+              echo "$image is already signed"
+            else
+              sha256sum -- "$image" >> checksums.txt
+            fi
+          done
+          cat checksums.txt
+          native-packages sign-checksums checksums.txt \
+            --public-key "$key" \
+            --key-env TONEPUSH_UPDATE_SIGNING_KEY
+          native-packages verify-checksums checksums.txt --public-key "$key"
+          # The signature last: a client between the two uploads sees a
+          # signature that doesn't match yet and tries again the next day.
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber checksums.txt
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber checksums.txt.sig

@@ -10,12 +10,16 @@
 //! .deb or .rpm) never does: the settings say which tool updates it. A copy
 //! that may downloads only when asked, checks the release's signature against
 //! the key compiled in here, and restarts only when asked again.
+//!
+//! A release is announced only once its signed checksums verify, so a copy
+//! that cannot update itself trusts the same signature a download would. Such
+//! a copy shows the command its package manager updates it with, to copy.
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use egui::RichText;
-pub use fastframe_update::{DownloadState, Receipt, Release, Unsupported};
+pub use fastframe_update::{DownloadState, ManagedUpdate, Receipt, Release, Unsupported};
 use fastframe_update::{
     MacConfig, PackageManager, Request, Response, Transport, UpdateConfig, Updater, CHECK_INTERVAL,
 };
@@ -125,6 +129,9 @@ pub fn advice(reason: &Unsupported) -> String {
         Unsupported::Snap => "Installed with Snap: update it with snap refresh.".into(),
         Unsupported::Nix => "Installed with Nix: update it through Nix.".into(),
         Unsupported::Cargo => "Built with cargo install: update it the same way.".into(),
+        Unsupported::MissingAsset => {
+            "This release has no update for this copy. Download it from the release page.".into()
+        }
         Unsupported::MoveToApplications => {
             "Move TonePush to Applications, then open it again to update it here.".into()
         }
@@ -138,10 +145,25 @@ pub fn advice(reason: &Unsupported) -> String {
 /// Everything the updater tells the interface, from its threads.
 enum Message {
     Checked(Option<Release>),
-    Support(Result<(), Unsupported>),
-    Progress { received: u64, total: u64 },
+    /// A found release whose signed checksums verified, and whether this
+    /// copy can install it.
+    Verified(Release, Support),
+    /// A found release whose checksums did not verify: never announced.
+    Unverified(Release),
+    Progress {
+        received: u64,
+        total: u64,
+    },
     Downloaded(Result<fastframe_update::Prepared, String>),
     HandedOff(Result<(), String>),
+}
+
+/// Whether this copy may install a verified release.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Support {
+    Installable,
+    /// Why not, and the package manager's update command when one owns it.
+    Refused(Unsupported, Option<ManagedUpdate>),
 }
 
 /// The update state the settings show and drive.
@@ -149,9 +171,13 @@ pub struct Updates {
     /// When the next check is due; `None` checks on the next frame.
     next_check: Option<Instant>,
     checking: bool,
+    /// The newer release, once its signed checksums verified.
     release: Option<Release>,
+    /// The release being verified, so a repeated check does not verify it
+    /// again.
+    verifying: Option<Release>,
     /// Whether this copy may replace itself, once asked.
-    support: Option<Result<(), Unsupported>>,
+    support: Option<Support>,
     download: DownloadState,
     /// Handed to the new version: this launch's own arguments.
     relaunch: Vec<String>,
@@ -170,6 +196,7 @@ impl Default for Updates {
             next_check: None,
             checking: false,
             release: None,
+            verifying: None,
             support: None,
             download: DownloadState::Idle,
             relaunch: Vec::new(),
@@ -240,17 +267,27 @@ impl Updates {
                     DownloadState::Idle | DownloadState::Failed(_)
                 );
                 if let Some(release) = release.filter(|_| !busy) {
-                    if self.release.as_ref() != Some(&release) {
-                        self.release = Some(release);
-                        self.download = DownloadState::Idle;
-                        self.support = None;
-                        self.spawn(ctx, |_| {
-                            Message::Support(updater().installation().map(|_| ()))
-                        });
+                    if self.release.as_ref() != Some(&release)
+                        && self.verifying.as_ref() != Some(&release)
+                    {
+                        self.verifying = Some(release.clone());
+                        self.spawn(ctx, move |_| verify(release));
                     }
                 }
             }
-            Message::Support(support) => self.support = Some(support),
+            Message::Verified(release, support) => {
+                if self.verifying.as_ref() == Some(&release) {
+                    self.verifying = None;
+                    self.release = Some(release);
+                    self.download = DownloadState::Idle;
+                    self.support = Some(support);
+                }
+            }
+            Message::Unverified(release) => {
+                if self.verifying.as_ref() == Some(&release) {
+                    self.verifying = None;
+                }
+            }
             Message::Progress { received, total } => {
                 if matches!(self.download, DownloadState::Downloading { .. }) {
                     self.download = DownloadState::Downloading { received, total };
@@ -290,7 +327,7 @@ impl Updates {
         let Some(release) = self.release.clone() else {
             return;
         };
-        if !matches!(self.support, Some(Ok(())))
+        if self.support != Some(Support::Installable)
             || !matches!(
                 self.download,
                 DownloadState::Idle | DownloadState::Failed(_)
@@ -387,7 +424,7 @@ impl Updates {
                     theme::muted(),
                 );
             }
-            Some(Err(reason)) => {
+            Some(Support::Refused(reason, managed)) => {
                 ui.add(
                     egui::Label::new(
                         RichText::new(advice(reason))
@@ -396,8 +433,31 @@ impl Updates {
                     )
                     .wrap(),
                 );
+                if let Some(command) = managed.as_ref().and_then(|m| m.command.clone()) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&command)
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(theme::text()),
+                            )
+                            .wrap(),
+                        );
+                        if theme::Button::new("Copy")
+                            .ghost()
+                            .small()
+                            .icon(theme::Icon::Copy)
+                            .show(ui)
+                            .on_hover_text("Copy the command to paste into a terminal")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(command);
+                        }
+                    });
+                }
             }
-            Some(Ok(())) => match &self.download {
+            Some(Support::Installable) => match &self.download {
                 DownloadState::Idle => {
                     if theme::Button::new(&format!("Update to {}", release.version))
                         .primary()
@@ -473,6 +533,20 @@ impl Updates {
             },
         }
     }
+}
+
+/// Checks a found release's signed checksums, then whether this copy can
+/// install it. Any failure to verify is the same failure: say nothing.
+fn verify(release: Release) -> Message {
+    let updater = updater();
+    let Ok(verified) = updater.verify(&release) else {
+        return Message::Unverified(release);
+    };
+    let support = match updater.installable(&verified) {
+        Ok(_) => Support::Installable,
+        Err(reason) => Support::Refused(reason, updater.managed_update()),
+    };
+    Message::Verified(release, support)
 }
 
 /// The release's own page, or the latest release when GitHub gave none.
@@ -641,6 +715,7 @@ mod tests {
             (Unsupported::SystemPackage(PackageManager::Apt), "apt"),
             (Unsupported::SystemPackage(PackageManager::Dnf), "dnf"),
             (Unsupported::NotPortable, "release page"),
+            (Unsupported::MissingAsset, "release page"),
         ] {
             let text = advice(&reason);
             assert!(text.contains(tool), "{reason:?}: {text}");
@@ -729,10 +804,15 @@ mod tests {
             ..Updates::default()
         };
         updates.receive(&ctx, Message::Checked(Some(release())));
-        assert_eq!(updates.release, Some(release()));
         assert!(!updates.checking);
+        // Not announced until its checksums verify.
+        assert_eq!(updates.release, None);
+        updates.receive(
+            &ctx,
+            Message::Verified(release(), Support::Refused(Unsupported::Homebrew, None)),
+        );
+        assert_eq!(updates.release, Some(release()));
         assert!(matches!(updates.download, DownloadState::Idle));
-        updates.receive(&ctx, Message::Support(Err(Unsupported::Homebrew)));
         // A package-managed copy has no Update button to press, and pressing
         // it anyway does nothing.
         updates.download(&ctx);
@@ -744,7 +824,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut updates = Updates {
             release: Some(release()),
-            support: Some(Ok(())),
+            support: Some(Support::Installable),
             download: DownloadState::Downloading {
                 received: 1,
                 total: 2,
@@ -768,7 +848,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut updates = Updates {
             release: Some(release()),
-            support: Some(Ok(())),
+            support: Some(Support::Installable),
             download: DownloadState::Installing,
             ..Updates::default()
         };
@@ -786,7 +866,20 @@ mod tests {
         let mut updates = Updates::default();
         assert_eq!(updates.available(), None);
         updates.receive(&ctx, Message::Checked(Some(release())));
+        assert_eq!(updates.available(), None);
+        updates.receive(&ctx, Message::Verified(release(), Support::Installable));
         assert_eq!(updates.available(), Some("99.0.0"));
+    }
+
+    /// A release whose signed checksums do not verify is never offered.
+    #[test]
+    fn an_unverified_release_is_not_on_offer() {
+        let ctx = egui::Context::default();
+        let mut updates = Updates::default();
+        updates.receive(&ctx, Message::Checked(Some(release())));
+        updates.receive(&ctx, Message::Unverified(release()));
+        assert_eq!(updates.available(), None);
+        assert_eq!(updates.verifying, None);
     }
 
     #[test]

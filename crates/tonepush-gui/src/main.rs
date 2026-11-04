@@ -18,6 +18,11 @@ fn main() -> eframe::Result<()> {
         println!("{}", tonepush_gui::update::version_line());
         return Ok(());
     }
+    // Which step of a rolled-back update failed, for the log; the person
+    // sees `launch.error` instead.
+    if let Some(failure) = &launch.failure {
+        eprintln!("the update helper restored the previous version: {failure}");
+    }
     // Crash reports, only where the person said yes (see crash_reports.rs).
     // Before anything that could panic, so a crash at start is reported too.
     tonepush_gui::crash_reports::install();

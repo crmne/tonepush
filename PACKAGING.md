@@ -76,6 +76,12 @@ Each tagged release publishes:
 - `checksums.txt`
 - `checksums.txt.sig` (an Ed25519 signature over `checksums.txt`, made with the
   key whose public half is `assets/update-public-key.hex`)
+
+After packaging attaches the AppImages, the release workflow's
+`sign-appimages` job verifies `checksums.txt` and every file it lists, adds
+the AppImages to it and signs it again, so an AppImage can update itself. A
+release whose AppImages aren't in the signed `checksums.txt` still works: the
+AppImage says the release is out and points to its page.
 - GitHub's automatic source archive for the tag
 
 The Linux binary archives contain:
