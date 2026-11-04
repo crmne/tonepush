@@ -536,6 +536,17 @@ fn require_recent_backup(path: &Path) -> WorkResult<BackupFacts> {
     Ok(facts)
 }
 
+/// The one port with the pedal's USB IDs worth asking. None at all is no
+/// pedal, not a pedal that would not open; several cannot be told apart
+/// without asking each, which is not done.
+fn sole_candidate(candidates: &[voidx_client::Found]) -> WorkResult<Option<&voidx_client::Found>> {
+    match candidates {
+        [] => Ok(None),
+        [candidate] => Ok(Some(candidate)),
+        _ => Err(WorkError::Other("No StompStation PRO found".into())),
+    }
+}
+
 /// What the worker waits for between commands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Awaiting {
@@ -705,12 +716,13 @@ impl Worker {
     /// A port with the pedal's USB IDs but not its name: every port on
     /// Windows, where the system driver reports none, and the pedal in Update
     /// Mode. Exactly one candidate, which must say it is a StompStation PRO;
-    /// only its identity is read. In Update Mode the update flow takes it and
-    /// this returns `None`; otherwise the caller connects it as usual.
+    /// only its identity is read. With none plugged in, or in Update Mode,
+    /// where the update flow takes it, this returns `None`; otherwise the
+    /// caller connects it as usual.
     pub(super) fn connect_by_ids(&mut self) -> WorkResult<Option<Device<SerialLink>>> {
         let candidates = voidx_client::list_by_ids()?;
-        let [candidate] = candidates.as_slice() else {
-            return Err(WorkError::Other("No StompStation PRO found".into()));
+        let Some(candidate) = sole_candidate(&candidates)? else {
+            return Ok(None);
         };
         let device = Device::connect(candidate.open()?)?;
         let identity = device.identity().clone();
@@ -2439,6 +2451,28 @@ fn pedal_drawing(ui: &Ui, rect: Rect, upd: bool, screen: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With no port carrying the pedal's USB IDs there is nothing to report:
+    /// the connect page said a StompStation PRO "would not open" on a
+    /// computer that had none plugged in.
+    #[test]
+    fn no_port_with_the_pedals_ids_is_no_pedal_rather_than_a_failure() {
+        let port = |name: &str| voidx_client::Found {
+            port_name: name.to_owned(),
+            manufacturer: None,
+            product: None,
+            serial_number: None,
+            vendor_id: Some(0x1d6b),
+            product_id: Some(0x0104),
+        };
+        assert!(matches!(sole_candidate(&[]), Ok(None)));
+        let one = [port("COM3")];
+        assert!(matches!(
+            sole_candidate(&one),
+            Ok(Some(found)) if found.port_name == "COM3"
+        ));
+        assert!(sole_candidate(&[port("COM3"), port("COM4")]).is_err());
+    }
 
     fn image() -> ImageFacts {
         ImageFacts {
