@@ -8,24 +8,25 @@ PublisherUrl: https://paolino.me/
 PublisherSupportUrl: https://github.com/crmne/tonepush/issues
 Author: Carmine Paolino
 PackageName: TonePush
-PackageUrl: https://docs.tonepush.rocks/
+PackageUrl: https://tonepush.rocks/
 License: MIT
 LicenseUrl: https://github.com/crmne/tonepush/blob/v@VERSION@/LICENSE
 Copyright: Copyright (c) 2026 Carmine Paolino
-ShortDescription: Editor and tone library for Line 6 HX pedals and the StompStation PRO
+ShortDescription: An open-source editor for Line 6 HX pedals and the StompStation PRO
 Description: |-
-  TonePush is an open-source editor for Line 6 HX-family devices and the Sonulab StompStation PRO: one GUI and one scriptable command-line tool. Edit presets block by block, keep your tones in a library you can search, audition a tone on the pedal before you keep it, build setlists, and back up the pedal.
-  TonePush is not affiliated with Line 6, Yamaha or Sonulab.
+  TonePush is an open-source editor for Line 6 HX-family devices and the Sonulab StompStation PRO, with a cross-platform GUI and a scriptable command-line tool (tonepush). Edit the signal chain, presets, snapshots, setlists, footswitches and device settings, back up the whole pedal with a history, and upload impulse responses.
+  It needs a graphics driver with OpenGL 2.0 or newer.
 Moniker: tonepush
 Tags:
 - guitar
+- guitar-effects
 - helix
 - hx-stomp
 - line6
 - preset-editor
 ReleaseNotesUrl: https://github.com/crmne/tonepush/releases/tag/v@VERSION@
 Documentations:
-- DocumentLabel: Getting Started
-  DocumentUrl: https://docs.tonepush.rocks/getting-started/
+- DocumentLabel: Documentation
+  DocumentUrl: https://docs.tonepush.rocks/
 ManifestType: defaultLocale
 ManifestVersion: 1.12.0
