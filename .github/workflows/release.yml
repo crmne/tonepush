@@ -573,6 +573,9 @@ jobs:
             fi
           done
           cat checksums.txt
+          # The signature downloaded with the release is of the list before
+          # the AppImages; sign-checksums will not write over it.
+          rm -f checksums.txt.sig
           native-packages sign-checksums checksums.txt \
             --public-key "$key" \
             --key-env TONEPUSH_UPDATE_SIGNING_KEY
