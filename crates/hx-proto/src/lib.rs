@@ -172,7 +172,7 @@ pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     device_id: 0x0021_0005,
     snapshot_colours: false,
     dsp_budget: None,
-    controls: rpc::ControlLayout::Stomp,
+    controls: rpc::ControlLayout::Effects,
     closes_ir_reads: false,
 };
 
@@ -217,6 +217,14 @@ mod tests {
     fn a_helix_floor_has_eleven_assignable_footswitches() {
         assert_eq!(HELIX_FLOOR.switches, 11);
         assert_eq!(HELIX_FLOOR.controls, rpc::ControlLayout::Helix);
+    }
+
+    #[test]
+    fn an_hx_effects_numbers_its_six_footswitches_its_own_way() {
+        assert_eq!(HX_EFFECTS.switches, 6);
+        // A Stomp's numbering has room for five, and puts MIDI CC where an
+        // Effects puts its sixth switch.
+        assert_eq!(HX_EFFECTS.controls, rpc::ControlLayout::Effects);
     }
 
     #[test]

@@ -7194,9 +7194,13 @@ impl App {
     }
 
     /// How many footswitches to offer, from the device's own profile.
+    ///
+    /// The profile rather than a constant for the fallback: before the first
+    /// switch read lands there is still a device name, and guessing five hid
+    /// the sixth switch of an HX Effects until something re-read them.
     fn switch_count(&self) -> u8 {
         if self.switches.is_empty() {
-            5
+            self.profile().map_or(5, |profile| profile.switches)
         } else {
             self.switches.len() as u8
         }
@@ -7592,6 +7596,44 @@ mod tests {
             evt_tx,
             cmd_rx,
         )
+    }
+
+    /// The menu an HX Effects gets reaches its sixth switch, which the Stomp
+    /// numbering it used to borrow had no ordinal for. Both ends of the menu
+    /// matter: a bypass is bounded by the switch count, a parameter by the
+    /// layout's own list of sources.
+    #[test]
+    fn an_hx_effects_is_offered_its_sixth_footswitch() {
+        use hx_proto::preset::Target;
+        use hx_proto::rpc::Source;
+        let (mut app, _events, _cmds) = app();
+        app.device = "HX Effects".to_owned();
+        let offered = |app: &App, target| {
+            app.assign_view(0, target, "Gain".to_owned())
+                .sources
+                .into_iter()
+                .map(|(source, _)| source)
+                .collect::<Vec<_>>()
+        };
+
+        let knob = offered(&app, Target::Param(0));
+        assert!(knob.contains(&Source::Footswitch(6)), "{knob:?}");
+        assert!(!knob.contains(&Source::Footswitch(7)));
+        assert!(knob.contains(&Source::Snapshots), "and still snapshots");
+        let bypass = offered(&app, Target::Bypass);
+        assert!(bypass.contains(&Source::Footswitch(6)), "{bypass:?}");
+        assert!(!bypass.contains(&Source::Footswitch(7)));
+
+        // Without the profile the fallback would stop at five, which is what
+        // hid the switch: the switches have not been read in this test.
+        assert!(app.switches.is_empty());
+        assert_eq!(app.switch_count(), 6);
+
+        // A Stomp is unchanged: its numbering stops at the fifth ordinal.
+        app.device = "HX Stomp".to_owned();
+        let stomp = offered(&app, Target::Bypass);
+        assert!(!stomp.contains(&Source::Footswitch(6)), "{stomp:?}");
+        assert!(stomp.contains(&Source::Footswitch(5)));
     }
 
     #[test]
