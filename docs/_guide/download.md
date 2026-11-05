@@ -83,6 +83,21 @@ machine, which also sets up the udev rule and desktop entry:
 - [tonepush-{{ v }}-1.x86_64.rpm]({{ base }}/tonepush-{{ v }}-1.x86_64.rpm) ·
   [tonepush-{{ v }}-1.aarch64.rpm]({{ base }}/tonepush-{{ v }}-1.aarch64.rpm)
 
+On any distribution with [Flatpak](https://flatpak.org), install the bundle
+for your machine. It runs in Flatpak's sandbox, with the network, your
+display and your USB devices, and opens files through the system's file
+picker:
+
+```sh
+flatpak install --user ./tonepush-{{ v }}-x86_64.flatpak    # or -aarch64
+```
+
+- [tonepush-{{ v }}-x86_64.flatpak]({{ base }}/tonepush-{{ v }}-x86_64.flatpak) ·
+  [tonepush-{{ v }}-aarch64.flatpak]({{ base }}/tonepush-{{ v }}-aarch64.flatpak)
+
+A Flatpak cannot install the udev rule, so add it as shown below for the
+archive, then replug the pedal.
+
 To run it without installing anything, use the AppImage. It needs glibc 2.39
 or newer and still needs the udev rule below to reach the pedal:
 
@@ -138,10 +153,12 @@ out**). Click it, or the settings button beside it, for the details.
   archive only the editor updates itself: keep `tonepush-portable.txt` next
   to `tonepush-gui`, and replace the `tonepush` command-line tool from a new
   archive when you want it newer too.
-- **Homebrew, the AUR, the COPR, .deb, .rpm or the Flatpak:** update through
+- **Homebrew, the AUR, the COPR, .deb or .rpm:** update through
   that package manager. The settings show the command that updates your copy,
   such as `yay -Syu tonepush-bin`, with a **Copy** button. TonePush never runs
   it for you.
+- **The Flatpak bundle:** install the next version's bundle the same way; it
+  replaces the one you have.
 
 ## After installing
 

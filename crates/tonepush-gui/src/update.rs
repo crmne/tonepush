@@ -176,7 +176,13 @@ pub fn advice(reason: &Unsupported) -> String {
         Unsupported::SystemDirectory => {
             "Installed system-wide: update it through the package manager that installed it.".into()
         }
-        Unsupported::Flatpak => "Installed with Flatpak: update it with flatpak update.".into(),
+        // TonePush ships its Flatpak as a bundle, which has no remote for
+        // `flatpak update` to read.
+        Unsupported::Flatpak => {
+            "Installed from a Flatpak bundle: install the new version's bundle from the release \
+             page."
+                .into()
+        }
         Unsupported::Snap => "Installed with Snap: update it with snap refresh.".into(),
         Unsupported::Nix => "Installed with Nix: update it through Nix.".into(),
         Unsupported::Cargo => "Built with cargo install: update it the same way.".into(),
@@ -537,7 +543,7 @@ impl Updates {
                     )
                     .wrap(),
                 );
-                if let Some(command) = managed.as_ref().and_then(|m| m.command.clone()) {
+                if let Some(command) = managed.as_ref().and_then(update_command) {
                     ui.horizontal_wrapped(|ui| {
                         ui.add(
                             egui::Label::new(
@@ -645,6 +651,15 @@ impl Updates {
             },
         }
     }
+}
+
+/// The command to copy for a copy a package manager owns. None for the
+/// Flatpak: TonePush's is a bundle, which `flatpak update` cannot update.
+fn update_command(managed: &ManagedUpdate) -> Option<String> {
+    if managed.manager == fastframe_update::Manager::Flatpak {
+        return None;
+    }
+    managed.command.clone()
 }
 
 /// Checks a found release's signed checksums, then whether this copy can
@@ -828,6 +843,7 @@ mod tests {
             (Unsupported::SystemPackage(PackageManager::Dnf), "dnf"),
             (Unsupported::NotPortable, "release page"),
             (Unsupported::MissingAsset, "release page"),
+            (Unsupported::Flatpak, "bundle"),
         ] {
             let text = advice(&reason);
             assert!(text.contains(tool), "{reason:?}: {text}");

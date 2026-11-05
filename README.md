@@ -130,8 +130,9 @@ in the background and installs the next time TonePush starts. If it does not
 start, the old one comes back. **Restart to update** installs it right away. A
 new major version waits for you, and so does every version once
 **Install updates automatically** is off. Copies installed with Homebrew, the
-AUR, the COPR, a .deb/.rpm or the Flatpak are left to that package manager.
-The settings show the command that updates them, with a **Copy** button.
+AUR, the COPR or a .deb/.rpm are left to that package manager, and the
+settings show the command that updates them, with a **Copy** button. The
+Flatpak bundle updates by installing the next version's bundle.
 
 ### Crash reports
 
