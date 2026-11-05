@@ -436,6 +436,15 @@ pub enum Evt {
     /// comes back as `None` so the setlist can record that it is empty rather
     /// than silently shortening.
     CapturedSetlist(Vec<(String, Option<Vec<u8>>)>),
+    /// A parameter the pedal set by itself: the block, the parameter's index
+    /// in that model's own order, and its new value. A controller moving
+    /// sends a run of these, which is how the editor follows an expression
+    /// pedal without reading the document back.
+    Param {
+        block: i64,
+        index: usize,
+        value: f32,
+    },
     Activity(String),
     Failed(String),
 }
@@ -2332,6 +2341,10 @@ impl Worker {
         };
         let polled = device.poll_notifications();
         let mut snapshot = None;
+        // One sweep of an expression pedal lands as hundreds of parameter
+        // changes, most of them already stale by the time the frame draws.
+        // Only the last value of each parameter is worth forwarding.
+        let mut params: Vec<(i64, usize, f32)> = Vec::new();
         if let Ok(events) = &polled {
             for (event, args) in events {
                 self.events
@@ -2339,9 +2352,30 @@ impl Worker {
                 match notice(*event, args) {
                     Notice::Preset | Notice::Unknown => look = true,
                     Notice::Snapshot(index) => snapshot = Some(index),
+                    Notice::Param {
+                        block,
+                        index,
+                        value,
+                    } => match params
+                        .iter_mut()
+                        .find(|held| (held.0, held.1) == (block, index))
+                    {
+                        Some(held) => held.2 = value,
+                        None => params.push((block, index, value)),
+                    },
                     Notice::Chatter => {}
                 }
             }
+        }
+        // Sent through the channel directly: the device is borrowed until the
+        // keepalive below, and a value the pedal reports says nothing about
+        // the session.
+        for (block, index, value) in params {
+            self.events.send(Evt::Param {
+                block,
+                index,
+                value,
+            });
         }
         // An idle read timeout is already represented as `Ok(None)`. Anything
         // that reaches this error arm is transport or protocol loss, and the
@@ -2464,6 +2498,13 @@ enum Notice {
     Preset,
     /// A snapshot was selected, by its zero-based index.
     Snapshot(usize),
+    /// A parameter was set on the pedal, by a controller or as the echo of
+    /// an edit of ours: the block, the parameter's index and its new value.
+    Param {
+        block: i64,
+        index: usize,
+        value: f32,
+    },
     /// Nothing to follow: completions, the steady tick, edits echoed back.
     Chatter,
     /// An event never seen in a capture, which could be any of the above.
@@ -2492,15 +2533,40 @@ fn notice(event: i64, args: &hx_proto::msgpack::Value) -> Notice {
     match event {
         4 | 8 => Notice::Preset,
         22 if number(key::OBJECT_ID) == Some(LOADED_SLOT) => Notice::Preset,
+        30 => param_set(inner).unwrap_or(Notice::Chatter),
         42 | 46 => match number(key::SNAPSHOT).and_then(|n| usize::try_from(n).ok()) {
             Some(index) => Notice::Snapshot(index),
             None => Notice::Unknown,
         },
-        1 | 6 | 20 | 21 | 22 | 23 | 30 | 31 | 33 | 34 | 37 | 39 | 49 | 56 | 59 | 60 => {
-            Notice::Chatter
-        }
+        1 | 6 | 20 | 21 | 22 | 23 | 31 | 33 | 34 | 37 | 39 | 49 | 56 | 59 | 60 => Notice::Chatter,
         _ => Notice::Unknown,
     }
+}
+
+/// The block, parameter and value of a SET_PARAM notification.
+///
+/// The pedal announces a parameter change with the same keys the editor uses
+/// to ask for one, one level down under the notification's arguments. The
+/// interesting case is a controller the editor did not touch: an expression
+/// pedal sweeping sends a steady run of these, and before they were read the
+/// editor's knob sat where the document had left it while the pedal swept.
+/// The echo of our own edit arrives the same way and cannot be told apart,
+/// which costs nothing: applying a value we already hold changes nothing.
+///
+/// A notification that does not carry all three keys is not a parameter
+/// change; event 30 also announces other things.
+fn param_set(inner: &hx_proto::msgpack::Value) -> Option<Notice> {
+    use hx_proto::msgpack::Value;
+    use hx_proto::rpc::key;
+
+    let block = inner.get(key::BLOCK)?.as_i64()?;
+    let index = usize::try_from(inner.get(key::PARAM_INDEX)?.as_i64()?).ok()?;
+    let value = inner.get(key::VALUE).and_then(Value::as_f32)?;
+    value.is_finite().then_some(Notice::Param {
+        block,
+        index,
+        value,
+    })
 }
 
 /// The snapshot a preset document has active.
@@ -3510,7 +3576,40 @@ mod tests {
         let turned = hx_proto::msgmap! { 98 => Value::Int(6), 28 => Value::Int(2) };
         assert_eq!(
             notice(30, &state_change([0, 6, 20], turned)),
-            Notice::Chatter
+            Notice::Chatter,
+            "event 30 naming no value is not a parameter change"
+        );
+
+        // One tick of an expression pedal sweeping, as an HX Effects on
+        // firmware 3.80 sends it: the keys the editor's own set_param uses.
+        let swept = hx_proto::msgmap! {
+            98 => Value::Int(2),
+            29 => Value::Bool(true),
+            26 => Value::Int(0),
+            28 => Value::Int(0),
+            119 => Value::F32(0.943_243_56),
+        };
+        assert_eq!(
+            notice(30, &state_change([0, 6, 20], swept)),
+            Notice::Param {
+                block: 2,
+                index: 0,
+                value: 0.943_243_56
+            }
+        );
+        // A parameter whose values are a list reads back as a whole number.
+        let chosen = hx_proto::msgmap! {
+            98 => Value::Int(3),
+            28 => Value::Int(1),
+            119 => Value::Int(2),
+        };
+        assert_eq!(
+            notice(30, &state_change([0, 6, 20], chosen)),
+            Notice::Param {
+                block: 3,
+                index: 1,
+                value: 2.0
+            }
         );
         assert_eq!(notice(77, &Value::Nil), Notice::Unknown);
     }
@@ -3891,6 +3990,47 @@ mod tests {
         worker.poll();
 
         assert_eq!(pedal.lock().unwrap().requests.len(), asked);
+    }
+
+    /// A controller moving is answered from the notification alone: the value
+    /// reaches the editor and the pedal is asked nothing, so a sweep costs no
+    /// round trips. Only where the sweep got to is forwarded, once.
+    #[test]
+    fn a_parameter_pushed_by_the_pedal_reaches_the_editor_without_asking() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        {
+            let mut pedal = pedal.lock().unwrap();
+            for value in [0.25_f32, 0.5, 0.75] {
+                let swept = hx_proto::msgmap! {
+                    98 => Value::Int(1),
+                    28 => Value::Int(0),
+                    119 => Value::F32(value),
+                };
+                pedal.notify(30, state_change([0, 6, 20], swept));
+            }
+        }
+        let asked = pedal.lock().unwrap().requests.len();
+
+        worker.poll();
+
+        assert_eq!(
+            pedal.lock().unwrap().requests.len(),
+            asked,
+            "a sweep should cost no round trips"
+        );
+        let params: Vec<(i64, usize, f32)> = events
+            .try_iter()
+            .filter_map(|e| match e {
+                Evt::Param {
+                    block,
+                    index,
+                    value,
+                } => Some((block, index, value)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(params, vec![(1, 0, 0.75)]);
     }
 
     /// No footswitch has been captured, so an event never seen before is

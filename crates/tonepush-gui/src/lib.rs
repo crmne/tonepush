@@ -1886,6 +1886,11 @@ impl App {
                 }
                 Ok(Evt::CapturedSetlist(slots)) => self.keep_setlist(slots, "hxpreset"),
                 Ok(Evt::Switches(switches)) => self.switches = switches,
+                Ok(Evt::Param {
+                    block,
+                    index,
+                    value,
+                }) => self.follow_param(block, index, value),
                 Ok(Evt::Activity(line)) => self.note(line),
                 Ok(Evt::Failed(e)) => {
                     self.status = if self.connection == Connection::Connecting {
@@ -1934,6 +1939,31 @@ impl App {
     pub(crate) fn skip_backup(&mut self) {
         if let Some(skip) = &self.backup_skip {
             skip.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Move a control the pedal moved itself.
+    ///
+    /// An expression pedal, or a knob on the pedal's own face, changes a
+    /// parameter without the editor asking, and the pedal says so. Before
+    /// this the knob on screen stayed where the document had left it, so a
+    /// wah swept on the floor and the editor showed its heel position until
+    /// the preset was read again.
+    ///
+    /// Only the chain's own copy moves: this is the pedal reporting where it
+    /// already is, so there is nothing to send back, nothing to undo, and no
+    /// unsaved change that was not there before - a controller moving is not
+    /// an edit of the preset.
+    ///
+    /// A cab riding along with an amp answers to the same block and the same
+    /// indices as the amp, and the notification does not say which half it
+    /// meant, so the amp's own control is the one that moves. Nothing on a
+    /// floor controller reaches a cab's parameters.
+    fn follow_param(&mut self, block: i64, index: usize, value: f32) {
+        if let Some(slot) = self.chain.iter_mut().find(|b| b.position == block) {
+            if let Some(held) = slot.values.get_mut(index) {
+                *held = value;
+            }
         }
     }
 
@@ -8433,6 +8463,48 @@ mod tests {
                 paired_values: vec![],
             }],
             dirty,
+        }
+    }
+
+    /// A controller on the floor moves the control on screen. Before this
+    /// the knob sat where the document had left it while the pedal swept.
+    #[test]
+    fn a_parameter_the_pedal_changes_moves_the_control() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), false)).unwrap();
+        app.drain_events();
+        assert_eq!(app.chain[0].values[0], 0.5);
+        while cmds.try_recv().is_ok() {}
+
+        events
+            .send(Evt::Param {
+                block: 1,
+                index: 0,
+                value: 0.75,
+            })
+            .unwrap();
+        app.drain_events();
+        assert_eq!(app.chain[0].values[0], 0.75, "the control follows");
+        assert!(!app.dirty, "a controller moving is not an unsaved change");
+        assert!(cmds.try_recv().is_err(), "and nothing is sent back");
+
+        // A block or an index the chain does not have is simply not there to
+        // move: the pedal can report on a preset we have not read yet.
+        for stray in [
+            Evt::Param {
+                block: 9,
+                index: 0,
+                value: 0.1,
+            },
+            Evt::Param {
+                block: 1,
+                index: 7,
+                value: 0.1,
+            },
+        ] {
+            events.send(stray).unwrap();
+            app.drain_events();
+            assert_eq!(app.chain[0].values[0], 0.75);
         }
     }
 
