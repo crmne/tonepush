@@ -1739,9 +1739,12 @@ fn snapshot_is_well_formed(entry: &Value, slot_count: usize) -> bool {
         .get(key::SNAPSHOT_NAME)
         .and_then(Value::as_str)
         .is_some();
+    // A snapshot that does not override the preset tempo reads back as 0.
+    // Seen on hardware, an HX Effects on firmware 3.80: refusing it made the
+    // whole preset unreadable even though the pedal loads and plays it.
     let valid_tempo = entry
         .get(key::SNAPSHOT_TEMPO)
-        .is_some_and(tempo_is_well_formed);
+        .is_some_and(snapshot_tempo_is_well_formed);
     // HX Effects omits the named flag on a snapshot whose name was never typed
     // ("SNAPSHOT 1"), which `snapshot_details` already reads as not named. Seen
     // on hardware, firmware 3.80, in a document read with FETCH_PRESET.
@@ -1759,6 +1762,14 @@ fn snapshot_is_well_formed(entry: &Value, slot_count: usize) -> bool {
         _ => false,
     };
     valid_name && valid_tempo && valid_flags && valid_slots
+}
+
+/// A snapshot's tempo: either a real tempo, or 0 where the snapshot does not
+/// override the preset's own.
+fn snapshot_tempo_is_well_formed(value: &Value) -> bool {
+    value
+        .as_f32()
+        .is_some_and(|tempo| tempo == 0.0 || (tempo.is_finite() && (40.0..=240.0).contains(&tempo)))
 }
 
 fn tempo_is_well_formed(value: &Value) -> bool {
@@ -3463,6 +3474,28 @@ mod tests {
 
         // Typing an empty name is still refused.
         assert!(!parsed.set_snapshot_name(0, ""));
+    }
+
+    #[test]
+    fn a_snapshot_that_does_not_override_the_tempo_parses() {
+        // What an HX Effects sends for a snapshot that leaves the preset's own
+        // tempo alone. Seen on hardware, firmware 3.80: refusing it made the
+        // whole preset unreadable, and with it every backup of the pedal.
+        // Either encoding reaches `as_f32`, so both are covered.
+        for zero in [Value::Int(0), Value::F32(0.0)] {
+            let mut preset = Preset::parse(&dual_dsp_fixture()).unwrap();
+            let Some(Value::Array(entries)) =
+                preset.tone.at_mut(&[key::SNAPSHOT_SECTION, key::SNAPSHOTS])
+            else {
+                panic!("snapshots");
+            };
+            *entries[1].get_mut(key::SNAPSHOT_TEMPO).unwrap() = zero;
+            let document = preset.encode();
+
+            let parsed =
+                Preset::parse(&document).expect("a snapshot with no tempo override parses");
+            assert_eq!(parsed.encode(), document, "and round-trips byte for byte");
+        }
     }
 
     #[test]
