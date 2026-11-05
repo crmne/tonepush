@@ -445,6 +445,16 @@ pub enum Evt {
         index: usize,
         value: f32,
     },
+    /// A block the pedal turned on or off by itself, from one of its own
+    /// footswitches or by selecting a snapshot.
+    Bypass {
+        block: i64,
+        enabled: bool,
+    },
+    /// The preset tempo the pedal now holds, tapped or set on the pedal.
+    Tempo(f32),
+    /// The block the pedal has selected, by its position in the chain.
+    SelectedBlock(i64),
     Activity(String),
     Failed(String),
 }
@@ -2345,6 +2355,9 @@ impl Worker {
         // changes, most of them already stale by the time the frame draws.
         // Only the last value of each parameter is worth forwarding.
         let mut params: Vec<(i64, usize, f32)> = Vec::new();
+        let mut bypasses: Vec<(i64, bool)> = Vec::new();
+        let mut tempo = None;
+        let mut selected = None;
         if let Ok(events) = &polled {
             for (event, args) in events {
                 self.events
@@ -2363,19 +2376,36 @@ impl Worker {
                         Some(held) => held.2 = value,
                         None => params.push((block, index, value)),
                     },
+                    Notice::Bypass { block, enabled } => {
+                        match bypasses.iter_mut().find(|held| held.0 == block) {
+                            Some(held) => held.1 = enabled,
+                            None => bypasses.push((block, enabled)),
+                        }
+                    }
+                    Notice::Tempo(bpm) => tempo = Some(bpm),
+                    Notice::Selected(block) => selected = Some(block),
                     Notice::Chatter => {}
                 }
             }
         }
         // Sent through the channel directly: the device is borrowed until the
-        // keepalive below, and a value the pedal reports says nothing about
-        // the session.
+        // keepalive below, and what the pedal reports says nothing about the
+        // session.
         for (block, index, value) in params {
             self.events.send(Evt::Param {
                 block,
                 index,
                 value,
             });
+        }
+        for (block, enabled) in bypasses {
+            self.events.send(Evt::Bypass { block, enabled });
+        }
+        if let Some(bpm) = tempo {
+            self.events.send(Evt::Tempo(bpm));
+        }
+        if let Some(block) = selected {
+            self.events.send(Evt::SelectedBlock(block));
         }
         // An idle read timeout is already represented as `Ok(None)`. Anything
         // that reaches this error arm is transport or protocol loss, and the
@@ -2505,6 +2535,12 @@ enum Notice {
         index: usize,
         value: f32,
     },
+    /// A block was turned on or off: its position, and whether it is on.
+    Bypass { block: i64, enabled: bool },
+    /// The preset tempo changed, to this many beats per minute.
+    Tempo(f32),
+    /// The pedal selected a block, by its position in the chain.
+    Selected(i64),
     /// Nothing to follow: completions, the steady tick, edits echoed back.
     Chatter,
     /// An event never seen in a capture, which could be any of the above.
@@ -2533,12 +2569,15 @@ fn notice(event: i64, args: &hx_proto::msgpack::Value) -> Notice {
     match event {
         4 | 8 => Notice::Preset,
         22 if number(key::OBJECT_ID) == Some(LOADED_SLOT) => Notice::Preset,
+        22 => object_set(inner).unwrap_or(Notice::Chatter),
         30 => param_set(inner).unwrap_or(Notice::Chatter),
+        39 => selected_block(inner).unwrap_or(Notice::Chatter),
         42 | 46 => match number(key::SNAPSHOT).and_then(|n| usize::try_from(n).ok()) {
             Some(index) => Notice::Snapshot(index),
             None => Notice::Unknown,
         },
-        1 | 6 | 20 | 21 | 22 | 23 | 31 | 33 | 34 | 37 | 39 | 49 | 56 | 59 | 60 => Notice::Chatter,
+        49 => bypass_set(inner).unwrap_or(Notice::Chatter),
+        1 | 6 | 20 | 21 | 23 | 31 | 33 | 34 | 37 | 56 | 59 | 60 => Notice::Chatter,
         _ => Notice::Unknown,
     }
 }
@@ -2567,6 +2606,43 @@ fn param_set(inner: &hx_proto::msgpack::Value) -> Option<Notice> {
         index,
         value,
     })
+}
+
+/// The tempo an object-changed notification reports.
+///
+/// Object 16 is the preset tempo (docs/_reference/opcodes.md, section 3.2):
+/// tapping tempo on the pedal, or setting it from the pedal's own menus,
+/// reports the new value here. Nothing else in that id space is followed -
+/// object 28, the loaded slot, is read above as a preset change instead.
+fn object_set(inner: &hx_proto::msgpack::Value) -> Option<Notice> {
+    use hx_proto::msgpack::Value;
+    use hx_proto::rpc::key;
+
+    const TEMPO_OBJECT: i64 = 16;
+    let id = inner.get(key::OBJECT_ID)?.as_i64()?;
+    let tempo = inner.get(key::VALUE).and_then(Value::as_f32)?;
+    (id == TEMPO_OBJECT && tempo.is_finite() && tempo > 0.0).then_some(Notice::Tempo(tempo))
+}
+
+/// The block a bypass notification turned on or off.
+///
+/// Event 49 covers three messages and only one of them carries key 59
+/// (docs/_reference/opcodes.md, section 3): a slot rebuilt names the block
+/// alone, and the third has no arguments at all. A footswitch on the pedal
+/// and a snapshot selection both arrive this way.
+fn bypass_set(inner: &hx_proto::msgpack::Value) -> Option<Notice> {
+    use hx_proto::rpc::key;
+
+    let block = inner.get(key::BLOCK)?.as_i64()?;
+    let enabled = inner.get(key::ENABLED)?.as_bool()?;
+    Some(Notice::Bypass { block, enabled })
+}
+
+/// The block the pedal has selected.
+fn selected_block(inner: &hx_proto::msgpack::Value) -> Option<Notice> {
+    use hx_proto::rpc::key;
+
+    Some(Notice::Selected(inner.get(key::BLOCK)?.as_i64()?))
 }
 
 /// The snapshot a preset document has active.
@@ -3555,7 +3631,21 @@ mod tests {
             )
         };
         assert_eq!(notice(22, &object(28, Value::Int(12))), Notice::Preset);
-        assert_eq!(notice(22, &object(16, Value::F32(120.0))), Notice::Chatter);
+        // Object 16 is the preset tempo: tapped on the pedal, it arrives here.
+        assert_eq!(
+            notice(22, &object(16, Value::F32(120.0))),
+            Notice::Tempo(120.0)
+        );
+        assert_eq!(
+            notice(22, &object(16, Value::F32(0.0))),
+            Notice::Chatter,
+            "no tempo at all is nothing to follow"
+        );
+        assert_eq!(
+            notice(22, &object(99, Value::F32(1.0))),
+            Notice::Chatter,
+            "and no other object is followed"
+        );
         assert_eq!(
             notice(22, &state_change([0, 10, 27], Value::Nil)),
             Notice::Chatter
@@ -3611,6 +3701,33 @@ mod tests {
                 value: 2.0
             }
         );
+
+        // Event 49 covers three messages; only a bypass change names key 59.
+        let bypassed = hx_proto::msgmap! { 98 => Value::Int(4), 59 => Value::Bool(false) };
+        assert_eq!(
+            notice(49, &state_change([0, 5, 17], bypassed)),
+            Notice::Bypass {
+                block: 4,
+                enabled: false
+            }
+        );
+        let rebuilt = hx_proto::msgmap! { 98 => Value::Int(4) };
+        assert_eq!(
+            notice(49, &state_change([0, 5, 10], rebuilt)),
+            Notice::Chatter,
+            "a slot rebuilt says nothing about bypass"
+        );
+        assert_eq!(
+            notice(49, &state_change([0, 5, 47], Value::Nil)),
+            Notice::Chatter
+        );
+
+        let picked_block = hx_proto::msgmap! { 98 => Value::Int(3), 26 => Value::Int(0) };
+        assert_eq!(
+            notice(39, &state_change([1, 3, 19], picked_block)),
+            Notice::Selected(3)
+        );
+
         assert_eq!(notice(77, &Value::Nil), Notice::Unknown);
     }
 
@@ -4031,6 +4148,31 @@ mod tests {
             })
             .collect();
         assert_eq!(params, vec![(1, 0, 0.75)]);
+    }
+
+    /// A switch on the pedal's own face reaches the editor the same way, and
+    /// is likewise not a reason to read the document again.
+    #[test]
+    fn a_switch_on_the_pedal_reaches_the_editor_without_asking() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        {
+            let mut pedal = pedal.lock().unwrap();
+            let stomped = hx_proto::msgmap! { 98 => Value::Int(1), 59 => Value::Bool(false) };
+            pedal.notify(49, state_change([0, 5, 17], stomped));
+        }
+        let asked = pedal.lock().unwrap().requests.len();
+
+        worker.poll();
+
+        assert_eq!(pedal.lock().unwrap().requests.len(), asked);
+        assert!(events.try_iter().any(|e| matches!(
+            e,
+            Evt::Bypass {
+                block: 1,
+                enabled: false
+            }
+        )));
     }
 
     /// No footswitch has been captured, so an event never seen before is
