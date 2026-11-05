@@ -68,6 +68,12 @@ things keep it short:
   requests, so the session goes on. The bundle that was there is kept, and
   the next connection backs up again. Closing the window skips it too.
 
+A preset TonePush cannot read yet (a field its parser does not accept,
+while the pedal plays it) no longer stops a backup or drops the session. Its
+bytes are kept as the pedal stores them, the slot is listed in
+`unreadable-presets.json`, and a restore leaves that slot as the pedal has it:
+TonePush writes nothing it cannot check, and blanking the slot would lose it.
+
 The IR reads all go over the control channel, so a backup keeps the other two
 channels alive between IRs as it does between presets: a pedal with dozens of
 IRs otherwise stopped answering them part way and dropped the session

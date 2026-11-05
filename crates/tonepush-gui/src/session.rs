@@ -397,6 +397,8 @@ pub enum Evt {
         presets: usize,
         settings: usize,
         irs: usize,
+        /// Presets kept as the pedal stores them, which TonePush cannot read.
+        unreadable: usize,
     },
     /// Whether the worker is in the middle of a device conversation. Edits
     /// take real round trips - a document write near a second - and a window
@@ -2186,6 +2188,7 @@ impl Worker {
                 presets: manifest.presets.iter().filter(|n| !n.is_empty()).count(),
                 settings: manifest.globals,
                 irs: manifest.irs.len(),
+                unreadable: hx_usb::backup::unreadable(dir).len(),
             });
         }
     }

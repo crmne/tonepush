@@ -1733,6 +1733,7 @@ impl App {
                     presets,
                     settings,
                     irs,
+                    unreadable,
                 }) => {
                     self.working = None;
                     self.backup_skip = None;
@@ -1745,6 +1746,12 @@ impl App {
                          impulse responses to {}",
                         dir.display()
                     ));
+                    if unreadable > 0 {
+                        self.note(format!(
+                            "{unreadable} of them TonePush cannot read yet: they are kept as \
+                             the pedal stores them, and a restore leaves those slots alone"
+                        ));
+                    }
                 }
                 Ok(Evt::Loaded {
                     index,

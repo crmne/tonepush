@@ -395,6 +395,20 @@ pub fn capture_with(
 /// the checksum its descriptor gave. A bundle without it is read whole.
 const IR_CHECKSUMS: &str = "ir-checksums.json";
 
+/// The file beside the manifest that lists, as `[setlist, slot]` pairs, the
+/// presets kept as the pedal stores them because TonePush cannot read them
+/// yet. A restore leaves those slots as the pedal has them.
+const UNREADABLE: &str = "unreadable-presets.json";
+
+/// The presets a bundle keeps without being able to read them, as
+/// `(setlist, slot)`.
+pub fn unreadable(dir: &Path) -> Vec<(usize, usize)> {
+    std::fs::read(dir.join(UNREADABLE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
 /// The file beside the manifest that keeps every setlist's preset list as
 /// the pedal gave it when the bundle was taken.
 const LISTED_NAMES: &str = "listed-names.json";
@@ -508,7 +522,7 @@ fn capture_into(
     )
     .map_err(io("writing the preset lists"))?;
     let mut alive = KeepAlive::new();
-    let (names, more_setlists) = capture_presets(
+    let (names, more_setlists, _) = capture_presets(
         dir,
         all_names,
         |setlist, index| {
@@ -670,14 +684,19 @@ impl KeepAlive {
     }
 }
 
+/// The first setlist's slot names, the other setlists', and the presets kept
+/// unread, as `(setlist, slot)`.
+type CapturedPresets = (Vec<String>, Vec<Vec<String>>, Vec<(usize, usize)>);
+
 fn capture_presets(
     dir: &Path,
     mut all_names: Vec<Vec<String>>,
     mut read: impl FnMut(usize, usize) -> Result<Option<Preset>>,
     progress: &mut impl FnMut(Step),
-) -> Result<(Vec<String>, Vec<Vec<String>>)> {
+) -> Result<CapturedPresets> {
     let total = all_names.iter().map(Vec::len).sum();
     let mut done = 0;
+    let mut unreadable = Vec::new();
     for (setlist, names) in all_names.iter_mut().enumerate() {
         let presets_dir = dir.join(setlist_dir(setlist));
         std::fs::create_dir_all(&presets_dir).map_err(io("creating the bundle"))?;
@@ -692,10 +711,20 @@ fn capture_presets(
                 name: &name,
             });
             done += 1;
-            if let Some(preset) = read(setlist, index)? {
+            // A preset TonePush cannot read yet is kept as the pedal stores
+            // it, and noted, rather than stopping the whole backup: the pedal
+            // plays it, and it is still the pedal's to keep.
+            let bytes = match read(setlist, index) {
+                Ok(preset) => preset.map(|preset| preset.encode()),
+                Err(Error::UnreadablePreset(blob)) => {
+                    unreadable.push((setlist, index));
+                    Some(blob)
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(bytes) = bytes {
                 let file = preset_file(index, &name);
-                atomic_write(presets_dir.join(&file), preset.encode())
-                    .map_err(io("writing a preset"))?;
+                atomic_write(presets_dir.join(&file), bytes).map_err(io("writing a preset"))?;
                 preset_files.insert(OsString::from(file));
             } else {
                 // The document is the authority on whether the slot is
@@ -706,9 +735,16 @@ fn capture_presets(
         }
         remove_stale_preset_files(&presets_dir, &preset_files)?;
     }
+    if !unreadable.is_empty() {
+        atomic_write(
+            dir.join(UNREADABLE),
+            serde_json::to_vec_pretty(&unreadable).map_err(json_err)?,
+        )
+        .map_err(io("noting the presets TonePush cannot read"))?;
+    }
     let mut all_names = all_names.into_iter();
     let first = all_names.next().unwrap_or_default();
-    Ok((first, all_names.collect()))
+    Ok((first, all_names.collect(), unreadable))
 }
 
 /// Read a bundle's manifest, to show what it holds before putting it back.
@@ -844,6 +880,10 @@ fn validate_device(manifest: &Manifest, device: &str) -> Result<()> {
 type RestorePreset = (usize, usize, String, Option<Preset>);
 
 fn restore_presets(dir: &Path, manifest: &Manifest) -> Result<Vec<RestorePreset>> {
+    // Kept as the pedal stored them, unread: TonePush writes nothing it
+    // cannot check, and blanking them would lose them, so they stay as the
+    // pedal has them.
+    let unreadable = unreadable(dir);
     manifest
         .setlist_presets()
         .enumerate()
@@ -853,6 +893,7 @@ fn restore_presets(dir: &Path, manifest: &Manifest) -> Result<Vec<RestorePreset>
                 .enumerate()
                 .map(move |(index, name)| (setlist, index, name))
         })
+        .filter(|(setlist, index, _)| !unreadable.contains(&(*setlist, *index)))
         .map(|(setlist, index, name)| {
             let path = dir
                 .join(setlist_dir(setlist))
@@ -1033,6 +1074,16 @@ pub fn capture_one_in(session: &mut Session, dir: &Path, setlist: i64, index: i6
         serde_json::to_vec_pretty(&manifest).map_err(json_err)?,
     )
     .map_err(io("writing the manifest"))?;
+    // The slot now holds a preset TonePush read.
+    let mut kept = unreadable(dir);
+    if kept.contains(&(setlist_index, slot)) {
+        kept.retain(|entry| *entry != (setlist_index, slot));
+        atomic_write(
+            dir.join(UNREADABLE),
+            serde_json::to_vec_pretty(&kept).map_err(json_err)?,
+        )
+        .map_err(io("noting the presets TonePush cannot read"))?;
+    }
     // The list the pedal gives now, so a connection later today still finds
     // the bundle current. A bundle without the lists is left without them.
     let lists = dir.join(LISTED_NAMES);
@@ -1628,7 +1679,7 @@ mod tests {
         let occupied = |setlist: usize, index: usize| !(setlist == 0 && index == 1);
 
         let mut steps = Vec::new();
-        let (first, more) = capture_presets(
+        let (first, more, _) = capture_presets(
             &bundle,
             listed,
             |setlist, index| Ok(occupied(setlist, index).then(|| Preset::parse(PRESET).unwrap())),
@@ -1684,6 +1735,55 @@ mod tests {
         .unwrap();
         let made = snapshot(&bundle, "2026-10-01 120000", 3).unwrap().unwrap();
         assert!(made.join("presets-1/001 Wall.hxpreset").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A preset TonePush cannot read no longer stops the backup: it is kept
+    /// as the pedal stores it and noted, and a restore leaves that slot as
+    /// the pedal has it rather than writing bytes it cannot check or
+    /// blanking it.
+    #[test]
+    fn a_preset_tonepush_cannot_read_is_kept_and_left_alone_on_restore() {
+        const PRESET: &[u8] = include_bytes!("../../hx-proto/tests/preset.bin");
+        let root = scratch("unreadable");
+        let bundle = root.join("bundle.hxbundle");
+        std::fs::remove_dir_all(bundle.join("presets")).unwrap();
+        let listed = vec![vec![
+            "Clean".to_owned(),
+            "Odd".to_owned(),
+            "Lead".to_owned(),
+        ]];
+        let (first, more, unreadable_slots) = capture_presets(
+            &bundle,
+            listed,
+            |_, index| {
+                if index == 1 {
+                    Err(Error::UnreadablePreset(b"as the pedal stores it".to_vec()))
+                } else {
+                    Ok(Some(Preset::parse(PRESET).unwrap()))
+                }
+            },
+            &mut |_| {},
+        )
+        .expect("one unreadable preset does not stop the backup");
+        assert_eq!(unreadable_slots, vec![(0, 1)]);
+        assert_eq!(unreadable(&bundle), vec![(0, 1)]);
+        assert_eq!(
+            std::fs::read(bundle.join("presets/001 Odd.hxpreset")).unwrap(),
+            b"as the pedal stores it"
+        );
+        assert!(bundle.join("presets/002 Lead.hxpreset").is_file());
+        assert!(!Error::UnreadablePreset(Vec::new()).loses_session());
+
+        let mut saved = manifest();
+        saved.presets = first;
+        saved.more_setlists = more;
+        let restored: Vec<_> = restore_presets(&bundle, &saved)
+            .expect("the bundle restores")
+            .into_iter()
+            .map(|(setlist, index, ..)| (setlist, index))
+            .collect();
+        assert_eq!(restored, vec![(0, 0), (0, 2)], "slot 1 is left as it is");
         let _ = std::fs::remove_dir_all(root);
     }
 

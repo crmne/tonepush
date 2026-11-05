@@ -74,16 +74,24 @@ pub enum Error {
     /// session is aligned and can go on being used.
     #[error("stopped before it finished")]
     Cancelled,
+    /// The pedal sent a whole preset that TonePush cannot read yet, though the
+    /// pedal plays it: the reply was complete, so the session goes on. Holds
+    /// the bytes as the pedal stores them, which a backup keeps.
+    #[error("TonePush cannot read this preset yet, though the pedal plays it")]
+    UnreadablePreset(Vec<u8>),
 }
 
 impl Error {
     /// Whether continuing on this open session risks speaking on a transport
     /// whose sequence/transaction state is no longer known. A device refusal
-    /// is a complete, aligned reply, and a cancellation stops between two
-    /// requests, so those two are recoverable; transport silence and
-    /// malformed protocol are not.
+    /// is a complete, aligned reply, as is a preset TonePush cannot read, and
+    /// a cancellation stops between two requests, so those are recoverable;
+    /// transport silence and malformed protocol are not.
     pub fn loses_session(&self) -> bool {
-        !matches!(self, Self::Device(_) | Self::Cancelled)
+        !matches!(
+            self,
+            Self::Device(_) | Self::Cancelled | Self::UnreadablePreset(_)
+        )
     }
 }
 
@@ -145,7 +153,7 @@ fn decode_stored_preset(value: &Value) -> Result<Option<Preset>> {
         .ok_or_else(|| Error::Protocol("stored-preset response was not a blob or nil".into()))?;
     Preset::parse(blob)
         .map(Some)
-        .ok_or_else(|| Error::Protocol("preset blob was not an l6-helix document".into()))
+        .ok_or_else(|| Error::UnreadablePreset(blob.to_vec()))
 }
 
 /// A device found on the bus.
@@ -1173,8 +1181,7 @@ impl Session {
         let blob = v
             .as_raw()
             .ok_or_else(|| Error::Protocol("preset response was not a blob".into()))?;
-        Preset::parse(blob)
-            .ok_or_else(|| Error::Protocol("preset blob was not an l6-helix document".into()))
+        Preset::parse(blob).ok_or_else(|| Error::UnreadablePreset(blob.to_vec()))
     }
 
     /// Read any preset by slot, without loading it.
