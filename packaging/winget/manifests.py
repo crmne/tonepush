@@ -4,7 +4,8 @@
     python3 packaging/winget/manifests.py v1.2.3 OUTPUT_DIR
 
 Fills the templates beside this script with the version, the release date and
-the MSI hashes from the release's checksums.txt, and writes them to
+the MSI hashes from the release's checksums.txt, and the first paragraph of
+its notes (packaging/release-notes/<tag>.md) as ReleaseNotes, and writes them to
 OUTPUT_DIR/manifests/c/crmne/TonePush/1.2.3, the layout of microsoft/winget-pkgs.
 Nothing is submitted: see PACKAGING.md. --checksums and --release-date use local
 values instead of asking GitHub, for a release that is not published yet.
@@ -38,6 +39,18 @@ def checksums(text):
         if match:
             result[match.group(2)] = match.group(1).upper()
     return result
+
+
+def summary(notes):
+    """The notes' first paragraph as plain text: winget shows ReleaseNotes
+    as it is, so Markdown links, emphasis and code marks go."""
+    paragraph = notes.strip().split("\n\n")[0]
+    text = " ".join(paragraph.split())
+    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"(\*\*|__|`)", "", text)
+    if not text:
+        sys.exit("the release notes have no first paragraph")
+    return text
 
 
 def render(template, values):
@@ -82,6 +95,12 @@ def main():
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
         sys.exit(f"invalid release date: {date}")
     values["RELEASE_DATE"] = date
+
+    notes = HERE.parent / "release-notes" / f"{args.tag}.md"
+    if not notes.is_file():
+        sys.exit(f"no release notes at {notes}")
+    # A plain YAML scalar would misread a colon or a leading symbol: quote it.
+    values["RELEASE_NOTES"] = json.dumps(summary(notes.read_text()), ensure_ascii=False)
 
     destination = args.output / "manifests/c/crmne/TonePush" / version
     destination.mkdir(parents=True, exist_ok=True)

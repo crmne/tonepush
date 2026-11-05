@@ -24,6 +24,7 @@ Tags:
 - hx-stomp
 - line6
 - preset-editor
+ReleaseNotes: @RELEASE_NOTES@
 ReleaseNotesUrl: https://github.com/crmne/tonepush/releases/tag/v@VERSION@
 Documentations:
 - DocumentLabel: Documentation
