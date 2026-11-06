@@ -332,6 +332,11 @@ program folder and stay. 0.9.1 and later update to the package by themselves
 (the updater prefers the `.msi`). 0.9.0 looks for a `-setup.exe` that new
 releases no longer have, so it stops finding updates; its users run the
 `.msi` once (`docs/_guide/download.md` says so).
+
+Both programs link the MSVC runtime statically (`.cargo/config.toml`), on x64
+and arm64, so the zip and the package need no Visual C++ redistributable and
+the winget manifests declare no dependency. CI and the release workflow fail if
+an executable imports the runtime (`packaging/windows/check-runtime.ps1`).
 `packaging/windows/tonepush.iss` stays only so `test-installer.ps1` can make
 an Inno install for the package to take over.
 

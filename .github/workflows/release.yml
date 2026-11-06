@@ -91,6 +91,13 @@ jobs:
       # Ruby symbols. Nothing shipped in a release comes from it.
       - run: cargo build --release -p tonepush-cli -p tonepush-gui --target ${{ matrix.target }}
 
+      # Before anything is signed or published: the zip and the MSI must run on
+      # a machine with no Visual C++ redistributable.
+      - name: The binaries carry their own runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh packaging/windows/check-runtime.ps1 target\${{ matrix.target }}\release\tonepush.exe target\${{ matrix.target }}\release\tonepush-gui.exe
+
       # native-packages signs the Windows code (native-packages.yaml,
       # windows.signing) through the Azure CLI sign-in below, once the
       # windows-signing environment names a certificate profile.

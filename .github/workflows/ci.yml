@@ -48,6 +48,29 @@ jobs:
         if: runner.os == 'Windows'
         run: mbx test --workspace --exclude hx-ruby
 
+  # A build can pass while importing Microsoft's C runtime, then exit 0xC0000135
+  # on a clean machine. Read the imports of both programs on both architectures,
+  # so a dependency that changes this is caught before a tag is cut.
+  windows-runtime:
+    name: Windows runtime (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # On the pinned toolchain, as in the release workflow.
+      - run: rustup target add ${{ matrix.target }}
+      - uses: jdx/mr-boxington-action@v1
+        with:
+          cache-generation: windows-runtime-v1-${{ matrix.target }}
+      - run: mbx build --locked -p tonepush-cli -p tonepush-gui --target ${{ matrix.target }}
+      - name: The binaries carry their own runtime
+        shell: pwsh
+        run: pwsh packaging/windows/check-runtime.ps1 target\${{ matrix.target }}\debug\tonepush.exe target\${{ matrix.target }}\debug\tonepush-gui.exe
+
   # The Windows package, installed for real with stand-in program files: an
   # Inno Setup install as 0.9.x and 0.10.0 made, the MSI taking it over, an
   # update, and uninstalling with TonePush running and without. Releases ship

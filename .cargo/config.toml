@@ -1,0 +1,9 @@
+# Windows downloads are standalone. Keep the MSVC runtime in the executables, so
+# the zip and the MSI run on a clean machine with no redistributable installed,
+# and winget can install per user without one. The only C in the Windows build
+# is ring's, which cc compiles with the same runtime.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
