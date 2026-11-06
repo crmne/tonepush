@@ -1242,6 +1242,9 @@ bundles are a zlib-sectioned container (signature `AF6L`).
   deepest prior effort. Found the three-channel structure and a module catalog.
 - [`allansomensi/openhx`](https://github.com/allansomensi/openhx) - Rust;
   implements list and select preset, models a single channel.
+- [`john-baxter-dev/fretwire`](https://github.com/john-baxter-dev/fretwire) -
+  Rust; an editor that follows the pedal's footswitches and knobs, with the
+  notifications they send decoded in its `docs/protocol.md`.
 - [`AntonyCorbett/HelixBackupFiles`](https://github.com/AntonyCorbett/HelixBackupFiles),
   [`frankdeath/hx-tools`](https://github.com/frankdeath/hx-tools) - file formats.
 
