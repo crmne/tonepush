@@ -191,6 +191,8 @@ struct Channel {
     /// by the difference, so a channel that is never acknowledged eventually
     /// stops the device dead - including the channels nobody is waiting on.
     acked: u32,
+    /// Whether the device has answered our opening of the channel.
+    answered: bool,
     reader: StreamReader,
     txn: i64,
 }
@@ -206,6 +208,7 @@ impl Channel {
             seq: 0,
             rx_bytes: 0,
             acked: 0,
+            answered: false,
             reader: StreamReader::new(),
             txn: rpc::FIRST_TXN,
         }
@@ -346,9 +349,10 @@ impl Wire for UsbWire {
 impl Found {
     /// Open the device and bring every channel up.
     ///
-    /// Retried once, because the device ignores a fresh session's opening
-    /// handshake on almost exactly every other attempt - a deterministic
-    /// alternation we have not explained. Opening again clears it.
+    /// Retried once, for a session whose first request still goes unanswered.
+    /// That was every other session once, when a session opened straight
+    /// after another found the channels still held and went on regardless;
+    /// `connect` now waits for each to be answered where the profile says so.
     ///
     /// This belongs here rather than in each caller: it was in the CLI for a
     /// while and every other consumer was quietly unreliable, which is what the
@@ -540,20 +544,7 @@ impl Session {
         } else {
             self.channels.get(&id.device).map_or(0, |c| c.rx_bytes)
         };
-        self.channels.insert(id.device, Channel::new());
-
-        let mut payload = Vec::new();
-        ChannelHeader {
-            seq: 0,
-            msg_type: MSG_HELLO,
-            ack: Self::HELLO_FIELD,
-        }
-        .encode_into(&mut payload);
-        payload.extend_from_slice(&Self::HELLO_TAIL);
-        let mut hello = Frame::new(id.device, id.host, payload);
-        hello.flags = hx_proto::frame::FLAG_HANDSHAKE;
-        self.write(&hello)?;
-        self.read_available(Self::REPLY)?;
+        self.connect(id)?;
 
         // Byte accounting starts here; the handshake restarts the channel.
         if let Some(ch) = self.channels.get_mut(&id.device) {
@@ -567,13 +558,80 @@ impl Session {
         }
 
         self.send_stream(id, service, &Value::UInt(service as u64))?;
-        self.read_available(Self::REPLY)?;
+        // Its answer, not merely the next thing to arrive: left behind, it
+        // would be read later as a notification that is not one.
+        let taken = self.await_reply(id, |ch| ch.rx_bytes != carried)?;
+        if !taken && self.profile.checks_openings {
+            return Err(Error::Protocol(format!(
+                "the device did not take service {service} on channel {:#06x}",
+                id.device
+            )));
+        }
         if let Some(ch) = self.channels.get_mut(&id.device) {
             ch.reader
                 .take_messages()
                 .map_err(|error| Error::Protocol(error.to_string()))?;
         }
         self.ack_channel(id)
+    }
+
+    /// Open a channel, and where the profile says so, see that the device
+    /// took it.
+    ///
+    /// A session ends without closing its channels (see `Drop`), and an HX
+    /// Stomp keeps one it was not told to close for a few seconds, ignoring
+    /// an opening sent meanwhile: hx-stomp-nam-lite reads Line 6's updater as
+    /// dropping a quiet stream after four. Every unanswered opening captured
+    /// fits that, the recorded session's events channel among them, and
+    /// every one followed by a close and a second opening was answered within
+    /// a millisecond. An editor opened again straight after closing went on
+    /// as though its events channel were open, and never heard a footswitch.
+    fn connect(&mut self, id: ChannelId) -> Result<()> {
+        for _ in 0..Self::OPENINGS {
+            self.channels.insert(id.device, Channel::new());
+            let mut payload = Vec::new();
+            ChannelHeader {
+                seq: 0,
+                msg_type: MSG_HELLO,
+                ack: Self::HELLO_FIELD,
+            }
+            .encode_into(&mut payload);
+            payload.extend_from_slice(&Self::HELLO_TAIL);
+            let mut hello = Frame::new(id.device, id.host, payload);
+            hello.flags = hx_proto::frame::FLAG_HANDSHAKE;
+            self.write(&hello)?;
+            if self.await_reply(id, |ch| ch.answered)? || !self.profile.checks_openings {
+                return Ok(());
+            }
+            if let Some(ch) = self.channels.get_mut(&id.device) {
+                ch.seq = 2;
+            }
+            self.close_service(id)?;
+        }
+        Err(Error::Protocol(format!(
+            "the device did not answer the opening of channel {:#06x}",
+            id.device
+        )))
+    }
+
+    /// How many times a channel is opened before the device is taken not to
+    /// want it.
+    const OPENINGS: usize = 4;
+
+    /// Read until `done` holds for the channel, for at most [`Self::REPLY`].
+    /// Returns whether it did.
+    fn await_reply(&mut self, id: ChannelId, done: impl Fn(&Channel) -> bool) -> Result<bool> {
+        let deadline = Instant::now() + Self::REPLY;
+        loop {
+            if self.channels.get(&id.device).is_some_and(&done) {
+                return Ok(true);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(false);
+            }
+            self.read_available(left)?;
+        }
     }
 
     /// Empty the endpoint before saying anything.
@@ -672,6 +730,7 @@ impl Session {
         let Some(ch) = self.channels.get_mut(&f.src) else {
             return;
         };
+        ch.answered |= f.flags == hx_proto::frame::FLAG_HANDSHAKE;
         if hdr.has_data() && !rest.is_empty() {
             ch.rx_bytes = ch.rx_bytes.wrapping_add(rest.len() as u32);
             ch.reader.push(rest);
@@ -1328,15 +1387,11 @@ pub fn checksum(bytes: &[u8]) -> u64 {
 }
 
 impl Drop for Session {
-    /// Close the session the way HX Edit does.
+    /// Let the session go: take in and acknowledge what is still in flight.
     ///
-    /// A captured clean quit shows the actual teardown: acknowledge whatever
-    /// is outstanding, send a bare type-0x02 (HELLO) frame on each channel,
-    /// collect the device's answering HELLOs, release the interface. The 0x02
-    /// message is a session boundary marker, not just an opening handshake -
-    /// it appears at both ends of the conversation. A session that vanishes
-    /// without this is what leaves the device refusing new connections until
-    /// its power is pulled.
+    /// The channels are left open, for the reason at the end. An HX Stomp
+    /// holds them a few seconds more, and the next session's openings go
+    /// unanswered until it closes them first (see `connect`).
     fn drop(&mut self) {
         if self.poisoned.is_some() {
             return;

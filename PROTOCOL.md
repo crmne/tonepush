@@ -223,7 +223,13 @@ current sequence and acknowledgement. An earlier version of this section
 claimed HX Edit sent nothing recognisable on quit; that conclusion came from
 `captures/04-quit.log`, which on re-reading records HX Edit failing against an
 already-wedged device - repeating stale ACKs answering every HELLO - not a
-quit. This client now performs the same teardown when a session drops.
+quit. This client does not send it: sent as each session dropped rather than
+once as an application quit, it kept a second consecutive run of the hardware
+suite from opening the device at all. The channels are left open instead, and
+an HX Stomp (3.80) holds them for a few seconds, leaving a new opening of one
+unanswered; a session opened meanwhile closes each such channel with this frame
+and opens it again, which the device answers within a millisecond (its
+profile's `checks_openings`).
 
 ## Layer 1 - USB framing [confirmed]
 

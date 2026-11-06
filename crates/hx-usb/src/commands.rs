@@ -1939,6 +1939,64 @@ mod pedal_tests {
             .any(is_switched));
     }
 
+    /// A session opened straight after another finds every channel still
+    /// held, and its openings go unanswered. Taken as open regardless, the
+    /// events channel heard nothing for the whole session: a footswitch
+    /// never reached the editor. Each channel is closed and opened again
+    /// until the pedal answers.
+    #[test]
+    fn a_session_opened_straight_after_another_still_hears_the_pedal() {
+        let pedal = Pedal::new();
+        pedal
+            .lock()
+            .unwrap()
+            .left_open
+            .extend(ChannelId::ALL.iter().map(|channel| channel.device));
+        let mut session = fake::session(&pedal);
+        session.poll_notifications().unwrap();
+
+        pedal.lock().unwrap().notify(49, switched());
+
+        assert!(session
+            .poll_notifications()
+            .unwrap()
+            .iter()
+            .any(is_switched));
+    }
+
+    /// Where the profile says so, a channel the last session left held is
+    /// closed and opened again. A device whose profile does not say so is
+    /// opened as before, and nothing it holds is closed.
+    #[test]
+    fn a_held_channel_is_closed_where_the_profile_says_so() {
+        let events = ChannelId::EVENTS.device;
+        for profile in [hx_proto::HX_STOMP, hx_proto::HX_EFFECTS] {
+            let pedal = Pedal::new();
+            pedal.lock().unwrap().left_open.insert(events);
+
+            drop(fake::session_as(&pedal, profile));
+
+            let held = pedal.lock().unwrap().left_open.contains(&events);
+            assert_eq!(held, !profile.checks_openings, "{}", profile.name);
+        }
+    }
+
+    /// A channel whose service the pedal never takes would leave the session
+    /// deaf on it with nothing to say so, so the opening fails instead.
+    #[test]
+    fn a_service_the_pedal_never_takes_fails_the_opening() {
+        let pedal = Pedal::new();
+        pedal
+            .lock()
+            .unwrap()
+            .ignores_services
+            .insert(ChannelId::EVENTS.device);
+
+        let opened = Session::replaying(Box::new(fake::Cable(pedal)), hx_proto::HX_STOMP);
+
+        assert!(opened.is_err());
+    }
+
     const SAMPLES: [f32; 4] = [0.5, -0.25, 0.125, 0.0];
 
     fn sum_of(samples: &[f32]) -> u64 {
