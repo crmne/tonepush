@@ -749,23 +749,29 @@ fn control_cell(
                 .show(&mut child)
                 .on_hover_text(format!("{}: choose", param.name));
             let chosen = current.round().max(0.0) as usize;
-            egui::Popup::menu(&button).gap(4.0).show(|ui| {
-                theme::menu_width(ui, 220.0);
-                egui::ScrollArea::vertical()
-                    .max_height(320.0)
-                    .show(ui, |ui| {
-                        for (n, label) in choices.iter().enumerate() {
-                            let on = n == chosen;
-                            if theme::menu_item(ui, on.then_some(Icon::Check), label, None)
-                                .clicked()
-                                && !on
-                            {
-                                current = n as f32;
-                                changed = true;
+            // Its own id: the button's default one is the right-click
+            // assignment menu's too, which closes on a click and so shut the
+            // list in the frame it opened.
+            egui::Popup::menu(&button)
+                .id(button.id.with("choices"))
+                .gap(4.0)
+                .show(|ui| {
+                    theme::menu_width(ui, 220.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for (n, label) in choices.iter().enumerate() {
+                                let on = n == chosen;
+                                if theme::menu_item(ui, on.then_some(Icon::Check), label, None)
+                                    .clicked()
+                                    && !on
+                                {
+                                    current = n as f32;
+                                    changed = true;
+                                }
                             }
-                        }
-                    });
-            });
+                        });
+                });
             parts.push(button);
         }
         _ => {
@@ -4017,6 +4023,116 @@ fn snapshot_column_width(count: usize, width: f32, column: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A menu control, such as a compressor's Ratio, opens its list on a
+    /// click and takes the choice picked there. The right-click assignment
+    /// menu on the same button used to close the list in the frame it
+    /// opened, so nothing could be picked.
+    #[test]
+    fn a_menu_control_opens_its_list_and_takes_the_choice() {
+        use egui_kittest::Harness;
+
+        /// Where the menu button is, and what the cell asked for last.
+        #[derive(Default)]
+        struct Seen {
+            button: Pos2,
+            edit: Option<(usize, f32, Kind, bool)>,
+        }
+
+        let control = Control {
+            index: 3,
+            param: hx_catalog::Param {
+                id: "Ratio".into(),
+                name: "Ratio".into(),
+                kind: Kind::Enum,
+                min: 0.0,
+                max: 4.0,
+                default: 2.0,
+                display: None,
+            },
+            value: 2.0,
+            reading: "4:1".into(),
+            choices: Some(
+                ["1.5:1", "2:1", "4:1", "8:1", "20:1"]
+                    .map(String::from)
+                    .to_vec(),
+            ),
+            menu: AssignMenu {
+                name: "Ratio".into(),
+                under: None,
+                sources: vec![(Source::Footswitch(1), Vec::new())],
+            },
+            tags: Vec::new(),
+        };
+        let (knob, cell) = (64.0, 110.0);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(400.0, 500.0))
+            .build_ui_state(
+                |ui, seen: &mut Seen| {
+                    // The editor's type is bound from the pass after it is
+                    // installed.
+                    if ui.ctx().cumulative_pass_nr() == 0 {
+                        theme::install(ui.ctx(), theme::Appearance::Dark);
+                        return;
+                    }
+                    seen.button = ui.cursor().min + Vec2::new(cell / 2.0, knob / 2.0);
+                    let mut asked = FaceAsked::default();
+                    control_cell(
+                        ui,
+                        None,
+                        (0, false),
+                        &control,
+                        (knob, cell),
+                        Color32::LIGHT_BLUE,
+                        None,
+                        false,
+                        &mut asked,
+                    );
+                    seen.edit = seen.edit.or(asked.edit);
+                },
+                Seen::default(),
+            );
+        harness.run_steps(2);
+        let button = harness.state().button;
+        let click = |harness: &mut Harness<'_, Seen>, pos: Pos2, button| {
+            harness.event(egui::Event::PointerMoved(pos));
+            harness.run();
+            for pressed in [true, false] {
+                harness.event(egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                harness.run();
+            }
+            harness.run_steps(2);
+        };
+        let open = |harness: &Harness<'_, Seen>| egui::Popup::is_any_open(&harness.ctx);
+        assert!(!open(&harness));
+
+        click(&mut harness, button, egui::PointerButton::Primary);
+        assert!(open(&harness), "a click opens the list of choices");
+
+        // The fourth of five rows, 8:1.
+        let list = harness
+            .ctx
+            .layer_id_at(button + Vec2::new(0.0, 40.0))
+            .and_then(|layer| harness.ctx.memory(|m| m.area_rect(layer.id)))
+            .expect("the list is drawn");
+        let row = egui::pos2(list.center().x, list.top() + list.height() * 3.5 / 5.0);
+        click(&mut harness, row, egui::PointerButton::Primary);
+        assert_eq!(
+            harness.state().edit,
+            Some((3, 3.0, Kind::Enum, false)),
+            "picking 8:1 sets the fourth choice"
+        );
+        assert!(!open(&harness), "picking a choice closes the list");
+
+        // The right-click menu still offers what can drive it.
+        click(&mut harness, button, egui::PointerButton::Secondary);
+        assert!(open(&harness), "a right-click opens the assignment menu");
+    }
 
     /// The hint names the menu item to pick, for every source a device lists:
     /// a Variax knob used to read "choose MIDI".
