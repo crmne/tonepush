@@ -101,6 +101,7 @@ ranges, choices, NAM models, and IR names through its own schema. See the
 A few things worth knowing on day one:
 
 - **Edits are live but not saved.** The device edits a scratch copy: a changed parameter is audible immediately but vanishes on reload unless you press Save. When there is something to save, the line under the preset's name says **Changes not saved**, the preset's row has an orange dot, and Save turns amber.
+- **The editor follows the pedal.** A footswitch, a knob turned on the pedal, a tapped tempo, a model picked on its screen, another snapshot or preset: each shows in the editor a moment later.
 - **Add a block** by clicking any gap in the wire. The model browser opens in place of the knobs, ready for you to type; one click puts the model in the gap.
 - **Try other models** with **Change model**, or by clicking the block's name. Each model you click plays on the pedal at once, its knobs at their defaults. **Keep** (Enter) keeps the one playing, as one step undo can take back; **Put back** (Esc) returns the block exactly as it was. The browser remembers what you chose under **Recent**.
 - **Give a knob a control** by right-clicking it, or clicking its name: a footswitch, an expression pedal, MIDI or the snapshots. Click a reading to type a value; double-click a knob for its default.
