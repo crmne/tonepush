@@ -665,6 +665,17 @@ pub enum ControlLayout {
     /// own controller menu, and assignments checked on the pedal itself
     /// (PROTOCOL.md).
     Helix,
+    /// Two expression pedals, six footswitches at 3 to 8, MIDI CC at 9 and
+    /// Snapshots at 10. An HX Effects has one more footswitch than a Stomp
+    /// and shifts everything above it up by one, which is why it cannot
+    /// borrow [`ControlLayout::Stomp`]: on a Stomp 9 is Snapshots, and here
+    /// it is MIDI CC.
+    ///
+    /// The switches and MIDI are measured on an HX Effects at 3.80. Snapshots
+    /// at 10 is inferred from the eleventh table slot the others leave over,
+    /// and the expression pedals are inferred from a stock preset driving a
+    /// wah from ordinal 1 (PROTOCOL.md, #9).
+    Effects,
 }
 
 impl ControlLayout {
@@ -682,6 +693,10 @@ impl ControlLayout {
             (ControlLayout::Helix, Source::Footswitch(n @ 1..=12)) => 5 + i64::from(n),
             (ControlLayout::Helix, Source::MidiCc) => 18,
             (ControlLayout::Helix, Source::Snapshots) => 19,
+            (ControlLayout::Effects, Source::Expression(n @ 1..=2)) => i64::from(n),
+            (ControlLayout::Effects, Source::Footswitch(n @ 1..=6)) => 2 + i64::from(n),
+            (ControlLayout::Effects, Source::MidiCc) => 9,
+            (ControlLayout::Effects, Source::Snapshots) => 10,
             _ => return None,
         };
         Some(n)
@@ -701,6 +716,10 @@ impl ControlLayout {
             (ControlLayout::Helix, 6..=17) => small(ordinal - 5).map(Source::Footswitch),
             (ControlLayout::Helix, 18) => Some(Source::MidiCc),
             (ControlLayout::Helix, 19) => Some(Source::Snapshots),
+            (ControlLayout::Effects, 1..=2) => small(ordinal).map(Source::Expression),
+            (ControlLayout::Effects, 3..=8) => small(ordinal - 2).map(Source::Footswitch),
+            (ControlLayout::Effects, 9) => Some(Source::MidiCc),
+            (ControlLayout::Effects, 10) => Some(Source::Snapshots),
             _ => None,
         }
     }
@@ -711,6 +730,7 @@ impl ControlLayout {
         let last = match self {
             ControlLayout::Stomp => 9,
             ControlLayout::Helix => 19,
+            ControlLayout::Effects => 10,
         };
         (1..=last)
             .filter_map(|n| self.source(n))
@@ -771,6 +791,44 @@ mod tests {
         let menu = helix.sources();
         assert_eq!(menu.len(), 18);
         assert!(!menu.contains(&Source::Footswitch(12)));
+        assert!(menu.windows(2).all(|pair| pair[0].rank() < pair[1].rank()));
+    }
+
+    /// Read off an HX Effects at 3.80 by putting one parameter under each
+    /// ordinal in turn and asking the pedal, through opcode 33, which switch
+    /// had picked it up: opcode 33 takes a switch number rather than an
+    /// ordinal, so it answers without assuming the numbering under test.
+    /// Ordinals 3 to 8 came back as switches 1 to 6, and a bypass put under
+    /// MIDI landed on 9. Snapshots at 10 is the slot those leave over rather
+    /// than a measurement, so this pins the shape and not that one ordinal
+    /// (PROTOCOL.md).
+    #[test]
+    fn an_hx_effects_has_a_sixth_footswitch_above_a_stomps_five() {
+        use super::{ControlLayout, Source};
+        let effects = ControlLayout::Effects;
+        for n in 1..=10 {
+            let source = effects.source(n).expect("a source");
+            assert_eq!(
+                effects.ordinal(source),
+                Some(n),
+                "{source:?} does not round trip"
+            );
+        }
+        assert_eq!(effects.source(3), Some(Source::Footswitch(1)));
+        assert_eq!(effects.source(8), Some(Source::Footswitch(6)));
+        assert_eq!(effects.source(9), Some(Source::MidiCc));
+        assert_eq!(effects.source(10), Some(Source::Snapshots));
+        assert_eq!(effects.source(11), None);
+        // The sixth switch sits where a Stomp keeps MIDI CC, so the two
+        // layouts disagree from 8 up and an Effects cannot borrow the other.
+        assert_eq!(ControlLayout::Stomp.source(8), Some(Source::MidiCc));
+        assert_eq!(effects.ordinal(Source::Footswitch(7)), None);
+        assert_eq!(effects.ordinal(Source::Expression(3)), None);
+        assert_eq!(effects.ordinal(Source::VariaxVolume), None);
+        // Two pedals, six switches, MIDI and snapshots, in the menu's order.
+        let menu = effects.sources();
+        assert_eq!(menu.len(), 10);
+        assert!(menu.contains(&Source::Footswitch(6)));
         assert!(menu.windows(2).all(|pair| pair[0].rank() < pair[1].rank()));
     }
 

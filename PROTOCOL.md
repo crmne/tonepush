@@ -318,9 +318,35 @@ brightness.
 Key **74 is the source**, as an ordinal in the order HX Edit lists them: **0
 None**, 1–2 the expression pedals, 3–7 the footswitches, 8 MIDI CC, 9 Snapshots
 - `74: 1` for EXP 1 and `74: 9` for Snapshots are ours, from the assign capture.
-An HX Effects has six footswitches and its stored presets use ordinal **10** as
-well; from the data it looks like 3–8 footswitches, 9 MIDI CC and 10 Snapshots
-there, but that is not confirmed (#9).
+
+**An HX Effects puts its six footswitches at 3–8 and MIDI CC at 9.
+[confirmed on an HX Effects]** Read off one at 3.80 by putting a parameter
+under ordinals 3 to 10 in turn and asking the pedal through opcode 33 which
+switch had picked it up: 33 takes a switch number rather than an ordinal, so
+it answers without assuming the numbering under test. Ordinals 3–8 came back
+on switches 1–6 in order, and a bypass put under MIDI through opcode 37
+appeared at ordinal 9. Its controller table has **11** entries against a
+Stomp's ten, and that one more is the extra switch.
+
+**Snapshots is 10 there. [inferred]** Ordinals 9 and 10 answered on no switch,
+9 is MIDI, and the table carries an eleventh slot, so 10 is what is left; the
+stored presets that first raised this use it. The pedal accepts an assignment
+at 10, but nothing here has watched a parameter put there actually follow the
+snapshots (#9).
+
+**Ordinals 1 and 2 are its expression pedals. [inferred, strongly]** Not
+probed. A stock preset drives a wah's Position and its bypass from ordinal 1,
+which is what EXP 1 does, and the pedal has EXP 1 and EXP 2 jacks.
+
+So the two layouts agree up to 7 and part company at 8, where a Stomp keeps
+MIDI CC: reading an Effects as a Stomp drops everything on FS6 and calls its
+MIDI assignments Snapshots (#9).
+
+**A footswitch driving a *bypass* is not in the controller table at all on an
+Effects. [confirmed on an HX Effects]** The five switches of a stock preset
+each carried a block with nothing in the table for any of them. Only
+parameters, MIDI and snapshots are kept there, so opcode 33 is the only way to
+read what a switch carries.
 
 A Helix Floor (3.80) numbers its sources differently, and HX Edit's `.hlx`
 `@controller` is the same ordinal as the document's, which made the table
