@@ -2898,6 +2898,13 @@ mod tests {
             let Some((header, rest)) = ChannelHeader::decode(&frame.payload) else {
                 return;
             };
+            if frame.flags == hx_proto::frame::FLAG_HANDSHAKE {
+                if let Some(channel) = ChannelId::ALL.into_iter().find(|c| c.device == frame.dst) {
+                    let answer = Frame::opening_answer(channel).encode().unwrap();
+                    self.outbox.push_back(answer);
+                }
+                return;
+            }
             if !header.has_data() || rest.is_empty() {
                 return;
             }
@@ -2906,6 +2913,12 @@ mod tests {
             reader.push(rest);
             let messages = reader.take_messages().unwrap_or_default();
             for message in messages {
+                // Picking a service on a channel just opened: the device
+                // says the number back.
+                if message.body.as_i64().is_some() {
+                    self.send_body(node, &message.body);
+                    continue;
+                }
                 if let Ok(Message::Request { txn, opcode, args }) =
                     Message::try_from_value(message.body)
                 {
@@ -3021,7 +3034,12 @@ mod tests {
 
         /// Queue one message for the host, on the channel `node` names.
         fn reply(&mut self, node: u16, message: &Message) {
-            let body = Encoder::encode(&message.to_value());
+            self.send_body(node, &message.to_value());
+        }
+
+        /// Queue one stream message, whatever its body, on the channel `node`.
+        fn send_body(&mut self, node: u16, body: &Value) {
+            let body = Encoder::encode(body);
             let seq = self.seq.entry(node).or_insert(0);
             let mut payload = Vec::new();
             ChannelHeader {

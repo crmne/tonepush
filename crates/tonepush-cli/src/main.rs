@@ -2376,6 +2376,15 @@ mod tests {
                 let Some((header, rest)) = ChannelHeader::decode(&frame.payload) else {
                     return Ok(());
                 };
+                if frame.flags == hx_proto::frame::FLAG_HANDSHAKE {
+                    if let Some(channel) =
+                        ChannelId::ALL.into_iter().find(|c| c.device == frame.dst)
+                    {
+                        let answer = Frame::opening_answer(channel).encode().unwrap();
+                        pedal.outbox.push_back(answer);
+                    }
+                    return Ok(());
+                }
                 if !header.has_data() || rest.is_empty() {
                     return Ok(());
                 }
@@ -2383,28 +2392,29 @@ mod tests {
                 let reader = pedal.inbox.entry(node).or_default();
                 reader.push(rest);
                 for message in reader.take_messages().unwrap_or_default() {
-                    let Ok(Message::Request { txn, opcode, args }) =
-                        Message::try_from_value(message.body)
-                    else {
-                        continue;
-                    };
-                    let result = match opcode {
-                        op::PRESET_INFO => hx_proto::msgmap! {
-                            key::SETLIST => Value::Int(0),
-                            key::PRESET_INDEX => Value::Int(0),
-                            key::NAME => Value::Str("Test".into()),
-                        },
-                        _ => Value::Nil,
-                    };
-                    pedal.requests.push((opcode, args));
-                    let body = Encoder::encode(
-                        &Message::Response {
-                            txn,
-                            status: 0,
-                            result,
+                    // Picking a service: the device says the number back.
+                    let body = match Message::try_from_value(message.body.clone()) {
+                        Ok(Message::Request { txn, opcode, args }) => {
+                            let result = match opcode {
+                                op::PRESET_INFO => hx_proto::msgmap! {
+                                    key::SETLIST => Value::Int(0),
+                                    key::PRESET_INDEX => Value::Int(0),
+                                    key::NAME => Value::Str("Test".into()),
+                                },
+                                _ => Value::Nil,
+                            };
+                            pedal.requests.push((opcode, args));
+                            Message::Response {
+                                txn,
+                                status: 0,
+                                result,
+                            }
+                            .to_value()
                         }
-                        .to_value(),
-                    );
+                        _ if message.body.as_i64().is_some() => message.body,
+                        _ => continue,
+                    };
+                    let body = Encoder::encode(&body);
                     let seq = pedal.seq.entry(node).or_insert(0);
                     let mut payload = Vec::new();
                     ChannelHeader {

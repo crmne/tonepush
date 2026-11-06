@@ -1918,6 +1918,31 @@ mod pedal_tests {
             .any(is_switched));
     }
 
+    /// A session opened straight after another finds every channel still
+    /// held, and its openings go unanswered. Taken as open regardless, the
+    /// events channel heard nothing for the whole session: a footswitch
+    /// never reached the editor. Each channel is closed and opened again
+    /// until the pedal answers.
+    #[test]
+    fn a_session_opened_straight_after_another_still_hears_the_pedal() {
+        let pedal = Pedal::new();
+        pedal
+            .lock()
+            .unwrap()
+            .left_open
+            .extend(ChannelId::ALL.iter().map(|channel| channel.device));
+        let mut session = fake::session(&pedal);
+        session.poll_notifications().unwrap();
+
+        pedal.lock().unwrap().notify(49, switched());
+
+        assert!(session
+            .poll_notifications()
+            .unwrap()
+            .iter()
+            .any(is_switched));
+    }
+
     const SAMPLES: [f32; 4] = [0.5, -0.25, 0.125, 0.0];
 
     fn sum_of(samples: &[f32]) -> u64 {
