@@ -1886,6 +1886,14 @@ impl App {
                 }
                 Ok(Evt::CapturedSetlist(slots)) => self.keep_setlist(slots, "hxpreset"),
                 Ok(Evt::Switches(switches)) => self.switches = switches,
+                Ok(Evt::Param {
+                    block,
+                    index,
+                    value,
+                }) => self.follow_param(block, index, value),
+                Ok(Evt::Bypass { block, enabled }) => self.follow_bypass(block, enabled),
+                Ok(Evt::Tempo(bpm)) => self.tempo = Some(bpm),
+                Ok(Evt::SelectedBlock(block)) => self.follow_selection(block),
                 Ok(Evt::Activity(line)) => self.note(line),
                 Ok(Evt::Failed(e)) => {
                     self.status = if self.connection == Connection::Connecting {
@@ -1935,6 +1943,66 @@ impl App {
         if let Some(skip) = &self.backup_skip {
             skip.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    /// Move a control the pedal moved itself.
+    ///
+    /// An expression pedal, or a knob on the pedal's own face, changes a
+    /// parameter without the editor asking, and the pedal says so. Before
+    /// this the knob on screen stayed where the document had left it, so a
+    /// wah swept on the floor and the editor showed its heel position until
+    /// the preset was read again.
+    ///
+    /// Only the chain's own copy moves: this is the pedal reporting where it
+    /// already is, so there is nothing to send back, nothing to undo, and no
+    /// unsaved change that was not there before - a controller moving is not
+    /// an edit of the preset.
+    ///
+    /// A cab riding along with an amp answers to the same block and the same
+    /// indices as the amp, and the notification does not say which half it
+    /// meant, so the amp's own control is the one that moves. Nothing on a
+    /// floor controller reaches a cab's parameters.
+    fn follow_param(&mut self, block: i64, index: usize, value: f32) {
+        if let Some(slot) = self.chain.iter_mut().find(|b| b.position == block) {
+            if let Some(held) = slot.values.get_mut(index) {
+                *held = value;
+            }
+        }
+    }
+
+    /// Turn a block on or off because the pedal did.
+    ///
+    /// A footswitch on the pedal's own face, and a snapshot that engages a
+    /// different set of blocks, both report every block they change. Without
+    /// this the floor's lights and the block's On/Off cell went on showing
+    /// the state the document was read in.
+    ///
+    /// Whether the preset now differs from the one stored is left to the
+    /// worker, which says so with each reload: a snapshot selection turns
+    /// several blocks at once and is not an edit, so lighting Save here
+    /// would be wrong as often as it was right.
+    fn follow_bypass(&mut self, block: i64, enabled: bool) {
+        if let Some(slot) = self.chain.iter_mut().find(|b| b.position == block) {
+            slot.enabled = enabled;
+        }
+    }
+
+    /// Look at the block the pedal is looking at.
+    ///
+    /// The editor does not tell the pedal what it has selected - mirroring it
+    /// outwards made every click a round trip - so the two drift apart, and
+    /// this brings the editor back to the pedal whenever the pedal moves. A
+    /// browser left open belonged to the old block, so it closes, keeping
+    /// whatever it was playing the way choosing another block here does.
+    fn follow_selection(&mut self, block: i64) {
+        let Some(index) = self.chain.iter().position(|b| b.position == block) else {
+            return;
+        };
+        if index == self.selected {
+            return;
+        }
+        self.close_browser(true);
+        self.selected = index;
     }
 
     fn note(&mut self, line: String) {
@@ -8434,6 +8502,105 @@ mod tests {
             }],
             dirty,
         }
+    }
+
+    /// A controller on the floor moves the control on screen. Before this
+    /// the knob sat where the document had left it while the pedal swept.
+    #[test]
+    fn a_parameter_the_pedal_changes_moves_the_control() {
+        let (mut app, events, cmds) = app();
+        events.send(loaded(2, Some(0), false)).unwrap();
+        app.drain_events();
+        assert_eq!(app.chain[0].values[0], 0.5);
+        while cmds.try_recv().is_ok() {}
+
+        events
+            .send(Evt::Param {
+                block: 1,
+                index: 0,
+                value: 0.75,
+            })
+            .unwrap();
+        app.drain_events();
+        assert_eq!(app.chain[0].values[0], 0.75, "the control follows");
+        assert!(!app.dirty, "a controller moving is not an unsaved change");
+        assert!(cmds.try_recv().is_err(), "and nothing is sent back");
+
+        // A block or an index the chain does not have is simply not there to
+        // move: the pedal can report on a preset we have not read yet.
+        for stray in [
+            Evt::Param {
+                block: 9,
+                index: 0,
+                value: 0.1,
+            },
+            Evt::Param {
+                block: 1,
+                index: 7,
+                value: 0.1,
+            },
+        ] {
+            events.send(stray).unwrap();
+            app.drain_events();
+            assert_eq!(app.chain[0].values[0], 0.75);
+        }
+    }
+
+    /// A footswitch on the pedal lights the same block here, and a tempo
+    /// tapped there reads here.
+    #[test]
+    fn the_pedals_own_switches_and_tempo_reach_the_editor() {
+        let (mut app, events, _cmds) = app();
+        events.send(loaded(2, Some(0), false)).unwrap();
+        app.drain_events();
+        assert!(app.chain[0].enabled);
+        assert_eq!(app.tempo, Some(120.0));
+
+        events
+            .send(Evt::Bypass {
+                block: 1,
+                enabled: false,
+            })
+            .unwrap();
+        events.send(Evt::Tempo(96.0)).unwrap();
+        app.drain_events();
+        assert!(!app.chain[0].enabled, "the block follows the footswitch");
+        assert_eq!(app.tempo, Some(96.0), "and the tempo follows the tap");
+        assert!(!app.dirty, "neither is an unsaved change of the editor's");
+
+        // A block the chain does not have is nothing to turn off.
+        events
+            .send(Evt::Bypass {
+                block: 9,
+                enabled: true,
+            })
+            .unwrap();
+        app.drain_events();
+        assert!(!app.chain[0].enabled);
+    }
+
+    /// The editor looks at the block the pedal is looking at.
+    #[test]
+    fn the_editor_follows_the_block_the_pedal_selects() {
+        let (mut app, events, _cmds) = app();
+        let mut two = loaded(2, Some(0), false);
+        if let Evt::Loaded { chain, .. } = &mut two {
+            let mut second = chain[0].clone();
+            second.position = 4;
+            chain.push(second);
+        }
+        events.send(two).unwrap();
+        app.drain_events();
+        assert_eq!(app.selected, 0);
+
+        // By position in the chain, not by index into it.
+        events.send(Evt::SelectedBlock(4)).unwrap();
+        app.drain_events();
+        assert_eq!(app.selected, 1);
+
+        events.send(Evt::SelectedBlock(7)).unwrap();
+        app.drain_events();
+        assert_eq!(app.selected, 1, "a block that is not there is not selected");
     }
 
     /// The browser plays each model clicked in the block's place, once, and
