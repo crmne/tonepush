@@ -4,7 +4,7 @@
 //! the per-channel bookkeeping straight: sequence numbers, cumulative
 //! acknowledgements, and reassembly of streams that straddle transfers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use hx_proto::frame::{ChannelHeader, MSG_ACK, MSG_DATA, MSG_HELLO, MSG_KEEPALIVE};
@@ -240,6 +240,12 @@ pub struct Session {
     /// do on this session, and continuing to write only digs deeper - so the
     /// session refuses further work and says why.
     poisoned: Option<String>,
+    /// Notifications read and not yet handed out by `poll_notifications`.
+    ///
+    /// A request reads whatever arrives while it waits for its answer, and
+    /// what the device announced meanwhile waits here rather than being
+    /// lost: a footswitch pressed during a preset write is still pressed.
+    notifications: VecDeque<(i64, Value)>,
     pub profile: DeviceProfile,
 }
 
@@ -262,12 +268,38 @@ const WRITE_TIMED_OUT: &str = "write timed out";
 /// A write still in flight after being cancelled.
 const WRITE_STUCK: &str = "an earlier write never completed";
 
-/// The live USB transport. Exactly one read is kept posted so the device's
-/// unsolicited notifications are never dropped.
+/// The live USB transport.
+///
+/// The device sends only into a read the host has posted, and holds back
+/// whatever it cannot send. A device whose profile says so is left
+/// `reads_ahead` reads for as long as the interface is held; otherwise one
+/// is posted when the host next looks at the wire.
 struct UsbWire {
     ep_out: nusb::Endpoint<Bulk, Out>,
     ep_in: nusb::Endpoint<Bulk, In>,
-    read_posted: bool,
+    ahead: usize,
+}
+
+impl UsbWire {
+    fn new(
+        ep_out: nusb::Endpoint<Bulk, Out>,
+        ep_in: nusb::Endpoint<Bulk, In>,
+        profile: &DeviceProfile,
+    ) -> UsbWire {
+        let mut wire = UsbWire {
+            ep_out,
+            ep_in,
+            ahead: profile.reads_ahead,
+        };
+        wire.post_ahead();
+        wire
+    }
+
+    fn post_ahead(&mut self) {
+        while self.ep_in.pending() < self.ahead {
+            self.ep_in.submit(Buffer::new(512));
+        }
+    }
 }
 
 impl Wire for UsbWire {
@@ -299,14 +331,13 @@ impl Wire for UsbWire {
     }
 
     fn recv(&mut self, timeout: Duration) -> Result<Vec<u8>> {
-        if !self.read_posted {
+        if self.ep_in.pending() == 0 {
             self.ep_in.submit(Buffer::new(512));
-            self.read_posted = true;
         }
         let Some(c) = self.ep_in.wait_next_complete(timeout) else {
             return Err(Error::Usb("read timed out".into()));
         };
-        self.read_posted = false;
+        self.post_ahead();
         let data = c.into_result().map_err(|e| Error::Usb(e.to_string()))?;
         Ok(data.to_vec())
     }
@@ -331,11 +362,7 @@ impl Found {
 
     fn open_once(&self) -> Result<Session> {
         let (interface, ep_out, ep_in) = self.claim()?;
-        let wire: Box<dyn Wire> = Box::new(UsbWire {
-            ep_out,
-            ep_in,
-            read_posted: false,
-        });
+        let wire: Box<dyn Wire> = Box::new(UsbWire::new(ep_out, ep_in, &self.profile));
         Session::bring_up(Some(interface), wire, self.profile)
     }
 
@@ -356,11 +383,7 @@ impl Found {
 
     fn open_recording_once(&self, log: &replay::Log) -> Result<Session> {
         let (interface, ep_out, ep_in) = self.claim()?;
-        let usb: Box<dyn Wire> = Box::new(UsbWire {
-            ep_out,
-            ep_in,
-            read_posted: false,
-        });
+        let usb: Box<dyn Wire> = Box::new(UsbWire::new(ep_out, ep_in, &self.profile));
         let wire: Box<dyn Wire> = Box::new(replay::RecordingWire::new(usb, log.clone()));
         Session::bring_up(Some(interface), wire, self.profile)
     }
@@ -436,6 +459,7 @@ impl Session {
             wire,
             channels: BTreeMap::new(),
             poisoned: None,
+            notifications: VecDeque::new(),
             profile,
         };
         s.handshake()?;
@@ -775,31 +799,28 @@ impl Session {
     /// A completion names only its transaction, and transactions are counted
     /// per channel from the same 1000, so a completion owed to another
     /// channel's request can carry this one's number. Notifications already
-    /// waiting when the request goes out cannot be about it, and are set
-    /// aside before it is sent rather than read as its completion.
+    /// waiting when the request goes out cannot be about it: they are queued
+    /// before it is sent, and only what arrives after is searched.
     fn command_deferred(&mut self, id: ChannelId, opcode: i64, args: Value) -> Result<()> {
-        let (txn, status, _) = self.request_raw_after(id, opcode, args, Self::forget_events)?;
+        let (txn, status, _) =
+            self.request_raw_after(id, opcode, args, Self::collect_notifications)?;
         if !is_deferred(status)? {
             return Ok(()); // completed synchronously
         }
+        let earlier = self.notifications.len();
         let deadline = Instant::now() + Self::COMPLETION_BUDGET;
         while Instant::now() < deadline {
             let before = self.rx_bytes(id);
             self.read_available(Self::REPLY_READ)?;
             let got = self.rx_bytes(id) != before;
-            let messages = self
-                .channels
-                .get_mut(&ChannelId::EVENTS.device)
-                .map(|ch| ch.reader.take_messages())
-                .transpose()
-                .map_err(|error| Error::Protocol(error.to_string()))?
-                .unwrap_or_default();
-            let mut done = false;
-            for sm in messages {
-                if let Message::Notification { args, .. } = decode_message(sm.body)? {
-                    done |= completion_matches(&args, txn);
-                }
-            }
+            self.collect_notifications()?;
+            let completion = self
+                .notifications
+                .iter()
+                .skip(earlier)
+                .position(|(_, args)| completion_matches(args, txn));
+            let done =
+                completion.is_some_and(|at| self.notifications.remove(earlier + at).is_some());
             if got {
                 self.ack_channel(id)?;
             }
@@ -893,14 +914,21 @@ impl Session {
         self.request_raw_after(id, opcode, args, |_| Ok(()))
     }
 
-    /// Everything on the events channel so far, dropped unread. Only for just
-    /// before a deferred request is sent: see `command_deferred`.
-    fn forget_events(&mut self) -> Result<()> {
-        if let Some(events) = self.channels.get_mut(&ChannelId::EVENTS.device) {
-            events
+    /// Queue every notification read so far, for `poll_notifications`.
+    ///
+    /// Run just before a deferred request is sent too: what is queued by then
+    /// cannot be its completion (see `command_deferred`).
+    fn collect_notifications(&mut self) -> Result<()> {
+        for channel in self.channels.values_mut() {
+            for sm in channel
                 .reader
                 .take_messages()
-                .map_err(|error| Error::Protocol(error.to_string()))?;
+                .map_err(|error| Error::Protocol(error.to_string()))?
+            {
+                if let Message::Notification { event, args } = decode_message(sm.body)? {
+                    self.notifications.push_back((event, args));
+                }
+            }
         }
         Ok(())
     }
@@ -952,32 +980,39 @@ impl Session {
                 .transpose()
                 .map_err(|error| Error::Protocol(error.to_string()))?
                 .unwrap_or_default();
+            // What came with the answer is kept too: a notification read here
+            // is queued as one read anywhere else is.
+            let mut answer = None;
             for sm in ready {
-                if let Message::Response {
-                    txn: t,
-                    status,
-                    result,
-                } = decode_message(sm.body)?
-                {
-                    if t == txn {
-                        // Key 103 is not a plain error code. A successful
-                        // select-preset answers with 1 and a nil result, while
-                        // a preset read answers with 0 and a blob - HX Edit
-                        // sees the same values. Since no value is known to mean
-                        // failure, the status is reported rather than judged.
-                        // 0 is done and 1 is accepted-completes-later; 255 is
-                        // the device refusing, with a signed error code under
-                        // key 111 (-3 bad reference, -46 bad snapshot, -302
-                        // unknown model - the map is in PROTOCOL.md). Statuses
-                        // were unjudged for a long time because every value HX
-                        // Edit's own traffic shows is 0 or 1; the refusals only
-                        // appeared once we sent deliberately bad requests.
-                        if status == 255 {
-                            return Err(Error::Device(refusal_code(&result)?));
-                        }
-                        return Ok((txn, status, result));
+                match decode_message(sm.body)? {
+                    Message::Response {
+                        txn: t,
+                        status,
+                        result,
+                    } if t == txn && answer.is_none() => answer = Some((status, result)),
+                    Message::Notification { event, args } => {
+                        self.notifications.push_back((event, args))
                     }
+                    _ => {}
                 }
+            }
+            if let Some((status, result)) = answer {
+                // Key 103 is not a plain error code. A successful
+                // select-preset answers with 1 and a nil result, while
+                // a preset read answers with 0 and a blob - HX Edit
+                // sees the same values. Since no value is known to mean
+                // failure, the status is reported rather than judged.
+                // 0 is done and 1 is accepted-completes-later; 255 is
+                // the device refusing, with a signed error code under
+                // key 111 (-3 bad reference, -46 bad snapshot, -302
+                // unknown model - the map is in PROTOCOL.md). Statuses
+                // were unjudged for a long time because every value HX
+                // Edit's own traffic shows is 0 or 1; the refusals only
+                // appeared once we sent deliberately bad requests.
+                if status == 255 {
+                    return Err(Error::Device(refusal_code(&result)?));
+                }
+                return Ok((txn, status, result));
             }
             // Large results arrive in 256-byte chunks, and each one is released
             // by acknowledging the bytes already received.
@@ -991,20 +1026,24 @@ impl Session {
         Err(Error::Timeout(txn))
     }
 
-    /// Read whatever the device is holding, without waiting for more.
+    /// Read whatever the device has sent, without waiting for more.
     ///
     /// Bounded: a device that never stops talking must not stop us working.
-    fn drain_pending(&mut self, busy: ChannelId) -> Result<()> {
+    fn read_arrived(&mut self) -> Result<()> {
         const BUDGET: Duration = Duration::from_millis(60);
         let deadline = Instant::now() + BUDGET;
         while Instant::now() < deadline {
-            match self.read_available(Duration::from_millis(5)) {
-                Ok(Some(_)) => {}
-                // Nothing there, or nothing more: either way we are current.
-                Ok(None) => break,
-                Err(error) => return Err(error),
+            // Nothing there, or nothing more: either way we are current.
+            if self.read_available(Duration::from_millis(5))?.is_none() {
+                break;
             }
         }
+        Ok(())
+    }
+
+    /// Read whatever the device is holding, and acknowledge it.
+    fn drain_pending(&mut self, busy: ChannelId) -> Result<()> {
+        self.read_arrived()?;
         // Whatever arrived on a channel nobody is waiting on still has to be
         // acknowledged, or the device keeps counting it against us.
         // The first frame of the request about to be sent carries the busy
@@ -1135,10 +1174,11 @@ impl Session {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             // Every switch streams notifications, and a browse through a
-            // setlist streams a flood of them; drained here, they cannot
-            // back the control channel up. The keepalive feeds the channels
-            // the storm is not using, because the device drops quiet ones.
-            if let Err(error) = self.poll_notifications() {
+            // setlist streams a flood of them; taken in here, they cannot
+            // back the control channel up, and they wait for the caller's
+            // next poll. The keepalive feeds the channels the storm is not
+            // using, because the device drops quiet ones.
+            if let Err(error) = self.take_in_notifications() {
                 self.poisoned = Some(format!(
                     "the session was lost while switching to preset {index}: {error}"
                 ));

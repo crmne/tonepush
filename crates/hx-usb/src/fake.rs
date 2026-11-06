@@ -111,10 +111,13 @@ impl Pedal {
 
     /// Say something unasked, on the events channel.
     pub fn notify(&mut self, event: i64, args: Value) {
-        self.reply(
-            ChannelId::EVENTS.device,
-            &Message::Notification { event, args },
-        );
+        self.notify_on(ChannelId::EVENTS, event, args);
+    }
+
+    /// Say something unasked on another channel, as no pedal has been seen
+    /// to do.
+    pub fn notify_on(&mut self, channel: ChannelId, event: i64, args: Value) {
+        self.reply(channel.device, &Message::Notification { event, args });
     }
 
     fn receive(&mut self, bytes: &[u8]) {
