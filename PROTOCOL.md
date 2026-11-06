@@ -127,6 +127,19 @@ received bytes while nobody was waiting on it, moved this from failing on the
 third preset-document write to comfortably past ten. Measured on an HX Stomp
 running 3.80.
 
+**What the device holds back, it garbles. [confirmed]** Draining before each
+request still left the device nowhere to write between polls: one read was
+posted, and posted again only when the next poll asked for it. An HX Stomp
+(3.80) ticks on the events channel every 75 ms, and polled every 700 ms it fell
+behind by seconds and packed what it held into frames of four to eight
+notifications with their bytes out of order: a frame starting four bytes into a
+stream prefix, four-byte fragments of a tick between whole ones, sequence numbers
+unbroken throughout. Read as a stream, a body byte became a length (`stream
+message declares 1779853698 bytes`) and the session ended, within ten seconds in
+every capture. Acknowledged at once, the same ticks came one 21-byte frame each.
+Reads now stay posted eight deep for as long as the interface is held, a poll
+takes all that has arrived, and the editor listens every 50 ms.
+
 **The events channel needs ACK frames, not keep-alives. [confirmed]** The device
 sends at most 4 KB of notifications that have not been acknowledged by an ACK frame
 (type 0x08), then stops sending on channel `0x1002` and stays silent, across new

@@ -1204,15 +1204,19 @@ fn restore(session: &mut hx_usb::Session, file: &std::path::Path) -> Result<()> 
 
 fn watch(session: &mut hx_usb::Session) -> Result<()> {
     println!("watching for device notifications; ctrl-c to stop");
+    let mut fed = std::time::Instant::now();
     loop {
         for (event, args) in session.poll_notifications()? {
             println!("event {event}: {args:?}");
         }
-        // Polling returns after 20ms, so without this we would keep-alive all
-        // three channels fifty times a second. Hammering the endpoint is what
-        // wedged the device during development.
-        std::thread::sleep(std::time::Duration::from_millis(700));
-        session.keepalive()?;
+        // Heard out often, as HX Edit does, so the pedal never holds anything
+        // back; kept alive far less often, because hammering the endpoint
+        // with keep-alives is what wedged it during development.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if fed.elapsed() > std::time::Duration::from_millis(700) {
+            fed = std::time::Instant::now();
+            session.keepalive()?;
+        }
     }
 }
 

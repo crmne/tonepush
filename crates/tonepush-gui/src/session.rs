@@ -662,9 +662,9 @@ impl Worker {
     }
 
     fn run(mut self) {
-        let mut last_poll = Instant::now();
+        let mut fed = Instant::now();
         loop {
-            match self.cmds.recv_timeout(Duration::from_millis(120)) {
+            match self.cmds.recv_timeout(Self::LISTEN) {
                 Ok(cmd) => {
                     let (cmd, follow_up) = self.gather(cmd);
                     // Bracket the work so the UI can say the device is being
@@ -683,15 +683,23 @@ impl Worker {
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
 
-            // The device drops idle sessions, and it pushes front-panel
-            // activity between our requests, so keep it fed and drain what it
-            // sent.
-            if last_poll.elapsed() > Duration::from_millis(700) {
-                last_poll = Instant::now();
-                self.poll();
+            // The device pushes front-panel activity between our requests,
+            // and drops sessions that go quiet: hear it out often, and keep
+            // it fed.
+            self.poll();
+            if fed.elapsed() > Self::KEEP_ALIVE {
+                fed = Instant::now();
+                self.keep_alive();
             }
         }
     }
+
+    /// How long the worker waits for a request before listening to the
+    /// pedal again. HX Edit answers each notification within about 50 ms,
+    /// so a footswitch shows as it is pressed.
+    const LISTEN: Duration = Duration::from_millis(50);
+    /// How often every channel is sent a keep-alive.
+    const KEEP_ALIVE: Duration = Duration::from_millis(700);
 
     /// Collapse a run of the same kind of request into its last one.
     ///
@@ -2325,6 +2333,16 @@ impl Worker {
         });
     }
 
+    fn keep_alive(&mut self) {
+        let Some(device) = self.device.as_mut() else {
+            return;
+        };
+        if let Err(e) = device.keepalive() {
+            self.send(Evt::Failed(e.to_string()));
+            self.let_go();
+        }
+    }
+
     fn poll(&mut self) {
         let mut look = std::mem::take(&mut self.recheck);
         let Some(device) = self.device.as_mut() else {
@@ -2346,7 +2364,7 @@ impl Worker {
         // An idle read timeout is already represented as `Ok(None)`. Anything
         // that reaches this error arm is transport or protocol loss, and the
         // next poll cannot safely reuse the session's sequence state.
-        if let Err(e) = polled.map(|_| ()).and_then(|_| device.keepalive()) {
+        if let Err(e) = polled {
             self.send(Evt::Failed(e.to_string()));
             return self.let_go();
         }
