@@ -314,6 +314,27 @@ broadcast it. A client that also renders the signal chain will see its own edits
 back and must not treat them as external changes without comparing values.
 **[confirmed]**
 
+The pedal's own controls are announced in the same vocabulary, so nothing in a
+notification says who made the change. A footswitch on an HX Stomp in stomp mode sends
+event 41 for its light, then the block it drives:
+
+```
+<-- ev41 {70: 0, 63: False, 66: 67840}                               # FS1, light 0x010900
+<-- ev49 {82: 0, 68: 5, 121: 17, 106: {98: 6, 59: False}}            # block 6 off
+<-- ev41 {70: 0, 63: True, 66: 458496}                               # light 0x06FF00
+<-- ev49 {82: 0, 68: 5, 121: 17, 106: {98: 6, 59: True}}             # block 6 on
+```
+
+Key 70 is the zero-based footswitch, 63 its new state and 66 its light as `0xRRGGBB`;
+the event 49 after it already says everything about the preset. **[confirmed on an HX
+Stomp, 3.80]** A knob under the screen sends event 30 with the same arguments opcode 30
+takes, and on an amp with a cab key 26 is 1 for the cab's parameters; a tap sends event 22
+for object 16. **[from [fretwire](https://github.com/john-baxter-dev/fretwire)'s
+`docs/protocol.md`, not yet captured here]** TonePush shows a change it can place
+from the notification alone, reads the preset again for one it cannot (event 49 tag 10,
+a cab's parameter, an event never seen), and tells its own edits coming back apart by
+the values it sent.
+
 ### 3.2 Notification 22 / (0, 9, 25) - object changed
 
 Loading a preset produced three of these:

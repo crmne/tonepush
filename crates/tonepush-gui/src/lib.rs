@@ -1886,6 +1886,7 @@ impl App {
                 }
                 Ok(Evt::CapturedSetlist(slots)) => self.keep_setlist(slots, "hxpreset"),
                 Ok(Evt::Switches(switches)) => self.switches = switches,
+                Ok(Evt::Changed(change)) => change.apply(&mut self.chain, &mut self.tempo),
                 Ok(Evt::Activity(line)) => self.note(line),
                 Ok(Evt::Failed(e)) => {
                     self.status = if self.connection == Connection::Connecting {
