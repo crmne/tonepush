@@ -22,6 +22,19 @@ pub(crate) fn destination(from: i64, before: i64) -> i64 {
     }
 }
 
+/// Where the preset in `slot` is once the one in `from` has moved to `to`.
+pub(crate) fn moved(slot: i64, from: i64, to: i64) -> i64 {
+    if slot == from {
+        to
+    } else if from < to && (from + 1..=to).contains(&slot) {
+        slot - 1
+    } else if to < from && (to..from).contains(&slot) {
+        slot + 1
+    } else {
+        slot
+    }
+}
+
 impl App {
     /// Whether the connected pedal moves presets itself.
     pub(crate) fn moves_presets(&self) -> bool {
@@ -40,6 +53,17 @@ impl App {
         }
         if let Some(why) = self.put_refusal() {
             return Outcome::refuses(why);
+        }
+        // The pedal keeps the same slot loaded through a move, so the preset
+        // playing is loaded again where it went - and changes not saved
+        // would be lost with that.
+        if let Some(loaded) = self.loaded_in_view() {
+            if self.dirty && moved(loaded, from, to) != loaded {
+                return Outcome::refuses(format!(
+                    "{} has changes not saved: save it first",
+                    self.active_slot_label(loaded)
+                ));
+            }
         }
         let between = (to - from).abs();
         let shift = if from < to { "up" } else { "down" };
@@ -85,6 +109,30 @@ mod tests {
         // Either gap beside it leaves it where it is.
         assert_eq!(destination(5, 5), 5);
         assert_eq!(destination(5, 6), 5);
+    }
+
+    #[test]
+    fn the_presets_outside_the_move_stay_put() {
+        assert_eq!(moved(0, 3, 9), 0);
+        assert_eq!(moved(10, 3, 9), 10);
+        assert_eq!(moved(9, 3, 9), 8);
+        assert_eq!(moved(3, 9, 3), 4);
+        assert_eq!(moved(3, 3, 9), 9);
+    }
+
+    /// A move that would shift the preset playing waits for its changes to
+    /// be saved: the preset is loaded again where it went.
+    #[test]
+    fn a_move_shifting_unsaved_changes_asks_for_a_save() {
+        let (mut app, _) = app("Helix Floor");
+        app.preset_index = 3;
+        app.loaded_setlist = app.setlist;
+        app.dirty = true;
+        assert!(app.reorder_outcome(1, 6).is_some_and(|o| o.refused));
+        // One that leaves it where it is goes ahead.
+        assert!(app.reorder_outcome(5, 7).is_some_and(|o| !o.refused));
+        app.dirty = false;
+        assert!(app.reorder_outcome(1, 6).is_some_and(|o| !o.refused));
     }
 
     fn app(device: &str) -> (App, mpsc::Receiver<Cmd>) {

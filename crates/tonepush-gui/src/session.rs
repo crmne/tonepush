@@ -2226,6 +2226,19 @@ impl Worker {
     /// current, and follow the preset that is playing if it moved.
     fn move_preset(&mut self, from: i64, to: i64) {
         let setlist = self.setlist;
+        // The preset playing, if the move shifts it. The pedal keeps the same
+        // slot loaded through a move, which then holds another preset: the
+        // editor would show that one's slot over this one's sound, and a save
+        // would write this one over it. So it is loaded again where it went,
+        // which needs its changes saved first.
+        let shifted = (self.shown.setlist == setlist)
+            .then_some(self.shown.index)
+            .filter(|&loaded| crate::reorder::moved(loaded, from, to) != loaded);
+        if shifted.is_some() && self.dirty {
+            return self.send(Evt::Failed(
+                "the preset playing would move with changes not saved: save it first".into(),
+            ));
+        }
         if !self.run_on_device(|d| d.move_preset(setlist, from, to)) {
             return;
         }
@@ -2235,7 +2248,14 @@ impl Worker {
         for index in from.min(to)..=from.max(to) {
             self.back_up_one(setlist, index);
         }
-        self.follow_preset();
+        match shifted {
+            Some(loaded) => {
+                self.select(crate::reorder::moved(loaded, from, to));
+            }
+            None => {
+                self.follow_preset();
+            }
+        }
         let (from_label, to_label) = (self.slot_label(from), self.slot_label(to));
         self.send(Evt::Activity(format!("moved {from_label} to {to_label}")));
     }
