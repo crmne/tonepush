@@ -706,9 +706,9 @@ impl Session {
     const WINDOW_WAIT: Duration = Duration::from_secs(3);
     /// Each read while waiting for the window.
     const WINDOW_READ: Duration = Duration::from_millis(20);
-    /// The read between chunks when there is no acknowledgement to measure
-    /// the window from.
-    const WINDOW_FALLBACK: Duration = Duration::from_millis(80);
+    /// The read between chunks without the window, or with nothing to
+    /// measure it from, letting the device's acknowledgements through.
+    const BETWEEN_CHUNKS: Duration = Duration::from_millis(80);
 
     /// Bytes of stream data per frame.
     ///
@@ -772,15 +772,21 @@ impl Session {
             self.mark_acknowledged(id);
 
             // Keep a long send inside the device's receive window, as HX Edit
-            // does. Sent past it - a chunk whenever anything arrived, or after
-            // a short wait - a Helix Floor (3.80) froze part-way through a
-            // preset write: in every one of six freezes, 1.2 to 2.5 KB were
-            // unacknowledged, while writes kept to about 512 bytes landed.
-            // Writing a whole impulse response blind stalls the endpoint the
-            // same way. One chunk needs none of this, so skip it there.
+            // does, where the profile says so. Sent past it - a chunk whenever
+            // anything arrived, or after a short wait - a Helix Floor (3.80)
+            // froze part-way through a preset write: in every one of six
+            // freezes, 1.2 to 2.5 KB were unacknowledged, while writes kept to
+            // about 512 bytes landed. Elsewhere a chunk follows a short read,
+            // which lets acknowledgements through: writing a whole impulse
+            // response blind stalls the endpoint. One chunk needs none of
+            // this, so skip it there.
             sent = sent.wrapping_add(chunk.len() as u32);
             if let Some(next) = chunks.get(n + 1) {
-                self.await_window(id, start, sent, next.len() as u32)?;
+                if self.profile.keeps_send_window {
+                    self.await_window(id, start, sent, next.len() as u32)?;
+                } else {
+                    self.read_available(Self::BETWEEN_CHUNKS)?;
+                }
             }
         }
         Ok(())
@@ -806,7 +812,7 @@ impl Session {
             // this channel when the message began. Every channel is
             // acknowledged while the session opens, so this is a bare fallback
             // to reading between chunks, as before there was a window.
-            self.read_available(Self::WINDOW_FALLBACK)?;
+            self.read_available(Self::BETWEEN_CHUNKS)?;
             return Ok(());
         };
         let deadline = Instant::now() + Self::WINDOW_WAIT;
@@ -1709,13 +1715,13 @@ mod tests {
         );
     }
 
-    /// A long message never runs past the device's 512-byte receive window:
-    /// when the acknowledgements stop, so does the sending. Sent past it, a
-    /// Helix Floor froze part-way through preset writes.
+    /// On a Helix Floor a long message never runs past the device's 512-byte
+    /// receive window: when the acknowledgements stop, so does the sending.
+    /// Sent past it, a Floor froze part-way through preset writes.
     #[test]
-    fn a_long_send_waits_for_the_window() {
+    fn a_floors_long_send_waits_for_the_window() {
         let pedal = fake::Pedal::new();
-        let mut session = fake::session(&pedal);
+        let mut session = fake::session_as(&pedal, hx_proto::HELIX_FLOOR);
         let preset = session.read_preset().unwrap();
         assert!(preset.encode().len() > 4 * Session::CHUNK, "several chunks");
         let before = {
@@ -1768,6 +1774,27 @@ mod tests {
             "the Floor took the announcement itself, without asking"
         );
         assert_eq!(announced_after(hx_proto::HX_STOMP), (true, false));
+    }
+
+    /// A device whose profile does not keep the window sends a long message
+    /// as before, a chunk after each short read, acknowledged or not.
+    #[test]
+    fn an_hx_stomp_sends_as_before() {
+        let pedal = fake::Pedal::new();
+        let mut session = fake::session(&pedal);
+        assert!(!session.profile.keeps_send_window);
+        let preset = session.read_preset().unwrap();
+        let chunks = preset.encode().len() / Session::CHUNK;
+        let before = {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.withholds_acks = true;
+            pedal.frames_in
+        };
+
+        session.write_preset(&preset).expect("the write lands");
+
+        let sent = pedal.lock().unwrap().frames_in - before;
+        assert!(sent >= chunks, "{sent} of {chunks} chunks went out");
     }
 
     /// A timed-out write may or may not have reached the device, even one

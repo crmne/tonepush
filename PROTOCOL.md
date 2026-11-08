@@ -151,6 +151,8 @@ arrives, or after a short wait, can run past that. A Helix Floor (3.80) froze
 part-way through six preset writes sent that way, answering nothing on any
 channel until power cycled, and in every one of the six, 1.2 to 2.5 KB were
 unacknowledged; writes that happened to stay within about 512 bytes landed.
+Only the Floor's profile keeps the window so far; the other devices send a
+chunk after each short read, as before, until someone measures them.
 
 **Idle channels need keep-alives during long reads. [confirmed]** A Helix Floor
 (3.80) probes a channel that has carried no traffic with keep-alive frames
