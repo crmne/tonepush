@@ -241,6 +241,9 @@ pub struct Session {
     /// session refuses further work and says why.
     poisoned: Option<String>,
     pub profile: DeviceProfile,
+    /// A pause between the chunks of the message being sent, for the one
+    /// write that needs it: see [`DeviceProfile::slot_write_pause`].
+    chunk_pause: Option<Duration>,
 }
 
 /// The raw byte transport beneath the frame protocol.
@@ -437,6 +440,7 @@ impl Session {
             channels: BTreeMap::new(),
             poisoned: None,
             profile,
+            chunk_pause: None,
         };
         s.handshake()?;
         // A handshake can complete and the session still be deaf: the device
@@ -756,6 +760,10 @@ impl Session {
             // the same way. One chunk needs none of this, so skip it there.
             if n + 1 < chunks.len() {
                 self.read_available(Self::BETWEEN_CHUNKS)?;
+                if let Some(pause) = self.chunk_pause {
+                    std::thread::sleep(pause);
+                    self.read_available(Duration::from_millis(1))?;
+                }
             }
         }
         Ok(())
@@ -1239,7 +1247,10 @@ impl Session {
         non_negative(setlist, "setlist")?;
         preset_index(&self.profile, index)?;
         let document = validated_preset_document(preset)?;
-        self.request(
+        // The device starts on the slot as soon as the first chunk is in, and
+        // a Floor sent the rest at full speed can stop taking it for good.
+        self.chunk_pause = self.profile.slot_write_pause;
+        let sent = self.request(
             ChannelId::DATA,
             rpc::op::WRITE_SLOT_NAMED,
             hx_proto::msgmap! {
@@ -1248,7 +1259,9 @@ impl Session {
                 rpc::key::NAME => Value::Str(name.to_owned()),
                 rpc::key::DOCUMENT => Value::Bin(document, 2),
             },
-        )?;
+        );
+        self.chunk_pause = None;
+        sent?;
         self.settle_flash();
         Ok(())
     }
@@ -1618,6 +1631,34 @@ mod tests {
             Some(&rpc::op::PRESET_INFO),
             "{opcodes:?}"
         );
+    }
+
+    /// A Floor's slot write pauses between chunks; an HX Stomp's goes at full
+    /// speed, as before. Sent at full speed, a Floor froze part-way through
+    /// about one write in four.
+    #[test]
+    fn a_floor_paces_its_slot_writes() {
+        let write = |profile: hx_proto::DeviceProfile| {
+            let pedal = fake::Pedal::new();
+            let mut session = fake::session_as(&pedal, profile);
+            let preset = session.read_preset().unwrap();
+            let start = std::time::Instant::now();
+            session
+                .write_preset_at(3, 2, "Copy", &preset)
+                .expect("the write lands");
+            (start.elapsed(), preset.encode().len())
+        };
+        let (stomp, _) = write(hx_proto::HX_STOMP);
+        let (floor, size) = write(hx_proto::HELIX_FLOOR);
+        let pause = hx_proto::HELIX_FLOOR.slot_write_pause.unwrap();
+        let chunks = size / Session::CHUNK;
+        assert!(chunks > 4, "a document of several chunks: {size} bytes");
+        let paused = pause * (chunks as u32 - 1);
+        assert!(
+            floor >= stomp + paused,
+            "the Floor took {floor:?}, the Stomp {stomp:?}, with {chunks} chunks"
+        );
+        assert_eq!(hx_proto::HX_STOMP.slot_write_pause, None);
     }
 
     /// A timed-out write may or may not have reached the device, even one

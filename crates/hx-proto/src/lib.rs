@@ -82,6 +82,12 @@ pub struct DeviceProfile {
     /// Without it an HX Stomp (3.80) stays on "transferring data" after the
     /// read, even once the session has closed. Unmeasured elsewhere.
     pub closes_ir_reads: bool,
+    /// A pause between the chunks of a preset written straight into a slot,
+    /// where the device needs one. Sent at full speed, a Helix Floor (3.80)
+    /// stopped taking a slot write part-way through about one time in four
+    /// and answered nothing more until it was power cycled; with 20 ms
+    /// between chunks, 40 writes in a row landed. `None` sends at full speed.
+    pub slot_write_pause: Option<std::time::Duration>,
 }
 
 impl DeviceProfile {
@@ -107,6 +113,7 @@ pub const HX_STOMP: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: true,
+    slot_write_pause: None,
 };
 pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     product_id: 0x4253,
@@ -119,6 +126,7 @@ pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    slot_write_pause: None,
 };
 pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     product_id: 0x4248,
@@ -138,6 +146,7 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     dsp_budget: Some(7500),
     controls: rpc::ControlLayout::Helix,
     closes_ir_reads: false,
+    slot_write_pause: Some(std::time::Duration::from_millis(20)),
 };
 pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     product_id: 0x4249,
@@ -150,6 +159,7 @@ pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    slot_write_pause: None,
 };
 pub const HELIX_LT: DeviceProfile = DeviceProfile {
     product_id: 0x424A,
@@ -162,6 +172,7 @@ pub const HELIX_LT: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    slot_write_pause: None,
 };
 pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     product_id: 0x4245,
@@ -174,6 +185,7 @@ pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    slot_write_pause: None,
 };
 
 /// Every device profile we recognise.

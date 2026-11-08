@@ -797,6 +797,19 @@ upload's opcode 9 does: it was still on that screen after a backup had finished
 and its session closed, and an END after each read cleared it. Other devices
 are unmeasured, so only the Stomp's profile closes its reads.
 
+**A slot write needs pacing on a Helix Floor. [confirmed on a Helix Floor]**
+Opcode 8 answers status 1 within about 8 ms, after the first few of its 256-byte
+chunks: the device starts on the slot while the rest of the document is still
+arriving. A Helix Floor (3.80) sent those chunks at full speed, each as soon as
+the last was acknowledged, stopped acknowledging part-way through 5 of 19
+writes, at a different chunk each time, and then answered nothing on any
+channel until it was power cycled. It happened from the editor and from a
+program that did nothing but write, with or without HX Edit's keys 123 to 125
+and with or without waiting for each write's commit. With 20 ms between chunks,
+40 writes in a row landed, about 1.6 s each. The commit itself is announced
+later as notification 1 carrying the write's transaction, 1.5 to 3 s after the
+write began, along with notification 6 naming the slot and its new name.
+
 ### Writing a preset document back [confirmed]
 
 Opcode 21 takes a whole preset document. It is unforgiving: the preset carries a
