@@ -354,13 +354,27 @@ impl Session {
     }
 
     /// One read of an IR slot, closed with END where the profile says so.
+    ///
+    /// A refused read is closed too: the refusal is a whole answer and the
+    /// session goes on, so the device is still in the transfer the read
+    /// began. A failure that loses the session sends nothing more; the next
+    /// session's first IR work opens with the bootstrap's END, which closes
+    /// it then.
     fn read_ir_part(&mut self, opcode: i64, args: Value) -> Result<Value> {
         self.bootstrap()?;
-        let reply = self.request(ChannelId::CONTROL, opcode, args)?;
-        if self.profile.closes_ir_reads {
-            self.command(ChannelId::CONTROL, rpc::op::END, hx_proto::msgmap! {})?;
+        let reply = self.request(ChannelId::CONTROL, opcode, args);
+        let usable = reply
+            .as_ref()
+            .err()
+            .is_none_or(|error| !error.loses_session());
+        if self.profile.closes_ir_reads && usable {
+            let ended = self.command(ChannelId::CONTROL, rpc::op::END, hx_proto::msgmap! {});
+            // The read's own error says more than a failed END after it.
+            if reply.is_ok() {
+                ended?;
+            }
         }
-        Ok(reply)
+        reply
     }
 
     /// Rename an impulse response slot, leaving its samples alone.
@@ -1922,16 +1936,70 @@ mod pedal_tests {
                 read(&mut session).unwrap_or_else(|e| panic!("{} {what}: {e}", profile.name));
 
                 let opcodes = pedal.lock().unwrap().opcodes();
-                let begun = opcodes.iter().rposition(|&o| o == rpc::op::BEGIN);
-                let ended = opcodes.iter().rposition(|&o| o == rpc::op::END);
-                let closed = matches!((begun, ended), (Some(b), Some(e)) if e > b);
                 assert_eq!(
-                    closed, profile.closes_ir_reads,
+                    closed_after_read(&opcodes),
+                    profile.closes_ir_reads,
                     "{} {what}: {opcodes:?}",
                     profile.name
                 );
             }
         }
+    }
+
+    /// Whether an END follows the last IR read. The bootstrap's own END
+    /// comes before its BEGIN and the read, so it does not count.
+    fn closed_after_read(opcodes: &[i64]) -> bool {
+        let read = opcodes
+            .iter()
+            .rposition(|&o| o == rpc::op::IR_DESCRIPTOR || o == rpc::op::IR_SAMPLES);
+        let ended = opcodes.iter().rposition(|&o| o == rpc::op::END);
+        matches!((read, ended), (Some(r), Some(e)) if e > r)
+    }
+
+    /// A refused read is a whole answer and the session goes on, so it is
+    /// closed like any other: otherwise the transfer screen stays up.
+    #[test]
+    fn a_refused_ir_read_is_closed_too() {
+        let pedal = Pedal::new();
+        pedal
+            .lock()
+            .unwrap()
+            .refuses
+            .insert(rpc::op::IR_DESCRIPTOR, -3);
+        let mut session = fake::session_as(&pedal, hx_proto::HELIX_FLOOR);
+
+        assert!(matches!(session.ir_descriptor(2), Err(Error::Device(-3))));
+
+        let opcodes = pedal.lock().unwrap().opcodes();
+        assert!(closed_after_read(&opcodes), "{opcodes:?}");
+    }
+
+    /// A read that loses the session sends nothing after it, END included:
+    /// the next session's bootstrap opens with END instead.
+    #[test]
+    fn a_read_that_loses_the_session_sends_nothing_more() {
+        let pedal = Pedal::new();
+        let mut session = fake::session_as(&pedal, hx_proto::HELIX_FLOOR);
+        pedal.lock().unwrap().garbles = Some(rpc::op::IR_DESCRIPTOR);
+
+        let error = session
+            .ir_descriptor(2)
+            .expect_err("a reply that cannot be read");
+        assert!(error.loses_session(), "{error}");
+
+        let pedal = pedal.lock().unwrap();
+        let read = pedal
+            .requests
+            .iter()
+            .rposition(|(_, _, o, _)| *o == rpc::op::IR_DESCRIPTOR)
+            .unwrap();
+        assert!(
+            pedal.requests[read + 1..]
+                .iter()
+                .all(|(_, _, o, _)| *o != rpc::op::END),
+            "no END after the failed read: {:?}",
+            pedal.opcodes()
+        );
     }
 
     /// A slot that is empty, or holds another name, shows the upload by

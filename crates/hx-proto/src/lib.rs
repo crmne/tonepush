@@ -199,6 +199,14 @@ pub fn profile_for(product_id: u16) -> Option<&'static DeviceProfile> {
 mod tests {
     use super::*;
 
+    /// A Helix Floor (3.80) shows "Transferring data" under its signal chain
+    /// after an IR read left open, until a preset is loaded: measured on the
+    /// pedal with the read closed and left open.
+    #[test]
+    fn a_helix_floor_closes_its_ir_reads() {
+        assert!(HELIX_FLOOR.closes_ir_reads);
+    }
+
     #[test]
     fn every_hx_edit_device_is_recognised_by_its_usb_product_id() {
         let expected = [

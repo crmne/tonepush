@@ -36,6 +36,11 @@ pub struct Pedal {
     /// How many more questions about IRs are answered from the old contents
     /// before an accepted upload lands.
     pub ir_delay: usize,
+    /// Opcodes the pedal refuses, with the error code it answers.
+    pub refuses: BTreeMap<i64, i64>,
+    /// An opcode the pedal answers with a reply that cannot be read: a
+    /// refusal without its error code.
+    pub garbles: Option<i64>,
     /// Every request received, as `(channel, transaction, opcode, arguments)`.
     pub requests: Vec<(u16, i64, i64, Value)>,
     /// Transfers waiting for the host to read.
@@ -77,6 +82,8 @@ impl Pedal {
             irs: BTreeMap::new(),
             writing_ir: None,
             ir_delay: 0,
+            refuses: BTreeMap::new(),
+            garbles: None,
             requests: Vec::new(),
             outbox: VecDeque::new(),
             fail_reads_after_data: None,
@@ -180,6 +187,15 @@ impl Pedal {
 
     fn answer(&mut self, opcode: i64, args: &Value) -> (i64, Value) {
         let number = |k| args.get(k).and_then(Value::as_i64).unwrap_or_default();
+        if self.garbles == Some(opcode) {
+            return (255, hx_proto::msgmap! {});
+        }
+        if let Some(code) = self.refuses.get(&opcode) {
+            return (
+                255,
+                hx_proto::msgmap! { key::ERROR_CODE => Value::Int(*code) },
+            );
+        }
         match opcode {
             op::PRESET_INFO => (
                 0,
