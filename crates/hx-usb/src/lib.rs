@@ -775,6 +775,21 @@ impl Session {
     /// as the first of them is on the wire.
     fn send_chunks(&mut self, id: ChannelId, chunks: &[&[u8]], started: &mut bool) -> Result<()> {
         for (n, chunk) in chunks.iter().enumerate() {
+            // Keep every chunk inside the device's receive window, as HX Edit
+            // does, where the profile says so - the first one too, since an
+            // earlier message may still have bytes unacknowledged. Sent past
+            // it - a chunk whenever anything arrived, or after a short wait - a
+            // Helix Floor (3.80) froze part-way through a preset write: in
+            // every one of six freezes, 1.2 to 2.5 KB were unacknowledged,
+            // while writes kept to about 512 bytes landed. Elsewhere a chunk
+            // after the first follows a short read, which lets
+            // acknowledgements through: writing a whole impulse response blind
+            // stalls the endpoint.
+            if self.profile.keeps_send_window {
+                self.await_window(id, chunk.len() as u32, n > 0)?;
+            } else if n > 0 {
+                self.read_available(Self::BETWEEN_CHUNKS)?;
+            }
             let (seq, ack) = self.tick(id)?;
             let mut payload = Vec::with_capacity(ChannelHeader::SIZE + chunk.len());
             ChannelHeader {
@@ -790,45 +805,32 @@ impl Session {
             if let Some(channel) = self.channels.get_mut(&id.device) {
                 channel.unacked = channel.unacked.saturating_add(chunk.len() as u32);
             }
-
-            // Keep a long send inside the device's receive window, as HX Edit
-            // does, where the profile says so. Sent past it - a chunk whenever
-            // anything arrived, or after a short wait - a Helix Floor (3.80)
-            // froze part-way through a preset write: in every one of six
-            // freezes, 1.2 to 2.5 KB were unacknowledged, while writes kept to
-            // about 512 bytes landed. Elsewhere a chunk follows a short read,
-            // which lets acknowledgements through: writing a whole impulse
-            // response blind stalls the endpoint. One chunk needs none of
-            // this, so skip it there.
-            if let Some(next) = chunks.get(n + 1) {
-                if self.profile.keeps_send_window {
-                    self.await_window(id, next.len() as u32)?;
-                } else {
-                    self.read_available(Self::BETWEEN_CHUNKS)?;
-                }
-            }
         }
         Ok(())
     }
 
     /// Wait until `next` more bytes fit in the device's window: what is
     /// unacknowledged on the channel, from this message or one before it,
-    /// plus `next` must not pass [`WINDOW`](Self::WINDOW).
+    /// plus `next` must not pass [`WINDOW`](Self::WINDOW). `between` says
+    /// the chunk follows another of the same message.
     ///
     /// The other channels are acknowledged as their bytes arrive meanwhile,
     /// as HX Edit does between the chunks of a write: a device that has sent
     /// 4 KB of notifications unacknowledged stops sending them for good.
-    fn await_window(&mut self, id: ChannelId, next: u32) -> Result<()> {
+    fn await_window(&mut self, id: ChannelId, next: u32, between: bool) -> Result<()> {
         let Some(channel) = self.channels.get(&id.device) else {
             return Ok(());
         };
         if channel.peer_acked.is_none() {
             // Nothing to count from: the device has acknowledged nothing on
-            // this channel. Every channel is acknowledged while the session
-            // opens, so this is a bare fallback to reading between chunks,
-            // as before there was a window.
-            self.read_available(Self::BETWEEN_CHUNKS)?;
-            return self.ack_idle_channels(id);
+            // this channel. That is only so while the session opens, before
+            // anything long is sent, so this is a bare fallback to reading
+            // between chunks, as before there was a window.
+            if between {
+                self.read_available(Self::BETWEEN_CHUNKS)?;
+                self.ack_idle_channels(id)?;
+            }
+            return Ok(());
         }
         let deadline = Instant::now() + Self::WINDOW_WAIT;
         loop {
@@ -1754,6 +1756,29 @@ mod tests {
         // The short request's bytes and one chunk fill all but a sliver of
         // the window, so the second chunk waits.
         assert_eq!(pedal.lock().unwrap().frames_in - before, 1);
+    }
+
+    /// A message whose first chunk would not fit beside what is still
+    /// unacknowledged waits too, and sends nothing if no room comes: the
+    /// window holds from the first chunk, not only between chunks.
+    #[test]
+    fn a_first_chunk_waits_for_room_too() {
+        let pedal = fake::Pedal::new();
+        let mut session = fake::session_as(&pedal, hx_proto::HELIX_FLOOR);
+        let preset = session.read_preset().unwrap();
+        pedal.lock().unwrap().withholds_acks = true;
+        // Short requests, answered but not acknowledged, until a whole chunk
+        // no longer fits beside them: twenty of 17 bytes.
+        for _ in 0..20 {
+            session.preset_info().expect("answered all the same");
+        }
+        let before = pedal.lock().unwrap().frames_in;
+
+        session
+            .write_preset(&preset)
+            .expect_err("no room for its first chunk");
+
+        assert_eq!(pedal.lock().unwrap().frames_in, before, "nothing went out");
     }
 
     /// Notifications arriving while a long send waits for the window are
