@@ -79,8 +79,9 @@ pub struct DeviceProfile {
     /// How the device numbers what can drive a parameter.
     pub controls: rpc::ControlLayout,
     /// Whether an impulse response read is closed with END, as an upload is.
-    /// Without it an HX Stomp (3.80) stays on "transferring data" after the
-    /// read, even once the session has closed. Unmeasured elsewhere.
+    /// Without it an HX Stomp or a Helix Floor (both 3.80) stays on
+    /// "transferring data" after the read, even once the session has closed.
+    /// Unmeasured elsewhere.
     pub closes_ir_reads: bool,
 }
 
@@ -137,7 +138,7 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     // path. The Rack and LT are likely the same, but nobody has measured.
     dsp_budget: Some(7500),
     controls: rpc::ControlLayout::Helix,
-    closes_ir_reads: false,
+    closes_ir_reads: true,
 };
 pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     product_id: 0x4249,
