@@ -843,11 +843,23 @@ impl Session {
     /// waiting when the request goes out cannot be about it, and are set
     /// aside before it is sent rather than read as its completion.
     fn command_deferred(&mut self, id: ChannelId, opcode: i64, args: Value) -> Result<()> {
+        self.command_deferred_within(id, opcode, args, Self::COMPLETION_BUDGET)
+    }
+
+    /// [`command_deferred`](Self::command_deferred), waiting up to `budget`
+    /// for the announcement before asking whether the device is free.
+    fn command_deferred_within(
+        &mut self,
+        id: ChannelId,
+        opcode: i64,
+        args: Value,
+        budget: Duration,
+    ) -> Result<()> {
         let (txn, status, _) = self.request_raw_after(id, opcode, args, Self::forget_events)?;
         if !is_deferred(status)? {
             return Ok(()); // completed synchronously
         }
-        let deadline = Instant::now() + Self::COMPLETION_BUDGET;
+        let deadline = Instant::now() + budget;
         while Instant::now() < deadline {
             let before = self.rx_bytes(id);
             self.read_available(Self::REPLY_READ)?;
@@ -913,6 +925,10 @@ impl Session {
     /// the readiness poll below is the better question to be asking. Waiting
     /// longer costs seconds on every preset change, which never announces.
     const COMPLETION_BUDGET: Duration = Duration::from_millis(900);
+
+    /// How long a slot write's commit may take to be announced, where the
+    /// profile waits for it: a Helix Floor took up to 2.9 s.
+    const SLOT_COMMIT_BUDGET: Duration = Duration::from_secs(5);
 
     /// Send a request whose reply carries nothing worth returning.
     ///
@@ -1304,16 +1320,24 @@ impl Session {
         non_negative(setlist, "setlist")?;
         preset_index(&self.profile, index)?;
         let document = validated_preset_document(preset)?;
-        self.request(
-            ChannelId::DATA,
-            rpc::op::WRITE_SLOT_NAMED,
-            hx_proto::msgmap! {
-                rpc::key::SETLIST => Value::Int(setlist),
-                rpc::key::PRESET_INDEX => Value::Int(index),
-                rpc::key::NAME => Value::Str(name.to_owned()),
-                rpc::key::DOCUMENT => Value::Bin(document, 2),
-            },
-        )?;
+        let args = hx_proto::msgmap! {
+            rpc::key::SETLIST => Value::Int(setlist),
+            rpc::key::PRESET_INDEX => Value::Int(index),
+            rpc::key::NAME => Value::Str(name.to_owned()),
+            rpc::key::DOCUMENT => Value::Bin(document, 2),
+        };
+        let sent = if self.profile.awaits_slot_commits {
+            self.command_deferred_within(
+                ChannelId::DATA,
+                rpc::op::WRITE_SLOT_NAMED,
+                args,
+                Self::SLOT_COMMIT_BUDGET,
+            )
+        } else {
+            self.request(ChannelId::DATA, rpc::op::WRITE_SLOT_NAMED, args)
+                .map(drop)
+        };
+        sent?;
         self.settle_flash();
         Ok(())
     }
@@ -1709,6 +1733,41 @@ mod tests {
             chunks * Session::CHUNK <= Session::WINDOW as usize,
             "{chunks} chunks went out unacknowledged: {error}"
         );
+    }
+
+    /// A Floor's slot write returns once the device has announced the commit,
+    /// so the next write cannot land on it; an HX Stomp's returns on the
+    /// reply, as before, and leaves the announcement for whoever polls next.
+    #[test]
+    fn a_floor_waits_for_each_slot_commit() {
+        let announced_after = |profile: hx_proto::DeviceProfile| {
+            let pedal = fake::Pedal::new();
+            let mut session = fake::session_as(&pedal, profile);
+            let preset = session.read_preset().unwrap();
+            {
+                let mut pedal = pedal.lock().unwrap();
+                pedal.defers_writes = true;
+                pedal.announces_commits = true;
+            }
+            session
+                .write_preset_at(3, 2, "Copy", &preset)
+                .expect("the write lands");
+            let left = session.poll_notifications().unwrap();
+            let asked_after = pedal
+                .lock()
+                .unwrap()
+                .opcodes()
+                .iter()
+                .skip_while(|&&o| o != rpc::op::WRITE_SLOT_NAMED)
+                .any(|&o| o == rpc::op::PRESET_INFO);
+            (left.iter().any(|(event, _)| *event == 1), asked_after)
+        };
+        assert_eq!(
+            announced_after(hx_proto::HELIX_FLOOR),
+            (false, false),
+            "the Floor took the announcement itself, without asking"
+        );
+        assert_eq!(announced_after(hx_proto::HX_STOMP), (true, false));
     }
 
     /// A timed-out write may or may not have reached the device, even one

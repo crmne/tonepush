@@ -36,6 +36,12 @@ pub struct Pedal {
     /// How many more questions about IRs are answered from the old contents
     /// before an accepted upload lands.
     pub ir_delay: usize,
+    /// The presets in the pedal's slots, by setlist and index, as documents.
+    /// A slot not listed is empty.
+    pub slots: BTreeMap<(i64, i64), Vec<u8>>,
+    /// Announce a deferred write's commit as notification 1 with its
+    /// transaction, as a Helix Floor does for a slot write.
+    pub announces_commits: bool,
     /// Every request received, as `(channel, transaction, opcode, arguments)`.
     pub requests: Vec<(u16, i64, i64, Value)>,
     /// Transfers waiting for the host to read.
@@ -83,6 +89,8 @@ impl Pedal {
             irs: BTreeMap::new(),
             writing_ir: None,
             ir_delay: 0,
+            slots: BTreeMap::new(),
+            announces_commits: false,
             requests: Vec::new(),
             outbox: VecDeque::new(),
             fail_reads_after_data: None,
@@ -177,6 +185,16 @@ impl Pedal {
                         result,
                     },
                 );
+                if status == 1 && self.announces_commits {
+                    self.notify(
+                        1,
+                        hx_proto::msgmap! {
+                            key::TXN => Value::Int(txn),
+                            key::STATUS => Value::Int(0),
+                            key::RESULT => Value::Nil,
+                        },
+                    );
+                }
             }
         }
     }
@@ -207,6 +225,26 @@ impl Pedal {
                 },
             ),
             op::READ_PRESET => (0, Value::Bin(self.buffer.clone(), 2)),
+            op::FETCH_PRESET => (
+                0,
+                self.slots
+                    .get(&(number(key::SETLIST), number(key::PRESET_INDEX)))
+                    .map_or(Value::Nil, |document| Value::Bin(document.clone(), 2)),
+            ),
+            op::WRITE_SLOT_NAMED => {
+                if let Some(document) = args.get(key::DOCUMENT).and_then(Value::as_raw) {
+                    self.slots.insert(
+                        (number(key::SETLIST), number(key::PRESET_INDEX)),
+                        document.to_vec(),
+                    );
+                }
+                (i64::from(self.defers_writes), Value::Nil)
+            }
+            op::CLEAR_SLOT => {
+                self.slots
+                    .remove(&(number(key::SETLIST), number(key::PRESET_INDEX)));
+                (0, Value::Nil)
+            }
             op::WRITE_PRESET => {
                 if self.applies_writes {
                     if let Some(document) = args.get(key::DOCUMENT).and_then(Value::as_raw) {

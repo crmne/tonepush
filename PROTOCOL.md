@@ -808,6 +808,15 @@ upload's opcode 9 does: it was still on that screen after a backup had finished
 and its session closed, and an END after each read cleared it. Other devices
 are unmeasured, so only the Stomp's profile closes its reads.
 
+**A restore spares the flash and waits for each commit. [confirmed on a Helix
+Floor]** A slot write (opcode 8) answers status 1 within about 8 ms and announces
+its commit later as notification 1 carrying its transaction, 0.6 to 2.9 s after
+the write began on a Helix Floor (3.80), along with notification 6 naming the
+slot and its new name - longer than the fixed settle after a write. A restore
+now waits for that announcement on a Floor, keeps the channels alive as a
+backup does, and empties only slots that hold something: reading a slot first
+is a quick read, and most of a Floor's 1024 slots are empty already.
+
 ### Writing a preset document back [confirmed]
 
 Opcode 21 takes a whole preset document. It is unforgiving: the preset carries a
