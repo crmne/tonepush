@@ -125,6 +125,12 @@ impl Pedal {
             .map(|(_, txn, ..)| *txn)
     }
 
+    /// Notifications held back until the host acknowledges enough of the
+    /// events channel: see [`events_window`](Self::events_window).
+    pub fn events_waiting(&self) -> usize {
+        self.events_held.len()
+    }
+
     /// Say something unasked, on the events channel.
     pub fn notify(&mut self, event: i64, args: Value) {
         self.reply(
