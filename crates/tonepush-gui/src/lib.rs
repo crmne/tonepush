@@ -34,6 +34,7 @@ mod pane;
 mod pro;
 mod publish;
 mod put;
+mod reorder;
 #[cfg(test)]
 mod screenshots;
 mod session;

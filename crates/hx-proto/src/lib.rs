@@ -88,6 +88,11 @@ pub struct DeviceProfile {
     /// (3.80) froze part-way through preset writes. Without it, a chunk goes
     /// out after a short read, as before.
     pub keeps_send_window: bool,
+    /// Whether a preset can be moved to another place in its setlist by
+    /// writing the setlist's directory in a new order (opcode 2), as HX Edit
+    /// does. Measured on a Helix Floor (3.80): the presets themselves move,
+    /// and the device announces it done in about 0.4 s.
+    pub moves_presets: bool,
 }
 
 impl DeviceProfile {
@@ -114,6 +119,7 @@ pub const HX_STOMP: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: true,
     keeps_send_window: false,
+    moves_presets: false,
 };
 pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     product_id: 0x4253,
@@ -127,6 +133,7 @@ pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
     keeps_send_window: false,
+    moves_presets: false,
 };
 pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     product_id: 0x4248,
@@ -147,6 +154,7 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Helix,
     closes_ir_reads: false,
     keeps_send_window: true,
+    moves_presets: true,
 };
 pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     product_id: 0x4249,
@@ -160,6 +168,7 @@ pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
     keeps_send_window: false,
+    moves_presets: false,
 };
 pub const HELIX_LT: DeviceProfile = DeviceProfile {
     product_id: 0x424A,
@@ -173,6 +182,7 @@ pub const HELIX_LT: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
     keeps_send_window: false,
+    moves_presets: false,
 };
 pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     product_id: 0x4245,
@@ -186,6 +196,7 @@ pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
     keeps_send_window: false,
+    moves_presets: false,
 };
 
 /// Every device profile we recognise.

@@ -53,6 +53,10 @@ fn tone_file(path: &std::path::Path) -> Option<&'static str> {
 pub(crate) enum Target {
     /// A preset in the sidebar.
     Slot(i64),
+    /// The gap before a preset in the sidebar, or after the last at the
+    /// list's length: a preset dropped there moves in, the ones between
+    /// closing up.
+    Between(i64),
     /// The presets as a whole, for a setlist.
     Presets,
     /// The board: what is dropped there plays.
@@ -65,6 +69,36 @@ pub(crate) enum Target {
     Setlist(usize),
 }
 
+/// The bands over the gaps between the presets' rows, each keyed by the
+/// slot after it: a few points either side of where one row ends and the
+/// next begins, and under the last preset in the list.
+fn gap_bands(rows: &[(i64, Rect)], count: i64) -> Vec<(i64, Rect)> {
+    const REACH: f32 = 5.0;
+    let mut bands = Vec::new();
+    for (slot, rect) in rows {
+        let above = rows
+            .iter()
+            .find(|(other, _)| *other == slot - 1)
+            .map(|(_, above)| above.bottom());
+        let top = above.map_or(rect.top(), |bottom| (bottom + rect.top()) / 2.0);
+        let reach = above.map_or(REACH, |bottom| (rect.top() - bottom) / 2.0 + REACH);
+        bands.push((
+            *slot,
+            Rect::from_x_y_ranges(rect.x_range(), (top - reach)..=(top + reach)),
+        ));
+        if *slot == count - 1 {
+            bands.push((
+                count,
+                Rect::from_x_y_ranges(
+                    rect.x_range(),
+                    (rect.bottom() - REACH)..=(rect.bottom() + REACH),
+                ),
+            ));
+        }
+    }
+    bands
+}
+
 /// What a drop would do, in the ghost's words, or why it would not.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Outcome {
@@ -75,7 +109,7 @@ pub(crate) struct Outcome {
 }
 
 impl Outcome {
-    fn does(icon: Icon, words: impl Into<String>) -> Option<Outcome> {
+    pub(crate) fn does(icon: Icon, words: impl Into<String>) -> Option<Outcome> {
         Some(Outcome {
             words: words.into(),
             icon,
@@ -83,7 +117,7 @@ impl Outcome {
         })
     }
 
-    fn refuses(words: impl Into<String>) -> Option<Outcome> {
+    pub(crate) fn refuses(words: impl Into<String>) -> Option<Outcome> {
         Some(Outcome {
             words: words.into(),
             icon: Icon::Ban,
@@ -163,7 +197,7 @@ impl App {
     }
 
     /// How many slots the pedal has.
-    fn slot_count(&self) -> i64 {
+    pub(crate) fn slot_count(&self) -> i64 {
         if self.pro_active() {
             self.pro.preset_count() as i64
         } else {
@@ -288,6 +322,7 @@ impl App {
                     },
                 )
             }
+            (Dragged::Preset(from), Target::Between(before)) => self.reorder_outcome(*from, before),
             (Dragged::Preset(_), Target::Tab(LibraryView::Cloud)) => {
                 if self.pro_active() {
                     Outcome::refuses("Keep a StompStation PRO preset from its menu first")
@@ -491,6 +526,7 @@ impl App {
                     self.put_bytes(slot, name, bytes, moving.then_some(from));
                 }
             }
+            (Dragged::Preset(from), Target::Between(before)) => self.reorder(from, before),
             (Dragged::Preset(from), Target::Tab(LibraryView::Cloud)) => {
                 if let Some((name, bytes)) = self.slot_document(from) {
                     let origin = self.origin();
@@ -722,8 +758,16 @@ impl App {
                 .map(|(slot, rect)| (*slot, *rect))
                 .collect()
         };
-        for (slot, rect) in rows {
-            self.drop_zone(rect, Target::Slot(slot));
+        for (slot, rect) in &rows {
+            self.drop_zone(*rect, Target::Slot(*slot));
+        }
+        // A preset also goes between two others: a band over each gap,
+        // registered after the rows so it wins over their edges.
+        if matches!(dragged, Dragged::Preset(_)) && self.moves_presets() {
+            for (before, band) in gap_bands(&rows, self.slot_count()) {
+                self.drop_zone(band, Target::Between(before));
+            }
+            self.paint_gap_drop(ctx, &dragged, &rows);
         }
         let board = if self.pro_active() {
             self.pro.board_rect
@@ -734,6 +778,36 @@ impl App {
             self.drop_zone(rect, Target::Board);
             self.paint_board_drop(ctx, rect);
         }
+    }
+
+    /// The line a preset would go in at, under the pointer.
+    fn paint_gap_drop(&self, ctx: &egui::Context, dragged: &Dragged, rows: &[(i64, Rect)]) {
+        let Some(Target::Between(before)) = self.drops.hover else {
+            return;
+        };
+        if !self
+            .drop_outcome(dragged, Target::Between(before), false)
+            .is_some_and(|outcome| !outcome.refused)
+        {
+            return;
+        }
+        let Some((_, band)) = gap_bands(rows, self.slot_count())
+            .into_iter()
+            .find(|(gap, _)| *gap == before)
+        else {
+            return;
+        };
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("presets-gap-drop"),
+        ));
+        let y = band.center().y;
+        let left = band.left() + 8.0;
+        painter.line_segment(
+            [Pos2::new(left, y), Pos2::new(band.right() - 8.0, y)],
+            Stroke::new(2.0, theme::accent()),
+        );
+        painter.circle_stroke(Pos2::new(left, y), 3.5, Stroke::new(2.0, theme::accent()));
     }
 
     /// While something that plays is dragged, the board says it takes it:
@@ -1039,6 +1113,33 @@ mod tests {
     use crate::session::{Cmd, Evt};
     use crate::{Connection, LibEntry};
     use std::sync::mpsc;
+
+    #[test]
+    fn every_gap_between_presets_takes_a_drop() {
+        let row = |slot: i64, top: f32| {
+            (
+                slot,
+                Rect::from_min_size(Pos2::new(0.0, top), Vec2::new(200.0, 26.0)),
+            )
+        };
+        // 01A to 01C, then a bank's gap of 10 before 02A, the last slot.
+        let rows = [row(0, 0.0), row(1, 26.0), row(2, 52.0), row(3, 88.0)];
+        let bands = gap_bands(&rows, 4);
+        let keys: Vec<i64> = bands.iter().map(|(before, _)| *before).collect();
+        assert_eq!(keys, [0, 1, 2, 3, 4]);
+        // Between two rows the band straddles their edge.
+        assert!(bands[1].1.contains(Pos2::new(50.0, 24.0)));
+        assert!(bands[1].1.contains(Pos2::new(50.0, 28.0)));
+        // The bank's gap belongs to the gap before 02A, all of it.
+        assert!(bands[3].1.contains(Pos2::new(50.0, 80.0)));
+        assert!(bands[3].1.contains(Pos2::new(50.0, 86.0)));
+        // The middle of a row is still the row: copy or move over it.
+        assert!(bands
+            .iter()
+            .all(|(_, band)| !band.contains(Pos2::new(50.0, 39.0))));
+        // Under the last preset: after it.
+        assert!(bands[4].1.contains(Pos2::new(50.0, 116.0)));
+    }
 
     fn app() -> (App, mpsc::Sender<Evt>, mpsc::Receiver<Cmd>) {
         let (to_device, cmds) = mpsc::channel();

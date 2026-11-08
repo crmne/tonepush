@@ -682,6 +682,7 @@ Two real exchanges from our capture:
 | 28 | clear block | `{98: block}` - **must be preceded by opcode 78 selecting that block** |
 | 37 | assign a controller | `{98: block, 95: target, 96: scope, 74: flags, 71: MIDI CC}` |
 | 9 | upload impulse response | `{112: slot, 113: checksum, 109: name, 114, 115, …}` then raw samples |
+| 2 | **write a setlist's directory: reorder its presets** | `{107: setlist, 110: <opcode 1's entries, in the new order>, 101: 2}` |
 | 4 | **read a preset at an index, without loading it** | `{107: setlist, 108: index, 101: 2}` → the whole document |
 | 5 | write a preset document into an index | `{107, 108, 123, 124, 125, 110: document}` |
 | 8 | write a preset *with a name* - paste, and file import | `{107, 108, 109: name, 123, 124, 125, 110: document}` |
@@ -809,6 +810,20 @@ leave an HX Stomp (3.80) showing "transferring data" until it hears END, as an
 upload's opcode 9 does: it was still on that screen after a backup had finished
 and its session closed, and an END after each read cleared it. Other devices
 are unmeasured, so only the Stomp's profile closes its reads.
+
+**Opcode 2 reorders a setlist in one message. [confirmed on a Helix Floor]**
+Opcode 1 lists a setlist's directory as single-key maps, `{preset number: {109:
+name, 123: false, 124: false, 125: 0}}`, the preset number being setlist × 128 +
+slot on a Helix Floor (USER 2's presets are 384 to 511). Opcode 2 takes the same
+entries back in a new order, as a MessagePack array under key 110, and the
+device moves its presets to match: documents and names alike, checked byte for
+byte by swapping two different presets. HX Edit sends it on the control channel
+after the same opening as an IR read (END, setlists, presets, READY, IR list,
+BEGIN) and closes with END, and so does TonePush. On a Floor (3.80) it answers
+status 1 within 17 ms and announces the move done as notification 1 with its
+transaction, alongside notification 3, about 0.4 s in. Every HX Edit capture in
+this repository that sends it swaps presets 99 and 100 of an HX Stomp's first
+setlist, so the Stomp has it too; TonePush offers it only where measured.
 
 ### Writing a preset document back [confirmed]
 

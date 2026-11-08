@@ -79,6 +79,12 @@ pub enum Cmd {
         from: usize,
         before: usize,
     },
+    /// Move the preset in slot `from` of the setlist shown to slot `to`, the
+    /// ones between closing up: one message, which the pedal carries out.
+    MovePreset {
+        from: i64,
+        to: i64,
+    },
     ListIrs,
     SetTempo(f32),
     RenameSnapshot {
@@ -1205,6 +1211,7 @@ impl Worker {
                     self.send(Evt::Setlists(names));
                 }
             }
+            Cmd::MovePreset { from, to } => self.move_preset(from, to),
             Cmd::ListIrs => {
                 if let Some(slots) = self.try_on_device(|d| d.irs()) {
                     self.send(Evt::Irs(slots));
@@ -2212,6 +2219,25 @@ impl Worker {
             }
             self.reload();
         }
+    }
+
+    /// Move a preset within the setlist shown, then show the setlist as it
+    /// is now, keep the automatic backup's copies of the slots that shifted
+    /// current, and follow the preset that is playing if it moved.
+    fn move_preset(&mut self, from: i64, to: i64) {
+        let setlist = self.setlist;
+        if !self.run_on_device(|d| d.move_preset(setlist, from, to)) {
+            return;
+        }
+        if let Some(names) = self.try_on_device(|d| d.presets(setlist)) {
+            self.send(Evt::Presets(names));
+        }
+        for index in from.min(to)..=from.max(to) {
+            self.back_up_one(setlist, index);
+        }
+        self.follow_preset();
+        let (from_label, to_label) = (self.slot_label(from), self.slot_label(to));
+        self.send(Evt::Activity(format!("moved {from_label} to {to_label}")));
     }
 
     /// Keep the automatic backup current after a save.

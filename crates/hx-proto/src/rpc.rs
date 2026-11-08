@@ -131,6 +131,12 @@ pub mod key {
 pub mod op {
     /// `{107: setlist, 101: 2}` - every preset name in a setlist.
     pub const LIST_PRESETS: i64 = 1;
+    /// `{107: setlist, 110: <the directory>, 101: 2}` - write a setlist's
+    /// directory: opcode 1's entries, `{preset number: {109: name, 123,
+    /// 124, 125}}`, in a new order. The device moves its presets to match,
+    /// which is how HX Edit reorders a setlist in one message. Control
+    /// channel, after the same opening as an IR read.
+    pub const WRITE_DIRECTORY: i64 = 2;
     /// `{107: setlist, 108: preset index}`
     pub const SELECT_PRESET: i64 = 20;
     /// Read the currently loaded preset as an `l6-helix` document.

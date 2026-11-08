@@ -36,6 +36,10 @@ pub struct Pedal {
     /// How many more questions about IRs are answered from the old contents
     /// before an accepted upload lands.
     pub ir_delay: usize,
+    /// Each setlist's presets by name, in slot order, as its directory lists
+    /// them. A preset's number in the directory is its setlist times 128
+    /// plus its slot when it was put there, as on a Helix Floor.
+    pub directories: BTreeMap<i64, Vec<(i64, String)>>,
     /// Every request received, as `(channel, transaction, opcode, arguments)`.
     pub requests: Vec<(u16, i64, i64, Value)>,
     /// Transfers waiting for the host to read.
@@ -83,6 +87,7 @@ impl Pedal {
             irs: BTreeMap::new(),
             writing_ir: None,
             ir_delay: 0,
+            directories: BTreeMap::new(),
             requests: Vec::new(),
             outbox: VecDeque::new(),
             fail_reads_after_data: None,
@@ -213,6 +218,65 @@ impl Pedal {
                 },
             ),
             op::READ_PRESET => (0, Value::Bin(self.buffer.clone(), 2)),
+            op::LIST_PRESETS => match self.directories.get(&number(key::SETLIST)) {
+                Some(directory) => (
+                    0,
+                    Value::Array(
+                        directory
+                            .iter()
+                            .map(|(number, name)| {
+                                hx_proto::msgmap! {
+                                    *number => hx_proto::msgmap! {
+                                        key::NAME => Value::Str(name.clone()),
+                                        123 => Value::Bool(false),
+                                        124 => Value::Bool(false),
+                                        125 => Value::Int(0),
+                                    },
+                                }
+                            })
+                            .collect(),
+                    ),
+                ),
+                None => (0, Value::Nil),
+            },
+            op::WRITE_DIRECTORY => {
+                let setlist = number(key::SETLIST);
+                let order: Option<Vec<i64>> = args
+                    .get(key::DOCUMENT)
+                    .and_then(Value::as_raw)
+                    .and_then(|raw| hx_proto::msgpack::Decoder::new(raw).value().ok())
+                    .and_then(|list| match list {
+                        Value::Array(entries) => entries
+                            .iter()
+                            .map(|entry| match entry {
+                                Value::Map(fields) if fields.len() == 1 => match &fields[0].0 {
+                                    hx_proto::msgpack::Key::Int(n) => Some(*n),
+                                    _ => None,
+                                },
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => None,
+                    });
+                let Some(directory) = self.directories.get_mut(&setlist) else {
+                    return (255, hx_proto::msgmap! { key::ERROR_CODE => Value::Int(-3) });
+                };
+                // The new order must name every preset of the setlist once.
+                let mut sorted = order.clone().unwrap_or_default();
+                sorted.sort_unstable();
+                let mut had: Vec<i64> = directory.iter().map(|(n, _)| *n).collect();
+                had.sort_unstable();
+                if order.is_none() || sorted != had {
+                    return (255, hx_proto::msgmap! { key::ERROR_CODE => Value::Int(-3) });
+                }
+                let before = directory.clone();
+                *directory = order
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|n| before.iter().find(|(m, _)| *m == n).cloned())
+                    .collect();
+                (1, Value::Nil)
+            }
             op::WRITE_PRESET => {
                 if self.applies_writes {
                     if let Some(document) = args.get(key::DOCUMENT).and_then(Value::as_raw) {
