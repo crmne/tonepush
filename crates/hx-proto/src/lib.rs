@@ -204,7 +204,8 @@ mod tests {
     /// pedal with the read closed and left open.
     #[test]
     fn a_helix_floor_closes_its_ir_reads() {
-        assert!(HELIX_FLOOR.closes_ir_reads);
+        let floor = profile_for(HELIX_FLOOR.product_id).expect("a Helix Floor is recognised");
+        assert!(floor.closes_ir_reads);
     }
 
     #[test]
