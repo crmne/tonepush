@@ -192,9 +192,13 @@ struct Channel {
     /// stops the device dead - including the channels nobody is waiting on.
     acked: u32,
     /// The device's latest acknowledgement of what we sent on this channel:
-    /// a running byte count plus a base. Only differences between two of
-    /// them are used, to keep a long send inside the device's window.
+    /// a running byte count plus a base. Only the steps between two of them
+    /// are used.
     peer_acked: Option<u32>,
+    /// Stream bytes sent on this channel that the device has not yet
+    /// acknowledged, whichever message they belonged to: what keeps a long
+    /// send inside the device's window.
+    unacked: u32,
     reader: StreamReader,
     txn: i64,
 }
@@ -211,6 +215,7 @@ impl Channel {
             rx_bytes: 0,
             acked: 0,
             peer_acked: None,
+            unacked: 0,
             reader: StreamReader::new(),
             txn: rpc::FIRST_TXN,
         }
@@ -654,7 +659,23 @@ impl Session {
             return;
         };
         if hdr.msg_type & (MSG_ACK | MSG_DATA) != 0 {
-            ch.peer_acked = Some(hdr.ack);
+            match ch.peer_acked {
+                // Each step forward acknowledges that many of our bytes. An
+                // older acknowledgement arriving late moves nothing.
+                Some(before) => {
+                    let step = hdr.ack.wrapping_sub(before);
+                    if (step as i32) > 0 {
+                        ch.unacked = ch.unacked.saturating_sub(step);
+                        ch.peer_acked = Some(hdr.ack);
+                    }
+                }
+                // The first acknowledgement on a channel arrives while the
+                // session opens, and covers the little sent before it.
+                None => {
+                    ch.peer_acked = Some(hdr.ack);
+                    ch.unacked = 0;
+                }
+            }
         }
         if hdr.has_data() && !rest.is_empty() {
             ch.rx_bytes = ch.rx_bytes.wrapping_add(rest.len() as u32);
@@ -753,10 +774,6 @@ impl Session {
     /// The frames of one stream message, in order. `started` is set as soon
     /// as the first of them is on the wire.
     fn send_chunks(&mut self, id: ChannelId, chunks: &[&[u8]], started: &mut bool) -> Result<()> {
-        // Where the device's acknowledgement stood when this message began,
-        // and how much of it has been sent since.
-        let start = self.peer_acked(id);
-        let mut sent = 0u32;
         for (n, chunk) in chunks.iter().enumerate() {
             let (seq, ack) = self.tick(id)?;
             let mut payload = Vec::with_capacity(ChannelHeader::SIZE + chunk.len());
@@ -770,6 +787,9 @@ impl Session {
             self.write(&Frame::new(id.device, id.host, payload))?;
             *started = true;
             self.mark_acknowledged(id);
+            if let Some(channel) = self.channels.get_mut(&id.device) {
+                channel.unacked = channel.unacked.saturating_add(chunk.len() as u32);
+            }
 
             // Keep a long send inside the device's receive window, as HX Edit
             // does, where the profile says so. Sent past it - a chunk whenever
@@ -780,10 +800,9 @@ impl Session {
             // which lets acknowledgements through: writing a whole impulse
             // response blind stalls the endpoint. One chunk needs none of
             // this, so skip it there.
-            sent = sent.wrapping_add(chunk.len() as u32);
             if let Some(next) = chunks.get(n + 1) {
                 if self.profile.keeps_send_window {
-                    self.await_window(id, start, sent, next.len() as u32)?;
+                    self.await_window(id, next.len() as u32)?;
                 } else {
                     self.read_available(Self::BETWEEN_CHUNKS)?;
                 }
@@ -792,43 +811,39 @@ impl Session {
         Ok(())
     }
 
-    /// The device's latest acknowledgement on a channel, if it has sent one.
-    fn peer_acked(&self, id: ChannelId) -> Option<u32> {
-        self.channels.get(&id.device).and_then(|c| c.peer_acked)
-    }
-
-    /// Wait until `next` more bytes fit in the device's window: of the
-    /// `sent` bytes of this message, all but `WINDOW` less `next` must be
-    /// acknowledged since `start`.
-    fn await_window(
-        &mut self,
-        id: ChannelId,
-        start: Option<u32>,
-        sent: u32,
-        next: u32,
-    ) -> Result<()> {
-        let Some(start) = start else {
-            // Nothing to measure from: the device had acknowledged nothing on
-            // this channel when the message began. Every channel is
-            // acknowledged while the session opens, so this is a bare fallback
-            // to reading between chunks, as before there was a window.
-            self.read_available(Self::BETWEEN_CHUNKS)?;
+    /// Wait until `next` more bytes fit in the device's window: what is
+    /// unacknowledged on the channel, from this message or one before it,
+    /// plus `next` must not pass [`WINDOW`](Self::WINDOW).
+    ///
+    /// The other channels are acknowledged as their bytes arrive meanwhile,
+    /// as HX Edit does between the chunks of a write: a device that has sent
+    /// 4 KB of notifications unacknowledged stops sending them for good.
+    fn await_window(&mut self, id: ChannelId, next: u32) -> Result<()> {
+        let Some(channel) = self.channels.get(&id.device) else {
             return Ok(());
         };
+        if channel.peer_acked.is_none() {
+            // Nothing to count from: the device has acknowledged nothing on
+            // this channel. Every channel is acknowledged while the session
+            // opens, so this is a bare fallback to reading between chunks,
+            // as before there was a window.
+            self.read_available(Self::BETWEEN_CHUNKS)?;
+            return self.ack_idle_channels(id);
+        }
         let deadline = Instant::now() + Self::WINDOW_WAIT;
         loop {
-            let acked = self.peer_acked(id).map_or(0, |now| now.wrapping_sub(start));
-            let outstanding = sent.saturating_sub(acked);
-            if outstanding + next <= Self::WINDOW {
+            let unacked = self.channels.get(&id.device).map_or(0, |c| c.unacked);
+            if unacked.saturating_add(next) <= Self::WINDOW {
                 return Ok(());
             }
             if Instant::now() >= deadline {
                 return Err(Error::Protocol(format!(
                     "the device stopped acknowledging a message part-way through, \
-                     with {outstanding} bytes unacknowledged"
+                     with {unacked} bytes unacknowledged"
                 )));
             }
             self.read_available(Self::WINDOW_READ)?;
+            self.ack_idle_channels(id)?;
         }
     }
 
@@ -1710,11 +1725,59 @@ mod tests {
             .write_preset(&preset)
             .expect_err("no acknowledgement, no write");
 
+        // A whole window went out, and the send gave up waiting for room.
         let chunks = pedal.lock().unwrap().frames_in - before;
+        assert_eq!(chunks * Session::CHUNK, Session::WINDOW as usize, "{error}");
         assert!(
-            chunks * Session::CHUNK <= Session::WINDOW as usize,
-            "{chunks} chunks went out unacknowledged: {error}"
+            error.to_string().contains("stopped acknowledging"),
+            "{error}"
         );
+    }
+
+    /// What an earlier message left unacknowledged counts against the window
+    /// too: it is the device's buffer, not the message's.
+    #[test]
+    fn an_earlier_messages_unacknowledged_bytes_count_against_the_window() {
+        let pedal = fake::Pedal::new();
+        let mut session = fake::session_as(&pedal, hx_proto::HELIX_FLOOR);
+        let preset = session.read_preset().unwrap();
+        pedal.lock().unwrap().withholds_acks = true;
+        session
+            .preset_info()
+            .expect("a short request, still answered");
+        let before = pedal.lock().unwrap().frames_in;
+
+        session
+            .write_preset(&preset)
+            .expect_err("no acknowledgement");
+
+        // The short request's bytes and one chunk fill all but a sliver of
+        // the window, so the second chunk waits.
+        assert_eq!(pedal.lock().unwrap().frames_in - before, 1);
+    }
+
+    /// Notifications arriving while a long send waits for the window are
+    /// acknowledged, or the device would stop sending them for good.
+    #[test]
+    fn notifications_are_acknowledged_while_a_send_waits() {
+        let pedal = fake::Pedal::new();
+        let mut session = fake::session_as(&pedal, hx_proto::HELIX_FLOOR);
+        let preset = session.read_preset().unwrap();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.events_window = Some(64);
+            pedal.withholds_acks = true;
+            for n in 0..10 {
+                pedal.notify(22, hx_proto::msgmap! { 82 => Value::Int(n) });
+            }
+            assert!(pedal.events_waiting() > 0, "the window holds some back");
+        }
+
+        session
+            .write_preset(&preset)
+            .expect_err("no acknowledgement");
+
+        assert_eq!(pedal.lock().unwrap().events_waiting(), 0);
     }
 
     /// A device whose profile does not keep the window sends a long message
