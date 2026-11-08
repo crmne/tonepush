@@ -2026,7 +2026,9 @@ impl Worker {
         let setlist = self.setlist;
         let total = slots.len();
         let mut written = 0usize;
+        let mut touched = Vec::new();
         for (step, (index, bytes)) in slots.into_iter().enumerate() {
+            touched.push(index);
             self.send(Evt::Working {
                 what: "writing the setlist".into(),
                 progress: step as f32 / total.max(1) as f32,
@@ -2064,11 +2066,61 @@ impl Worker {
         self.send(Evt::Activity(format!(
             "wrote {written} presets to the pedal"
         )));
-        // The bundle now describes a pedal that no longer exists. Re-reading it
-        // whole costs a couple of seconds against the minutes of flash writes
-        // that just happened, and the snapshot it rotates aside is the pedal as
-        // it was before the setlist landed, which is worth having.
-        self.refresh_automatic(&why);
+        // The bundle's copies of the slots written now describe a pedal that
+        // no longer exists. Those are read again, not the whole pedal: that
+        // took about 25 s on a Helix Floor after every copy. A slot that was
+        // tried and failed is read too, as it may have changed all the same.
+        self.refresh_slots(setlist, &touched, &why);
+    }
+
+    /// Put the copy of a bundle that is there aside before it changes, with
+    /// why, and say where. Corruption is noticed later than it happens, and a
+    /// single bundle that every connection refreshes is always the pedal as
+    /// it is now - which is no use at all when what you need is the pedal as
+    /// it was on Tuesday.
+    fn set_aside(&mut self, dir: &std::path::Path, why: &Why) -> Option<std::path::PathBuf> {
+        match hx_usb::backup::snapshot(dir, &datestamp(), KEEP_SNAPSHOTS) {
+            // Why it was set aside goes with it, for the Backups history; a
+            // copy without the note restores all the same.
+            Ok(Some(copy)) => {
+                if let Err(e) = crate::backups::note_why(&copy, why) {
+                    self.send(Evt::Activity(format!(
+                        "could not note why a copy was kept: {e}"
+                    )));
+                }
+                Some(copy)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                self.send(Evt::Activity(format!("could not keep a snapshot: {e}")));
+                None
+            }
+        }
+    }
+
+    /// Bring the automatic backup's copies of some slots back in step with
+    /// the pedal after writing them, setting the bundle as it was aside first
+    /// with why. Seconds of reading the whole pedal again became a read of
+    /// the slots written, and the copy set aside is still the pedal as it was
+    /// before the writes.
+    fn refresh_slots(&mut self, setlist: i64, slots: &[i64], why: &Why) {
+        let Some(dir) = self.automatic.clone() else {
+            return;
+        };
+        if !hx_usb::backup::exists(&dir) {
+            return;
+        }
+        self.set_aside(&dir, why);
+        if self
+            .try_on_device(|d| hx_usb::backup::capture_slots_in(d, &dir, setlist, slots))
+            .is_none()
+        {
+            // What could not be read again is read whole on the next connect,
+            // since the bundle no longer matches the pedal's lists.
+            self.send(Evt::Activity(
+                "the automatic backup will catch up on the next connection".into(),
+            ));
+        }
     }
 
     /// Bring the automatic backup back in step with the pedal, if there is
@@ -2135,27 +2187,11 @@ impl Worker {
         skip: Option<&std::sync::atomic::AtomicBool>,
     ) {
         let stamp = now();
-        // Put the copy that is there aside before overwriting it. Corruption is
-        // noticed later than it happens, and a single bundle that every
-        // connection refreshes is always the pedal as it is now - which is no
-        // use at all when what you need is the pedal as it was on Tuesday.
-        let mut set_aside = None;
-        if Some(dir) == self.automatic.as_deref() {
-            match hx_usb::backup::snapshot(dir, &datestamp(), KEEP_SNAPSHOTS) {
-                // Why it was set aside goes with it, for the Backups history;
-                // a copy without the note restores all the same.
-                Ok(Some(copy)) => {
-                    if let Err(e) = crate::backups::note_why(&copy, why) {
-                        self.send(Evt::Activity(format!(
-                            "could not note why a copy was kept: {e}"
-                        )));
-                    }
-                    set_aside = Some(copy);
-                }
-                Ok(None) => {}
-                Err(e) => self.send(Evt::Activity(format!("could not keep a snapshot: {e}"))),
-            }
-        }
+        let set_aside = if Some(dir) == self.automatic.as_deref() {
+            self.set_aside(dir, why)
+        } else {
+            None
+        };
         let events = self.events.clone();
         let options = hx_usb::backup::Capture {
             reuse_irs: true,
@@ -3120,6 +3156,46 @@ mod tests {
         )));
         assert!(worker.device.is_some(), "the pedal stays connected");
         assert!(!dir.exists(), "no half backup is left behind");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// Writing a slot reads that slot again for the automatic backup, not
+    /// the whole pedal: that was about 25 s on a Helix Floor after every
+    /// copy. The bundle as it was is set aside first, as before.
+    #[test]
+    fn a_slot_write_refreshes_that_slot_and_no_more() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        let dir = scratch_bundle("slot-refresh");
+        worker.automatic = Some(dir.clone());
+        worker.handle(Cmd::BackUp(dir.clone()));
+        let _ = events.try_iter().count();
+        let count = |opcode: i64| {
+            pedal
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .filter(|(o, _)| *o == opcode)
+                .count()
+        };
+        let (settings, slots) = (count(op::FETCH_OBJECT), count(op::FETCH_PRESET));
+        let history = dir.parent().unwrap().join("history");
+        let kept = std::fs::read_dir(&history).map_or(0, |d| d.count());
+
+        let document = pedal.lock().unwrap().buffer.clone();
+        worker.handle(Cmd::PushSetlist(vec![(
+            1,
+            Some(("Copied".to_owned(), document)),
+        )]));
+
+        assert_eq!(count(op::FETCH_OBJECT), settings, "no settings read again");
+        assert_eq!(count(op::FETCH_PRESET), slots + 1, "the slot written only");
+        assert_eq!(
+            std::fs::read_dir(&history).map_or(0, |d| d.count()),
+            kept + 1,
+            "the bundle as it was is kept"
+        );
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
