@@ -191,6 +191,10 @@ struct Channel {
     /// by the difference, so a channel that is never acknowledged eventually
     /// stops the device dead - including the channels nobody is waiting on.
     acked: u32,
+    /// The device's latest acknowledgement of what we sent on this channel:
+    /// a running byte count plus a base. Only differences between two of
+    /// them are used, to keep a long send inside the device's window.
+    peer_acked: Option<u32>,
     reader: StreamReader,
     txn: i64,
 }
@@ -206,6 +210,7 @@ impl Channel {
             seq: 0,
             rx_bytes: 0,
             acked: 0,
+            peer_acked: None,
             reader: StreamReader::new(),
             txn: rpc::FIRST_TXN,
         }
@@ -648,6 +653,9 @@ impl Session {
         let Some(ch) = self.channels.get_mut(&f.src) else {
             return;
         };
+        if hdr.msg_type & (MSG_ACK | MSG_DATA) != 0 {
+            ch.peer_acked = Some(hdr.ack);
+        }
         if hdr.has_data() && !rest.is_empty() {
             ch.rx_bytes = ch.rx_bytes.wrapping_add(rest.len() as u32);
             ch.reader.push(rest);
@@ -688,9 +696,19 @@ impl Session {
     const REPLY_BUDGET: Duration = Duration::from_secs(6);
     /// Per-read timeout while waiting for a reply.
     const REPLY_READ: Duration = Duration::from_millis(300);
-    /// Pause between chunks of a large send, letting the device's
-    /// acknowledgements through so its receive window reopens.
-    const BETWEEN_CHUNKS: Duration = Duration::from_millis(80);
+    /// How many bytes of one message may be on their way to the device
+    /// before it has acknowledged them. HX Edit never sends past this: it
+    /// fills exactly 512 bytes, then waits for the acknowledgement, and
+    /// tops up by as much as was acknowledged.
+    const WINDOW: u32 = 512;
+    /// How long a long send waits for the device to acknowledge enough to go
+    /// on before giving up on it.
+    const WINDOW_WAIT: Duration = Duration::from_secs(3);
+    /// Each read while waiting for the window.
+    const WINDOW_READ: Duration = Duration::from_millis(20);
+    /// The read between chunks when there is no acknowledgement to measure
+    /// the window from.
+    const WINDOW_FALLBACK: Duration = Duration::from_millis(80);
 
     /// Bytes of stream data per frame.
     ///
@@ -735,6 +753,10 @@ impl Session {
     /// The frames of one stream message, in order. `started` is set as soon
     /// as the first of them is on the wire.
     fn send_chunks(&mut self, id: ChannelId, chunks: &[&[u8]], started: &mut bool) -> Result<()> {
+        // Where the device's acknowledgement stood when this message began,
+        // and how much of it has been sent since.
+        let start = self.peer_acked(id);
+        let mut sent = 0u32;
         for (n, chunk) in chunks.iter().enumerate() {
             let (seq, ack) = self.tick(id)?;
             let mut payload = Vec::with_capacity(ChannelHeader::SIZE + chunk.len());
@@ -749,16 +771,59 @@ impl Session {
             *started = true;
             self.mark_acknowledged(id);
 
-            // Read between chunks on a long send. The device paces us with
-            // acknowledgements, and writing a whole impulse response blind
-            // fills its receive window and stalls the endpoint - the transfer
-            // then times out with nothing obviously wrong. HX Edit interleaves
-            // the same way. One chunk needs none of this, so skip it there.
-            if n + 1 < chunks.len() {
-                self.read_available(Self::BETWEEN_CHUNKS)?;
+            // Keep a long send inside the device's receive window, as HX Edit
+            // does. Sent past it - a chunk whenever anything arrived, or after
+            // a short wait - a Helix Floor (3.80) froze part-way through a
+            // preset write: in every one of six freezes, 1.2 to 2.5 KB were
+            // unacknowledged, while writes kept to about 512 bytes landed.
+            // Writing a whole impulse response blind stalls the endpoint the
+            // same way. One chunk needs none of this, so skip it there.
+            sent = sent.wrapping_add(chunk.len() as u32);
+            if let Some(next) = chunks.get(n + 1) {
+                self.await_window(id, start, sent, next.len() as u32)?;
             }
         }
         Ok(())
+    }
+
+    /// The device's latest acknowledgement on a channel, if it has sent one.
+    fn peer_acked(&self, id: ChannelId) -> Option<u32> {
+        self.channels.get(&id.device).and_then(|c| c.peer_acked)
+    }
+
+    /// Wait until `next` more bytes fit in the device's window: of the
+    /// `sent` bytes of this message, all but `WINDOW` less `next` must be
+    /// acknowledged since `start`.
+    fn await_window(
+        &mut self,
+        id: ChannelId,
+        start: Option<u32>,
+        sent: u32,
+        next: u32,
+    ) -> Result<()> {
+        let Some(start) = start else {
+            // Nothing to measure from: the device had acknowledged nothing on
+            // this channel when the message began. Every channel is
+            // acknowledged while the session opens, so this is a bare fallback
+            // to reading between chunks, as before there was a window.
+            self.read_available(Self::WINDOW_FALLBACK)?;
+            return Ok(());
+        };
+        let deadline = Instant::now() + Self::WINDOW_WAIT;
+        loop {
+            let acked = self.peer_acked(id).map_or(0, |now| now.wrapping_sub(start));
+            let outstanding = sent.saturating_sub(acked);
+            if outstanding + next <= Self::WINDOW {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::Protocol(format!(
+                    "the device stopped acknowledging a message part-way through, \
+                     with {outstanding} bytes unacknowledged"
+                )));
+            }
+            self.read_available(Self::WINDOW_READ)?;
+        }
     }
 
     /// Send a deferred request and wait for the device to finish it.
@@ -1617,6 +1682,32 @@ mod tests {
             opcodes.get(write + 1),
             Some(&rpc::op::PRESET_INFO),
             "{opcodes:?}"
+        );
+    }
+
+    /// A long message never runs past the device's 512-byte receive window:
+    /// when the acknowledgements stop, so does the sending. Sent past it, a
+    /// Helix Floor froze part-way through preset writes.
+    #[test]
+    fn a_long_send_waits_for_the_window() {
+        let pedal = fake::Pedal::new();
+        let mut session = fake::session(&pedal);
+        let preset = session.read_preset().unwrap();
+        assert!(preset.encode().len() > 4 * Session::CHUNK, "several chunks");
+        let before = {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.withholds_acks = true;
+            pedal.frames_in
+        };
+
+        let error = session
+            .write_preset(&preset)
+            .expect_err("no acknowledgement, no write");
+
+        let chunks = pedal.lock().unwrap().frames_in - before;
+        assert!(
+            chunks * Session::CHUNK <= Session::WINDOW as usize,
+            "{chunks} chunks went out unacknowledged: {error}"
         );
     }
 

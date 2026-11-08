@@ -66,6 +66,12 @@ pub struct Pedal {
     events_held: VecDeque<Vec<u8>>,
     inbox: BTreeMap<u16, StreamReader>,
     seq: BTreeMap<u16, u16>,
+    /// Stream bytes received from the host on each channel, as the pedal
+    /// acknowledges them: this plus a base of 0x1000.
+    received: BTreeMap<u16, u32>,
+    /// Stop acknowledging what the host sends, as a pedal that has stopped
+    /// taking a message does.
+    pub withholds_acks: bool,
 }
 
 impl Pedal {
@@ -90,6 +96,8 @@ impl Pedal {
             events_held: VecDeque::new(),
             inbox: BTreeMap::new(),
             seq: BTreeMap::new(),
+            received: BTreeMap::new(),
+            withholds_acks: false,
         }))
     }
 
@@ -139,6 +147,10 @@ impl Pedal {
             return;
         }
         self.frames_in += 1;
+        if !self.withholds_acks {
+            let total = self.received.entry(frame.dst).or_insert(0);
+            *total = total.wrapping_add(rest.len() as u32);
+        }
         if let Some(why) = self.fail_reads_after_data.take() {
             self.failing_reads = Some(why);
         }
@@ -146,6 +158,11 @@ impl Pedal {
         let reader = self.inbox.entry(node).or_default();
         reader.push(rest);
         let messages = reader.take_messages().unwrap_or_default();
+        // Part of a long message: acknowledge it, so the next part fits the
+        // window. A whole one is acknowledged by its reply.
+        if messages.is_empty() && !self.withholds_acks {
+            self.acknowledge(node);
+        }
         for message in messages {
             if let Ok(Message::Request { txn, opcode, args }) =
                 Message::try_from_value(message.body)
@@ -287,15 +304,40 @@ impl Pedal {
         self.outbox.push_back(frame);
     }
 
+    /// What the pedal acknowledges of the host's bytes on a channel.
+    fn acked(&self, node: u16) -> u32 {
+        0x1000u32.wrapping_add(self.received.get(&node).copied().unwrap_or(0))
+    }
+
+    /// Acknowledge the host's bytes on a channel with a bare ACK frame, as
+    /// the pedal does after each chunk of a long message.
+    fn acknowledge(&mut self, node: u16) {
+        let seq = self.seq.entry(node).or_insert(0);
+        let mut payload = Vec::new();
+        ChannelHeader {
+            seq: *seq,
+            msg_type: MSG_ACK,
+            ack: 0x1000u32.wrapping_add(self.received.get(&node).copied().unwrap_or(0)),
+        }
+        .encode_into(&mut payload);
+        let host = ChannelId::ALL
+            .iter()
+            .find(|channel| channel.device == node)
+            .map_or(0, |channel| channel.host);
+        self.outbox
+            .push_back(Frame::new(host, node, payload).encode().unwrap());
+    }
+
     /// Queue one message for the host, on the channel `node` names.
     fn reply(&mut self, node: u16, message: &Message) {
         let body = Encoder::encode(&message.to_value());
+        let ack = self.acked(node);
         let seq = self.seq.entry(node).or_insert(0);
         let mut payload = Vec::new();
         ChannelHeader {
             seq: *seq,
             msg_type: MSG_DATA,
-            ack: 0x1000,
+            ack,
         }
         .encode_into(&mut payload);
         *seq = seq.wrapping_add(1);
