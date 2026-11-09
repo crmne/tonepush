@@ -353,6 +353,8 @@ pub(crate) struct Panel {
     pub(crate) board_rect: Option<egui::Rect>,
     /// Where each preset's row was drawn this frame.
     row_rects: BTreeMap<usize, egui::Rect>,
+    /// The part of the preset list scrolled into view.
+    pub(crate) rows_shown: Option<egui::Rect>,
     preview: Option<(String, Snapshot)>,
     confirmation: Option<Confirmation>,
     /// A whole-device operation and its completion fraction. Kept separate
@@ -471,6 +473,7 @@ impl Panel {
             dropping: false,
             board_rect: None,
             row_rects: BTreeMap::new(),
+            rows_shown: None,
             preview: None,
             confirmation: None,
             working: None,

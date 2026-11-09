@@ -79,6 +79,12 @@ pub enum Cmd {
         from: usize,
         before: usize,
     },
+    /// Move the preset in slot `from` of the setlist shown to slot `to`, the
+    /// ones between closing up: one message, which the pedal carries out.
+    MovePreset {
+        from: i64,
+        to: i64,
+    },
     ListIrs,
     SetTempo(f32),
     RenameSnapshot {
@@ -1205,6 +1211,7 @@ impl Worker {
                     self.send(Evt::Setlists(names));
                 }
             }
+            Cmd::MovePreset { from, to } => self.move_preset(from, to),
             Cmd::ListIrs => {
                 if let Some(slots) = self.try_on_device(|d| d.irs()) {
                     self.send(Evt::Irs(slots));
@@ -2214,6 +2221,68 @@ impl Worker {
         }
     }
 
+    /// Move a preset within the setlist shown, then show the setlist as it
+    /// is now, keep the automatic backup's copies of the slots that shifted
+    /// current, and follow the preset that is playing if it moved.
+    fn move_preset(&mut self, from: i64, to: i64) {
+        let setlist = self.setlist;
+        // Which preset is playing is the pedal's word, not the last one we
+        // heard: a footswitch since then would have the wrong one followed.
+        // Without its word, the move does not guess.
+        if self.check_preset().is_none() {
+            return self.send(Evt::Failed(
+                "the pedal did not say which preset is playing: nothing moved".into(),
+            ));
+        }
+        if self.setlist != setlist {
+            // Following it showed another setlist, which this move is not for.
+            return self.send(Evt::Failed(
+                "the pedal changed setlists: nothing moved".into(),
+            ));
+        }
+        // The preset playing, if the move shifts it. The pedal keeps the same
+        // slot loaded through a move, which then holds another preset: the
+        // editor would show that one's slot over this one's sound, and a save
+        // would write this one over it. So it is loaded again where it went,
+        // which needs its changes saved first, and an audition put back
+        // before that, or what it set aside would be lost with it.
+        let shifted = (self.shown.setlist == setlist)
+            .then_some(self.shown.index)
+            .filter(|&loaded| crate::reorder::moved(loaded, from, to) != loaded);
+        let set_aside_dirty = self.audition.as_ref().map(|audition| audition.dirty);
+        if shifted.is_some() && (self.dirty || set_aside_dirty == Some(true)) {
+            return self.send(Evt::Failed(
+                "the preset playing would move with changes not saved: save it first".into(),
+            ));
+        }
+        if shifted.is_some() && self.audition.is_some() {
+            self.end_audition();
+            if self.audition.is_some() {
+                // Putting it back failed, and said why.
+                return;
+            }
+        }
+        if !self.run_on_device(|d| d.move_preset(setlist, from, to)) {
+            return;
+        }
+        if let Some(names) = self.try_on_device(|d| d.presets(setlist)) {
+            self.send(Evt::Presets(names));
+        }
+        for index in from.min(to)..=from.max(to) {
+            self.back_up_one(setlist, index);
+        }
+        match shifted {
+            Some(loaded) => {
+                self.select(crate::reorder::moved(loaded, from, to));
+            }
+            None => {
+                self.follow_preset();
+            }
+        }
+        let (from_label, to_label) = (self.slot_label(from), self.slot_label(to));
+        self.send(Evt::Activity(format!("moved {from_label} to {to_label}")));
+    }
+
     /// Keep the automatic backup current after a save.
     ///
     /// Silent on purpose: it costs milliseconds and nobody asked for it, so it
@@ -2368,14 +2437,21 @@ impl Worker {
     /// Save and every knob acted on the new one with the old one's state.
     /// Returns whether it reloaded.
     fn follow_preset(&mut self) -> bool {
+        self.check_preset().unwrap_or(false)
+    }
+
+    /// [`follow_preset`](Self::follow_preset), telling a check that could
+    /// not be made (`None`) from a preset that did not change: a refused
+    /// question, or a switch noticed whose preset could not be read.
+    fn check_preset(&mut self) -> Option<bool> {
         // Asked quietly: a pedal in the middle of a load may refuse, which is
         // patience rather than news, so it is asked again next time.
         let Some((setlist, index, name)) = self.try_optional_on_device(|d| d.preset_info()) else {
             self.recheck = self.device.is_some();
-            return false;
+            return None;
         };
         if (setlist, index) == (self.shown.setlist, self.shown.index) {
-            return false;
+            return Some(false);
         }
         let label = self.slot_label(index);
         self.send(Evt::Activity(format!("the pedal loaded {label} {name}")));
@@ -2383,10 +2459,11 @@ impl Worker {
         // to the one it plays from now; one being browsed stays put.
         let follow = self.setlist == self.shown.setlist && setlist != self.setlist;
         self.reload();
+        let caught_up = (self.shown.setlist, self.shown.index) == (setlist, index);
         if follow {
             self.show_setlist(setlist);
         }
-        true
+        caught_up.then_some(true)
     }
 
     /// Run something on the device, reporting failure. Returns whether it worked.
@@ -2770,6 +2847,12 @@ mod tests {
         inbox: BTreeMap<u16, StreamReader>,
         /// The next sequence number on each channel.
         seq: BTreeMap<u16, u16>,
+        /// Stream bytes received from the host on each channel, which the
+        /// pedal acknowledges as this plus a base of 0x1000.
+        received: BTreeMap<u16, u32>,
+        /// Slots a setlist's directory lists, every one of them, as a Helix
+        /// Floor's does; `None` lists up to the last one stored.
+        directory: Option<i64>,
     }
 
     /// The test preset with its tempo changed, so two slots hold documents
@@ -2824,6 +2907,8 @@ mod tests {
                 outbox: VecDeque::new(),
                 inbox: BTreeMap::new(),
                 seq: BTreeMap::new(),
+                received: BTreeMap::new(),
+                directory: None,
             }))
         }
 
@@ -2884,9 +2969,16 @@ mod tests {
                 return;
             }
             let node = frame.dst;
+            let total = self.received.entry(node).or_insert(0);
+            *total = total.wrapping_add(rest.len() as u32);
             let reader = self.inbox.entry(node).or_default();
             reader.push(rest);
             let messages = reader.take_messages().unwrap_or_default();
+            // Part of a long message: acknowledge it, so the next part fits
+            // the window. A whole one is acknowledged by its reply.
+            if messages.is_empty() {
+                self.acknowledge(node);
+            }
             for message in messages {
                 if let Ok(Message::Request { txn, opcode, args }) =
                     Message::try_from_value(message.body)
@@ -2925,7 +3017,10 @@ mod tests {
                 }
                 op::READ_PRESET => (0, Value::Bin(self.buffer.clone(), 2)),
                 op::LIST_PRESETS => {
-                    let last = self.stored.keys().max().copied().unwrap_or_default();
+                    let last = self.directory.map_or_else(
+                        || self.stored.keys().max().copied().unwrap_or_default(),
+                        |slots| slots - 1,
+                    );
                     let names = (0..=last)
                         .map(|index| {
                             let name = self.stored.get(&index).map(|(name, _)| name.clone());
@@ -2987,6 +3082,35 @@ mod tests {
                     }
                     (0, Value::Nil)
                 }
+                op::WRITE_DIRECTORY => {
+                    // The directory in its new order, each entry keyed by the
+                    // slot it was in: those slots' presets move to match.
+                    let order: Vec<i64> = args
+                        .get(key::DOCUMENT)
+                        .and_then(Value::as_raw)
+                        .and_then(|raw| hx_proto::msgpack::Decoder::new(raw).value().ok())
+                        .and_then(|list| match list {
+                            Value::Array(entries) => entries
+                                .iter()
+                                .map(|entry| match entry {
+                                    Value::Map(fields) => match fields.first() {
+                                        Some((hx_proto::msgpack::Key::Int(n), _)) => Some(*n),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                })
+                                .collect(),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    let before = std::mem::take(&mut self.stored);
+                    for (slot, was) in order.into_iter().enumerate() {
+                        if let Some(preset) = before.get(&was) {
+                            self.stored.insert(slot as i64, preset.clone());
+                        }
+                    }
+                    (0, Value::Nil)
+                }
                 op::SAVE_PRESET => {
                     let name = args
                         .get(key::NAME)
@@ -3001,15 +3125,40 @@ mod tests {
             }
         }
 
+        /// What the pedal acknowledges of the host's bytes on a channel.
+        fn acked(&self, node: u16) -> u32 {
+            0x1000u32.wrapping_add(self.received.get(&node).copied().unwrap_or(0))
+        }
+
+        /// A bare acknowledgement of the host's bytes on a channel.
+        fn acknowledge(&mut self, node: u16) {
+            let ack = self.acked(node);
+            let seq = self.seq.entry(node).or_insert(0);
+            let mut payload = Vec::new();
+            ChannelHeader {
+                seq: *seq,
+                msg_type: hx_proto::frame::MSG_ACK,
+                ack,
+            }
+            .encode_into(&mut payload);
+            let host = ChannelId::ALL
+                .iter()
+                .find(|channel| channel.device == node)
+                .map_or(0, |channel| channel.host);
+            self.outbox
+                .push_back(Frame::new(host, node, payload).encode().unwrap());
+        }
+
         /// Queue one message for the host, on the channel `node` names.
         fn reply(&mut self, node: u16, message: &Message) {
             let body = Encoder::encode(&message.to_value());
+            let ack = self.acked(node);
             let seq = self.seq.entry(node).or_insert(0);
             let mut payload = Vec::new();
             ChannelHeader {
                 seq: *seq,
                 msg_type: MSG_DATA,
-                ack: 0x1000,
+                ack,
             }
             .encode_into(&mut payload);
             *seq = seq.wrapping_add(1);
@@ -4257,6 +4406,136 @@ mod tests {
 
     /// What leaves the preset, or writes the pedal's memory, puts the
     /// audition back first; what only edits or reads does not.
+    /// A Helix Floor's worker, whose setlist lists all 128 slots and which
+    /// moves presets with one directory write.
+    fn floor_worker(pedal: &Arc<Mutex<Pedal>>) -> (Worker, Receiver<Evt>) {
+        pedal.lock().unwrap().directory = Some(128);
+        let (_commands, cmds) = mpsc::channel();
+        let (tx, events) = mpsc::channel();
+        let mut worker = Worker::new(
+            cmds,
+            Events {
+                tx,
+                repaint: RepaintSignal::default(),
+            },
+            None,
+        );
+        worker.opened(
+            hx_usb::Session::replaying(Box::new(Cable(pedal.clone())), hx_proto::HELIX_FLOOR)
+                .expect("the pretend pedal answers"),
+        );
+        let _ = events.try_iter().count();
+        (worker, events)
+    }
+
+    /// A move that would shift the preset an audition set unsaved changes
+    /// aside from asks for a save, and the audition plays on: loading the
+    /// slot again would lose them.
+    #[test]
+    fn a_move_keeps_the_changes_an_audition_set_aside() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = floor_worker(&pedal);
+        worker.handle(Cmd::SetTempo(100.0));
+        worker.handle(Cmd::AuditionDocument {
+            key: 7,
+            name: "From the cloud".into(),
+            bytes: document(150.0),
+        });
+        let _ = events.try_iter().count();
+
+        worker.handle(Cmd::MovePreset { from: 2, to: 5 });
+
+        assert!(worker.audition.is_some(), "still auditioning");
+        let pedal = pedal.lock().unwrap();
+        let tempo = hx_proto::Preset::parse(&pedal.buffer).unwrap().tempo();
+        assert_eq!(tempo, Some(150.0), "the audition still plays");
+        assert!(!pedal.opcodes().contains(&op::WRITE_DIRECTORY));
+        assert!(events
+            .try_iter()
+            .any(|e| matches!(e, Evt::Failed(why) if why.contains("save it first"))));
+    }
+
+    /// A pedal that will not say which preset plays gets no move: the one
+    /// last seen may not be the one playing.
+    #[test]
+    fn a_move_without_the_pedals_word_on_what_plays_moves_nothing() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = floor_worker(&pedal);
+        pedal.lock().unwrap().refuse.insert(op::PRESET_INFO, -3);
+
+        worker.handle(Cmd::MovePreset { from: 5, to: 1 });
+
+        assert!(!pedal
+            .lock()
+            .unwrap()
+            .opcodes()
+            .contains(&op::WRITE_DIRECTORY));
+        assert!(events
+            .try_iter()
+            .any(|e| matches!(e, Evt::Failed(why) if why.contains("nothing moved"))));
+    }
+
+    /// An audition over a preset with nothing unsaved is put back, and the
+    /// move goes ahead with the preset itself.
+    #[test]
+    fn a_move_puts_a_clean_audition_back_and_goes_ahead() {
+        let pedal = Pedal::new();
+        let (mut worker, _events) = floor_worker(&pedal);
+        worker.handle(Cmd::AuditionDocument {
+            key: 7,
+            name: "From the cloud".into(),
+            bytes: document(150.0),
+        });
+
+        worker.handle(Cmd::MovePreset { from: 2, to: 5 });
+
+        assert!(worker.audition.is_none());
+        let pedal = pedal.lock().unwrap();
+        assert_eq!(pedal.stored[&5].0, "Clean", "moved");
+        assert_eq!((pedal.loaded.1, pedal.loaded.2.as_str()), (5, "Clean"));
+        let tempo = hx_proto::Preset::parse(&pedal.buffer).unwrap().tempo();
+        assert_eq!(tempo, Some(120.0), "its own sound, not the audition's");
+    }
+
+    /// An audition that cannot be put back keeps the move from running.
+    #[test]
+    fn a_move_waits_for_an_audition_that_cannot_be_put_back() {
+        let pedal = Pedal::new();
+        let (mut worker, _events) = floor_worker(&pedal);
+        worker.handle(Cmd::AuditionDocument {
+            key: 7,
+            name: "From the cloud".into(),
+            bytes: document(150.0),
+        });
+        pedal.lock().unwrap().refuse.insert(op::WRITE_PRESET, -3);
+
+        worker.handle(Cmd::MovePreset { from: 2, to: 5 });
+
+        assert!(worker.audition.is_some(), "still held, to put back later");
+        assert!(!pedal
+            .lock()
+            .unwrap()
+            .opcodes()
+            .contains(&op::WRITE_DIRECTORY));
+    }
+
+    /// A footswitch the worker has not heard about yet: the move follows
+    /// the preset the pedal plays, not the one it last showed, so the sound
+    /// stays what it was.
+    #[test]
+    fn a_move_follows_the_preset_the_pedal_plays_now() {
+        let pedal = Pedal::new();
+        let (mut worker, _events) = floor_worker(&pedal);
+        pedal.lock().unwrap().switch_quietly(5);
+
+        worker.handle(Cmd::MovePreset { from: 5, to: 1 });
+
+        let pedal = pedal.lock().unwrap();
+        assert_eq!(pedal.stored[&1].0, "Lead", "moved");
+        assert_eq!((pedal.loaded.1, pedal.loaded.2.as_str()), (1, "Lead"));
+        assert_eq!(worker.shown.index, 1);
+    }
+
     #[test]
     fn only_leaving_the_preset_or_writing_ends_an_audition() {
         assert!(ends_audition(&Cmd::SelectPreset(3)));

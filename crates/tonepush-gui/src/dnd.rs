@@ -53,6 +53,10 @@ fn tone_file(path: &std::path::Path) -> Option<&'static str> {
 pub(crate) enum Target {
     /// A preset in the sidebar.
     Slot(i64),
+    /// The gap before a preset in the sidebar, or after the last at the
+    /// list's length: a preset dropped there moves in, the ones between
+    /// closing up.
+    Between(i64),
     /// The presets as a whole, for a setlist.
     Presets,
     /// The board: what is dropped there plays.
@@ -65,6 +69,45 @@ pub(crate) enum Target {
     Setlist(usize),
 }
 
+/// The bands over the gaps between the presets' rows, each keyed by the
+/// slot after it: a few points either side of where one row ends and the
+/// next begins, and under the last preset in the list.
+fn gap_bands(rows: &[(i64, Rect)], count: i64) -> Vec<(i64, Rect)> {
+    const REACH: f32 = 5.0;
+    let mut bands = Vec::new();
+    for (slot, rect) in rows {
+        let above = rows
+            .iter()
+            .find(|(other, _)| *other == slot - 1)
+            .map(|(_, above)| above.bottom());
+        let top = above.map_or(rect.top(), |bottom| (bottom + rect.top()) / 2.0);
+        let reach = above.map_or(REACH, |bottom| (rect.top() - bottom) / 2.0 + REACH);
+        bands.push((
+            *slot,
+            Rect::from_x_y_ranges(rect.x_range(), (top - reach)..=(top + reach)),
+        ));
+        if *slot == count - 1 {
+            bands.push((
+                count,
+                Rect::from_x_y_ranges(
+                    rect.x_range(),
+                    (rect.bottom() - REACH)..=(rect.bottom() + REACH),
+                ),
+            ));
+        }
+    }
+    bands
+}
+
+/// The part of a drop zone inside the list's view, if any shows.
+fn visible(zone: Rect, shown: Option<Rect>) -> Option<Rect> {
+    let Some(shown) = shown else {
+        return Some(zone);
+    };
+    let part = zone.intersect(shown);
+    part.is_positive().then_some(part)
+}
+
 /// What a drop would do, in the ghost's words, or why it would not.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Outcome {
@@ -75,7 +118,7 @@ pub(crate) struct Outcome {
 }
 
 impl Outcome {
-    fn does(icon: Icon, words: impl Into<String>) -> Option<Outcome> {
+    pub(crate) fn does(icon: Icon, words: impl Into<String>) -> Option<Outcome> {
         Some(Outcome {
             words: words.into(),
             icon,
@@ -83,7 +126,7 @@ impl Outcome {
         })
     }
 
-    fn refuses(words: impl Into<String>) -> Option<Outcome> {
+    pub(crate) fn refuses(words: impl Into<String>) -> Option<Outcome> {
         Some(Outcome {
             words: words.into(),
             icon: Icon::Ban,
@@ -163,7 +206,7 @@ impl App {
     }
 
     /// How many slots the pedal has.
-    fn slot_count(&self) -> i64 {
+    pub(crate) fn slot_count(&self) -> i64 {
         if self.pro_active() {
             self.pro.preset_count() as i64
         } else {
@@ -288,6 +331,7 @@ impl App {
                     },
                 )
             }
+            (Dragged::Preset(from), Target::Between(before)) => self.reorder_outcome(*from, before),
             (Dragged::Preset(_), Target::Tab(LibraryView::Cloud)) => {
                 if self.pro_active() {
                     Outcome::refuses("Keep a StompStation PRO preset from its menu first")
@@ -491,6 +535,7 @@ impl App {
                     self.put_bytes(slot, name, bytes, moving.then_some(from));
                 }
             }
+            (Dragged::Preset(from), Target::Between(before)) => self.reorder(from, before),
             (Dragged::Preset(from), Target::Tab(LibraryView::Cloud)) => {
                 if let Some((name, bytes)) = self.slot_document(from) {
                     let origin = self.origin();
@@ -722,8 +767,27 @@ impl App {
                 .map(|(slot, rect)| (*slot, *rect))
                 .collect()
         };
-        for (slot, rect) in rows {
-            self.drop_zone(rect, Target::Slot(slot));
+        // Only where the list shows them: a row scrolled away is not under
+        // the header or footer it scrolled behind.
+        let shown = if self.pro_active() {
+            self.pro.rows_shown
+        } else {
+            self.rows_shown
+        };
+        for (slot, rect) in &rows {
+            if let Some(rect) = visible(*rect, shown) {
+                self.drop_zone(rect, Target::Slot(*slot));
+            }
+        }
+        // A preset also goes between two others: a band over each gap,
+        // registered after the rows so it wins over their edges.
+        if matches!(dragged, Dragged::Preset(_)) && self.moves_presets() {
+            for (before, band) in gap_bands(&rows, self.slot_count()) {
+                if let Some(band) = visible(band, shown) {
+                    self.drop_zone(band, Target::Between(before));
+                }
+            }
+            self.paint_gap_drop(ctx, &dragged, &rows);
         }
         let board = if self.pro_active() {
             self.pro.board_rect
@@ -734,6 +798,36 @@ impl App {
             self.drop_zone(rect, Target::Board);
             self.paint_board_drop(ctx, rect);
         }
+    }
+
+    /// The line a preset would go in at, under the pointer.
+    fn paint_gap_drop(&self, ctx: &egui::Context, dragged: &Dragged, rows: &[(i64, Rect)]) {
+        let Some(Target::Between(before)) = self.drops.hover else {
+            return;
+        };
+        if !self
+            .drop_outcome(dragged, Target::Between(before), false)
+            .is_some_and(|outcome| !outcome.refused)
+        {
+            return;
+        }
+        let Some((_, band)) = gap_bands(rows, self.slot_count())
+            .into_iter()
+            .find(|(gap, _)| *gap == before)
+        else {
+            return;
+        };
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("presets-gap-drop"),
+        ));
+        let y = band.center().y;
+        let left = band.left() + 8.0;
+        painter.line_segment(
+            [Pos2::new(left, y), Pos2::new(band.right() - 8.0, y)],
+            Stroke::new(2.0, theme::accent()),
+        );
+        painter.circle_stroke(Pos2::new(left, y), 3.5, Stroke::new(2.0, theme::accent()));
     }
 
     /// While something that plays is dragged, the board says it takes it:
@@ -1039,6 +1133,77 @@ mod tests {
     use crate::session::{Cmd, Evt};
     use crate::{Connection, LibEntry};
     use std::sync::mpsc;
+
+    #[test]
+    fn every_gap_between_presets_takes_a_drop() {
+        let row = |slot: i64, top: f32| {
+            (
+                slot,
+                Rect::from_min_size(Pos2::new(0.0, top), Vec2::new(200.0, 26.0)),
+            )
+        };
+        // 01A to 01C, then a bank's gap of 10 before 02A, the last slot.
+        let rows = [row(0, 0.0), row(1, 26.0), row(2, 52.0), row(3, 88.0)];
+        let bands = gap_bands(&rows, 4);
+        let keys: Vec<i64> = bands.iter().map(|(before, _)| *before).collect();
+        assert_eq!(keys, [0, 1, 2, 3, 4]);
+        // Between two rows the band straddles their edge.
+        assert!(bands[1].1.contains(Pos2::new(50.0, 24.0)));
+        assert!(bands[1].1.contains(Pos2::new(50.0, 28.0)));
+        // The bank's gap belongs to the gap before 02A, all of it.
+        assert!(bands[3].1.contains(Pos2::new(50.0, 80.0)));
+        assert!(bands[3].1.contains(Pos2::new(50.0, 86.0)));
+        // The middle of a row is still the row: copy or move over it.
+        assert!(bands
+            .iter()
+            .all(|(_, band)| !band.contains(Pos2::new(50.0, 39.0))));
+        // Under the last preset: after it.
+        assert!(bands[4].1.contains(Pos2::new(50.0, 116.0)));
+    }
+
+    /// A preset dragged over a list scrolled part-way: the rows and gaps
+    /// scrolled out of view take no drop, so releasing it over the header
+    /// or footer they lie behind neither copies nor moves anything.
+    #[test]
+    fn rows_scrolled_out_of_view_take_no_drop() {
+        let (mut app, _events, _cmds) = app();
+        online(&mut app);
+        app.device = "Helix Floor".into();
+        let ctx = egui::Context::default();
+        egui::DragAndDrop::set_payload(&ctx, Dragged::Preset(1));
+        app.row_rects = (0..16)
+            .map(|slot| {
+                let top = slot as f32 * 26.0 - 100.0;
+                (
+                    slot,
+                    Rect::from_min_size(Pos2::new(0.0, top), Vec2::new(200.0, 26.0)),
+                )
+            })
+            .collect();
+        // The list shows 0 to 200: the rows from 03D to 04C.
+        app.rows_shown = Some(Rect::from_min_max(Pos2::ZERO, Pos2::new(200.0, 200.0)));
+
+        app.register_drop_zones(&ctx);
+
+        let zones = &app.drops.zones;
+        let header = Pos2::new(50.0, -40.0);
+        let footer = Pos2::new(50.0, 260.0);
+        for pointer in [header, footer] {
+            assert!(
+                zones.iter().all(|(rect, target)| !rect.contains(pointer)
+                    || !matches!(target, Target::Slot(_) | Target::Between(_))),
+                "{pointer:?}: {zones:?}"
+            );
+        }
+        // What shows still takes both.
+        assert!(zones.iter().any(
+            |(rect, target)| *target == Target::Slot(5) && rect.contains(Pos2::new(50.0, 40.0))
+        ));
+        assert!(zones
+            .iter()
+            .any(|(rect, target)| *target == Target::Between(5)
+                && rect.contains(Pos2::new(50.0, 30.0))));
+    }
 
     fn app() -> (App, mpsc::Sender<Evt>, mpsc::Receiver<Cmd>) {
         let (to_device, cmds) = mpsc::channel();

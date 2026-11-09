@@ -441,6 +441,86 @@ impl Session {
         Ok(())
     }
 
+    /// Move the preset in slot `from` of a setlist to slot `to`, the presets
+    /// between closing up behind it.
+    ///
+    /// One message, as HX Edit sends it: the setlist's directory, read with
+    /// opcode 1, goes back with opcode 2 in the new order, and the device
+    /// moves its presets to match - documents and names alike, checked byte
+    /// for byte on a Helix Floor. Only where the profile says so.
+    pub fn move_preset(&mut self, setlist: i64, from: i64, to: i64) -> Result<()> {
+        non_negative(setlist, "setlist")?;
+        preset_index(&self.profile, from)?;
+        preset_index(&self.profile, to)?;
+        if !self.profile.moves_presets {
+            return Err(Error::Protocol(format!(
+                "moving a preset is not measured on {}",
+                self.profile.name
+            )));
+        }
+        self.bootstrap()?;
+        let moved = self.write_directory(setlist, from, to);
+        // Close what the opening began, after a refusal too: the session
+        // goes on, and so would the device's transfer state. A close that
+        // loses the session says so, even after a refusal, so the caller
+        // does not go on using it.
+        let usable = moved
+            .as_ref()
+            .err()
+            .is_none_or(|error| !error.loses_session());
+        if usable {
+            if let Err(ended) = self.command(ChannelId::CONTROL, rpc::op::END, hx_proto::msgmap! {})
+            {
+                if moved.is_ok() || ended.loses_session() {
+                    return Err(ended);
+                }
+            }
+        }
+        moved
+    }
+
+    /// Read a setlist's directory, move one entry, and write it back.
+    fn write_directory(&mut self, setlist: i64, from: i64, to: i64) -> Result<()> {
+        let listed = self.request(
+            ChannelId::CONTROL,
+            rpc::op::LIST_PRESETS,
+            hx_proto::msgmap! {
+                rpc::key::SETLIST => Value::Int(setlist),
+                rpc::key::ARGS => Value::Int(2),
+            },
+        )?;
+        let Value::Array(mut entries) = listed else {
+            return Err(Error::Protocol(
+                "the setlist's directory was not a list".into(),
+            ));
+        };
+        // Sent back as the device gave it, entry for entry: only the order
+        // changes. A directory of another size is not this device's.
+        if entries.len() != usize::from(self.profile.presets)
+            || !entries
+                .iter()
+                .all(|entry| matches!(entry, Value::Map(fields) if fields.len() == 1))
+        {
+            return Err(Error::Protocol(format!(
+                "the setlist's directory has {} entries, not {} single ones",
+                entries.len(),
+                self.profile.presets
+            )));
+        }
+        let entry = entries.remove(from as usize);
+        entries.insert(to as usize, entry);
+        let directory = hx_proto::msgpack::Encoder::encode(&Value::Array(entries));
+        self.command_deferred(
+            ChannelId::CONTROL,
+            rpc::op::WRITE_DIRECTORY,
+            hx_proto::msgmap! {
+                rpc::key::SETLIST => Value::Int(setlist),
+                rpc::key::DOCUMENT => Value::Bin(directory, 2),
+                rpc::key::ARGS => Value::Int(2),
+            },
+        )
+    }
+
     /// Bring the control channel up to the state HX Edit leaves it in.
     ///
     /// Opening the service is not enough: HX Edit follows it with a fixed
@@ -1831,6 +1911,132 @@ mod pedal_tests {
             121 => Value::Int(27),
             106 => Value::Nil,
         }
+    }
+
+    /// A Floor's setlist 3, the slots named A to H and the rest empty, as
+    /// its directory lists them: numbered from 3 * 128.
+    fn floor_with_a_setlist() -> (std::sync::Arc<std::sync::Mutex<Pedal>>, Session) {
+        let pedal = Pedal::new();
+        pedal.lock().unwrap().directories.insert(
+            3,
+            (0..128)
+                .map(|slot| {
+                    let name = if slot < 8 {
+                        ((b'A' + slot as u8) as char).to_string()
+                    } else {
+                        "New Preset".to_owned()
+                    };
+                    (3 * 128 + slot, name)
+                })
+                .collect(),
+        );
+        let session = fake::session_as(&pedal, hx_proto::HELIX_FLOOR);
+        (pedal, session)
+    }
+
+    fn names(pedal: &std::sync::Arc<std::sync::Mutex<Pedal>>) -> String {
+        pedal.lock().unwrap().directories[&3][..8]
+            .iter()
+            .map(|(_, name)| name.as_str())
+            .collect()
+    }
+
+    /// One message moves a preset, and the ones between close up behind
+    /// it, either way along the setlist.
+    #[test]
+    fn a_preset_moves_in_one_message() {
+        let (pedal, mut session) = floor_with_a_setlist();
+        let opened = pedal.lock().unwrap().requests.len();
+        session.move_preset(3, 1, 5).expect("down the setlist");
+        assert_eq!(names(&pedal), "ACDEFBGH");
+        session.move_preset(3, 5, 1).expect("and back up");
+        assert_eq!(names(&pedal), "ABCDEFGH");
+        let opcodes = pedal.lock().unwrap().opcodes()[opened..].to_vec();
+        let writes = opcodes
+            .iter()
+            .filter(|&&o| o == rpc::op::WRITE_DIRECTORY)
+            .count();
+        assert_eq!(writes, 2, "one directory write per move");
+        // Nothing else: the bracket, the directory read and its write, and
+        // asking what is loaded while the write settles. No slot is read,
+        // written, emptied, renamed or saved on the way.
+        let bracket = [
+            rpc::op::PRESET_INFO,
+            rpc::op::END,
+            rpc::op::LIST_SETLISTS,
+            rpc::op::LIST_PRESETS,
+            rpc::op::READY,
+            rpc::op::LIST_IRS,
+            rpc::op::BEGIN,
+            rpc::op::WRITE_DIRECTORY,
+        ];
+        assert!(
+            opcodes.iter().all(|o| bracket.contains(o)),
+            "only the directory: {opcodes:?}"
+        );
+    }
+
+    /// A refused move whose close then goes unanswered reports the lost
+    /// session, not only the refusal, so nothing more is sent on it.
+    #[test]
+    fn a_refused_move_whose_close_times_out_loses_the_session() {
+        let (pedal, mut session) = floor_with_a_setlist();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.refuses.insert(rpc::op::WRITE_DIRECTORY, -3);
+            pedal.goes_quiet_after = Some(rpc::op::WRITE_DIRECTORY);
+        }
+
+        let error = session.move_preset(3, 1, 5).expect_err("refused");
+
+        assert!(error.loses_session(), "{error}");
+        assert_eq!(names(&pedal), "ABCDEFGH");
+    }
+
+    /// A refused move is closed as usual, and the session goes on.
+    #[test]
+    fn a_refused_move_is_closed_and_the_session_goes_on() {
+        let (pedal, mut session) = floor_with_a_setlist();
+        pedal
+            .lock()
+            .unwrap()
+            .refuses
+            .insert(rpc::op::WRITE_DIRECTORY, -3);
+
+        let error = session.move_preset(3, 1, 5).expect_err("refused");
+
+        assert!(matches!(error, Error::Device(_)), "{error}");
+        let opcodes = pedal.lock().unwrap().opcodes();
+        assert_eq!(opcodes.last(), Some(&rpc::op::END), "{opcodes:?}");
+    }
+
+    /// The control channel is opened as HX Edit opens it, and closed again
+    /// after the directory is written.
+    #[test]
+    fn a_move_is_bracketed_on_the_control_channel() {
+        let (pedal, mut session) = floor_with_a_setlist();
+        session.move_preset(3, 0, 2).unwrap();
+        let opcodes = pedal.lock().unwrap().opcodes();
+        let written = opcodes
+            .iter()
+            .position(|&o| o == rpc::op::WRITE_DIRECTORY)
+            .unwrap();
+        assert_eq!(opcodes[written - 2], rpc::op::BEGIN, "{opcodes:?}");
+        assert_eq!(opcodes[written - 1], rpc::op::LIST_PRESETS, "{opcodes:?}");
+        assert!(
+            opcodes[written + 1..].contains(&rpc::op::END),
+            "closed again: {opcodes:?}"
+        );
+    }
+
+    /// Where moving is not measured, nothing is sent for it.
+    #[test]
+    fn an_hx_stomp_does_not_move_presets() {
+        let pedal = Pedal::new();
+        let mut session = fake::session(&pedal);
+        let before = pedal.lock().unwrap().requests.len();
+        assert!(session.move_preset(0, 1, 5).is_err());
+        assert_eq!(pedal.lock().unwrap().requests.len(), before);
     }
 
     /// `tonepush watch`'s loop, against a pedal that stops sending once 4 KB
