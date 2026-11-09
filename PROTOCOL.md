@@ -553,6 +553,10 @@ which is what an Auto Color switch lights up as. Key 65 on the outer map is
 momentary, 109 the custom label, 66 the chosen LED colour, and both are nil when
 the switch is on its defaults.
 
+An HX Stomp on firmware 3.80 can also report a snapshot action with
+`68: 3` and `69: {109: "Snapshot"}`. The target has no block index. TonePush
+omits this action from its list of controlled effect blocks.
+
 Keys 72 and 73 carry the ends of the controller's travel, normalised. Bypass is a switch, so
 only a footswitch or a CC can drive it - HX Edit lists expression pedals for a
 bypass and then steps over them.

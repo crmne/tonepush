@@ -206,6 +206,23 @@ fn decode_switch(switch: u8, reply: &Value) -> Result<Switch> {
         Some(Value::Array(items)) => items
             .iter()
             .enumerate()
+            .filter(|(_, item)| {
+                // A snapshot action controls the preset, not an effect block.
+                // It has no block index and does not belong in `Switch::carries`.
+                let target = item.get(rpc::key::SWITCH_TARGET);
+                let is_snapshot = item
+                    .get(rpc::key::SWITCH_ASSIGNMENT_KIND)
+                    .and_then(Value::as_i64)
+                    == Some(3)
+                    && target
+                        .and_then(|target| target.get(rpc::key::NAME))
+                        .and_then(Value::as_str)
+                        == Some("Snapshot")
+                    && target
+                        .and_then(|target| target.get(rpc::key::BLOCK))
+                        .is_none();
+                !is_snapshot
+            })
             .map(|(position, item)| carried(item, position))
             .collect::<Result<_>>()?,
         Some(_) => {
@@ -1798,6 +1815,42 @@ mod validation_tests {
             }]),
         };
         assert!(decode_switch(1, &bad_entry).is_err());
+    }
+
+    #[test]
+    fn snapshot_actions_are_not_treated_as_footswitch_block_assignments() {
+        let reply = hx_proto::msgmap! {
+            rpc::key::SWITCH => Value::Int(4),
+            rpc::key::MOMENTARY => Value::Bool(true),
+            rpc::key::SWITCH_ASSIGNED => Value::Array(vec![
+                hx_proto::msgmap! {
+                    rpc::key::ENABLED => Value::Bool(false),
+                    rpc::key::SWITCH_ASSIGNMENT_KIND => Value::Int(3),
+                    rpc::key::LED_COLOUR => Value::Int(462_860),
+                    rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
+                        rpc::key::NAME => Value::Str("Snapshot".into()),
+                    },
+                },
+                hx_proto::msgmap! {
+                    rpc::key::ENABLED => Value::Bool(true),
+                    rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
+                        rpc::key::NAME => Value::Str("Drive".into()),
+                        rpc::key::BLOCK => Value::Int(4),
+                    },
+                },
+            ]),
+        };
+        let switch = decode_switch(5, &reply).unwrap();
+        assert!(switch.momentary);
+        assert_eq!(
+            switch.carries,
+            vec![Carried {
+                block: 4,
+                name: "Drive".into(),
+                colour: None,
+                enabled: true,
+            }],
+        );
     }
 
     #[test]

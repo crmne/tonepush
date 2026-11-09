@@ -88,6 +88,8 @@ pub mod key {
     pub const LED_COLOUR: i64 = 66;
     /// What a footswitch controls: an array, one entry per assignment.
     pub const SWITCH_ASSIGNED: i64 = 67;
+    /// Assignment kind in an opcode 33 reply. A snapshot action uses 3.
+    pub const SWITCH_ASSIGNMENT_KIND: i64 = 68;
     /// Inside one of those entries, what it points at.
     pub const SWITCH_TARGET: i64 = 69;
     /// Footswitch index on opcodes 56, 57 and 33.
