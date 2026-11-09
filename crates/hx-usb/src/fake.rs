@@ -36,6 +36,11 @@ pub struct Pedal {
     /// How many more questions about IRs are answered from the old contents
     /// before an accepted upload lands.
     pub ir_delay: usize,
+    /// Opcodes the pedal refuses, with the error code it answers.
+    pub refuses: BTreeMap<i64, i64>,
+    /// Answer this opcode, then answer nothing more.
+    pub goes_quiet_after: Option<i64>,
+    quiet: bool,
     /// Each setlist's presets by name, in slot order, as its directory lists
     /// them. A preset's number in the directory is its setlist times 128
     /// plus its slot when it was put there, as on a Helix Floor.
@@ -90,6 +95,9 @@ impl Pedal {
             irs: BTreeMap::new(),
             writing_ir: None,
             ir_delay: 0,
+            refuses: BTreeMap::new(),
+            goes_quiet_after: None,
+            quiet: false,
             directories: BTreeMap::new(),
             requests: Vec::new(),
             outbox: VecDeque::new(),
@@ -181,6 +189,10 @@ impl Pedal {
                 Message::try_from_value(message.body)
             {
                 self.requests.push((node, txn, opcode, args.clone()));
+                if self.quiet {
+                    continue;
+                }
+                self.quiet = self.goes_quiet_after == Some(opcode);
                 let (status, result) = self.answer(opcode, &args);
                 self.reply(
                     node,
@@ -210,6 +222,12 @@ impl Pedal {
 
     fn answer(&mut self, opcode: i64, args: &Value) -> (i64, Value) {
         let number = |k| args.get(k).and_then(Value::as_i64).unwrap_or_default();
+        if let Some(code) = self.refuses.get(&opcode) {
+            return (
+                255,
+                hx_proto::msgmap! { key::ERROR_CODE => Value::Int(*code) },
+            );
+        }
         match opcode {
             op::PRESET_INFO => (
                 0,

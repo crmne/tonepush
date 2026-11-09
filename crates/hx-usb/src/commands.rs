@@ -461,15 +461,19 @@ impl Session {
         self.bootstrap()?;
         let moved = self.write_directory(setlist, from, to);
         // Close what the opening began, after a refusal too: the session
-        // goes on, and so would the device's transfer state.
+        // goes on, and so would the device's transfer state. A close that
+        // loses the session says so, even after a refusal, so the caller
+        // does not go on using it.
         let usable = moved
             .as_ref()
             .err()
             .is_none_or(|error| !error.loses_session());
         if usable {
-            let ended = self.command(ChannelId::CONTROL, rpc::op::END, hx_proto::msgmap! {});
-            if moved.is_ok() {
-                ended?;
+            if let Err(ended) = self.command(ChannelId::CONTROL, rpc::op::END, hx_proto::msgmap! {})
+            {
+                if moved.is_ok() || ended.loses_session() {
+                    return Err(ended);
+                }
             }
         }
         moved
@@ -1953,7 +1957,50 @@ mod pedal_tests {
             .iter()
             .filter(|&&o| o == rpc::op::WRITE_DIRECTORY)
             .count();
-        assert_eq!(writes, 2, "one directory write per move, no slot writes");
+        assert_eq!(writes, 2, "one directory write per move");
+        let opcodes = pedal.lock().unwrap().opcodes();
+        for preset_op in [
+            rpc::op::WRITE_PRESET,
+            rpc::op::RENAME_PRESET,
+            rpc::op::SAVE_PRESET,
+            rpc::op::READ_PRESET,
+        ] {
+            assert!(!opcodes.contains(&preset_op), "no slot work: {opcodes:?}");
+        }
+    }
+
+    /// A refused move whose close then goes unanswered reports the lost
+    /// session, not only the refusal, so nothing more is sent on it.
+    #[test]
+    fn a_refused_move_whose_close_times_out_loses_the_session() {
+        let (pedal, mut session) = floor_with_a_setlist();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.refuses.insert(rpc::op::WRITE_DIRECTORY, -3);
+            pedal.goes_quiet_after = Some(rpc::op::WRITE_DIRECTORY);
+        }
+
+        let error = session.move_preset(3, 1, 5).expect_err("refused");
+
+        assert!(error.loses_session(), "{error}");
+        assert_eq!(names(&pedal), "ABCDEFGH");
+    }
+
+    /// A refused move is closed as usual, and the session goes on.
+    #[test]
+    fn a_refused_move_is_closed_and_the_session_goes_on() {
+        let (pedal, mut session) = floor_with_a_setlist();
+        pedal
+            .lock()
+            .unwrap()
+            .refuses
+            .insert(rpc::op::WRITE_DIRECTORY, -3);
+
+        let error = session.move_preset(3, 1, 5).expect_err("refused");
+
+        assert!(matches!(error, Error::Device(_)), "{error}");
+        let opcodes = pedal.lock().unwrap().opcodes();
+        assert_eq!(opcodes.last(), Some(&rpc::op::END), "{opcodes:?}");
     }
 
     /// The control channel is opened as HX Edit opens it, and closed again
