@@ -1946,27 +1946,34 @@ mod pedal_tests {
     #[test]
     fn a_preset_moves_in_one_message() {
         let (pedal, mut session) = floor_with_a_setlist();
+        let opened = pedal.lock().unwrap().requests.len();
         session.move_preset(3, 1, 5).expect("down the setlist");
         assert_eq!(names(&pedal), "ACDEFBGH");
         session.move_preset(3, 5, 1).expect("and back up");
         assert_eq!(names(&pedal), "ABCDEFGH");
-        let writes = pedal
-            .lock()
-            .unwrap()
-            .opcodes()
+        let opcodes = pedal.lock().unwrap().opcodes()[opened..].to_vec();
+        let writes = opcodes
             .iter()
             .filter(|&&o| o == rpc::op::WRITE_DIRECTORY)
             .count();
         assert_eq!(writes, 2, "one directory write per move");
-        let opcodes = pedal.lock().unwrap().opcodes();
-        for preset_op in [
-            rpc::op::WRITE_PRESET,
-            rpc::op::RENAME_PRESET,
-            rpc::op::SAVE_PRESET,
-            rpc::op::READ_PRESET,
-        ] {
-            assert!(!opcodes.contains(&preset_op), "no slot work: {opcodes:?}");
-        }
+        // Nothing else: the bracket, the directory read and its write, and
+        // asking what is loaded while the write settles. No slot is read,
+        // written, emptied, renamed or saved on the way.
+        let bracket = [
+            rpc::op::PRESET_INFO,
+            rpc::op::END,
+            rpc::op::LIST_SETLISTS,
+            rpc::op::LIST_PRESETS,
+            rpc::op::READY,
+            rpc::op::LIST_IRS,
+            rpc::op::BEGIN,
+            rpc::op::WRITE_DIRECTORY,
+        ];
+        assert!(
+            opcodes.iter().all(|o| bracket.contains(o)),
+            "only the directory: {opcodes:?}"
+        );
     }
 
     /// A refused move whose close then goes unanswered reports the lost
