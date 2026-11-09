@@ -2244,17 +2244,18 @@ impl Worker {
         let shifted = (self.shown.setlist == setlist)
             .then_some(self.shown.index)
             .filter(|&loaded| crate::reorder::moved(loaded, from, to) != loaded);
+        let set_aside_dirty = self.audition.as_ref().map(|audition| audition.dirty);
+        if shifted.is_some() && (self.dirty || set_aside_dirty == Some(true)) {
+            return self.send(Evt::Failed(
+                "the preset playing would move with changes not saved: save it first".into(),
+            ));
+        }
         if shifted.is_some() && self.audition.is_some() {
             self.end_audition();
             if self.audition.is_some() {
                 // Putting it back failed, and said why.
                 return;
             }
-        }
-        if shifted.is_some() && self.dirty {
-            return self.send(Evt::Failed(
-                "the preset playing would move with changes not saved: save it first".into(),
-            ));
         }
         if !self.run_on_device(|d| d.move_preset(setlist, from, to)) {
             return;
@@ -4414,11 +4415,11 @@ mod tests {
         (worker, events)
     }
 
-    /// An audition is put back before a move shifts the preset it plays
-    /// over, so the changes it set aside are not lost with the slot loaded
-    /// again: here they ask for a save, and nothing moves.
+    /// A move that would shift the preset an audition set unsaved changes
+    /// aside from asks for a save, and the audition plays on: loading the
+    /// slot again would lose them.
     #[test]
-    fn a_move_puts_an_audition_back_before_it_shifts_the_preset() {
+    fn a_move_keeps_the_changes_an_audition_set_aside() {
         let pedal = Pedal::new();
         let (mut worker, events) = floor_worker(&pedal);
         worker.handle(Cmd::SetTempo(100.0));
@@ -4431,14 +4432,36 @@ mod tests {
 
         worker.handle(Cmd::MovePreset { from: 2, to: 5 });
 
-        assert!(worker.audition.is_none());
+        assert!(worker.audition.is_some(), "still auditioning");
         let pedal = pedal.lock().unwrap();
         let tempo = hx_proto::Preset::parse(&pedal.buffer).unwrap().tempo();
-        assert_eq!(tempo, Some(100.0), "the edit set aside plays again");
+        assert_eq!(tempo, Some(150.0), "the audition still plays");
         assert!(!pedal.opcodes().contains(&op::WRITE_DIRECTORY));
         assert!(events
             .try_iter()
             .any(|e| matches!(e, Evt::Failed(why) if why.contains("save it first"))));
+    }
+
+    /// An audition over a preset with nothing unsaved is put back, and the
+    /// move goes ahead with the preset itself.
+    #[test]
+    fn a_move_puts_a_clean_audition_back_and_goes_ahead() {
+        let pedal = Pedal::new();
+        let (mut worker, _events) = floor_worker(&pedal);
+        worker.handle(Cmd::AuditionDocument {
+            key: 7,
+            name: "From the cloud".into(),
+            bytes: document(150.0),
+        });
+
+        worker.handle(Cmd::MovePreset { from: 2, to: 5 });
+
+        assert!(worker.audition.is_none());
+        let pedal = pedal.lock().unwrap();
+        assert_eq!(pedal.stored[&5].0, "Clean", "moved");
+        assert_eq!((pedal.loaded.1, pedal.loaded.2.as_str()), (5, "Clean"));
+        let tempo = hx_proto::Preset::parse(&pedal.buffer).unwrap().tempo();
+        assert_eq!(tempo, Some(120.0), "its own sound, not the audition's");
     }
 
     /// An audition that cannot be put back keeps the move from running.
