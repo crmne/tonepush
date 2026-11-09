@@ -1990,7 +1990,7 @@ impl App {
         if !self.is_effect(block) {
             return None;
         }
-        Some((block.position, self.model_name(block.model)))
+        Some((block.position, self.slot_label(block)))
     }
 
     fn model_name(&self, model: u32) -> String {
@@ -2009,6 +2009,9 @@ impl App {
     /// than the slot kind.
     fn slot_label(&self, block: &session::Block) -> String {
         use hx_proto::preset::Kind;
+        if self.catalog.as_ref().is_some_and(|catalog| catalog.is_nam_lite(block.model)) {
+            return hx_catalog::nam_lite_label(&block.values, &self.irs);
+        }
         let named = |fallback: &str| {
             let name = self.model_name(block.model);
             if name.is_empty() {
@@ -2040,6 +2043,9 @@ impl App {
             return Some("Amp+Cab".to_owned());
         }
         let catalog = self.catalog.as_ref()?;
+        if catalog.is_nam_lite(block.model) {
+            return Some("NAM".into());
+        }
         let model = catalog.model_number(block.model)?;
         let id = catalog.category_of(&model.id)?;
         Some(catalog.category(id)?.name.clone())
@@ -7243,19 +7249,20 @@ impl App {
     /// symbol table, so resolving it painted the input and output in the amp
     /// category's red.
     fn block_colour(&self, block: &session::Block) -> egui::Color32 {
-        let fallback = theme::muted();
         if block.kind != hx_proto::preset::Kind::Block || block.model == 0 {
-            return fallback;
+            return theme::muted();
         }
         let Some(catalog) = self.catalog.as_ref() else {
-            return fallback;
+            return theme::muted();
         };
+        if catalog.is_nam_lite(block.model) {
+            return theme::category_colour("NAM");
+        }
         catalog
             .model_number(block.model)
             .and_then(|m| catalog.category_of(&m.id))
             .and_then(|c| catalog.category(c))
-            .map(|c| theme::category_colour(&c.name))
-            .unwrap_or(fallback)
+            .map_or_else(theme::muted, |c| theme::category_colour(&c.name))
     }
 }
 

@@ -31,6 +31,27 @@ pub use hxb::{
 pub use inspect::{inspect, ChainContent, OutputTarget, Tone, ToneBlock};
 pub use write::{to_hlx, to_hlx_for_device, Written};
 
+pub const NAM_LITE_ID: u32 = 555;
+pub const NAM_LITE_MODEL_PARAM: usize = 6;
+const NAM_LITE_CATALOG_ID: &str = "TonePush_NAMA2Lite";
+
+/// The mod stores a one-based IR slot as a float and truncates it on playback.
+pub fn nam_lite_slot(values: &[f32]) -> Option<i64> {
+    let value = *values.get(NAM_LITE_MODEL_PARAM)?;
+    (value.is_finite() && (1.0..129.0).contains(&value)).then(|| value as i64)
+}
+
+pub fn nam_lite_label(values: &[f32], irs: &[(i64, String)]) -> String {
+    let Some(slot) = nam_lite_slot(values) else {
+        return "NAM A2 Lite (no capture)".into();
+    };
+    irs.iter()
+        .find(|(index, _)| *index == slot - 1)
+        .map(|(_, name)| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("NAM A2 Lite (slot {slot})"))
+}
+
 /// The key of HX Edit's footswitch LED colour list, for [`Catalog::menu`].
 /// Index 0 is Auto Color, which the protocol reaches by its own opcode.
 pub const FOOTSWITCH_LED: &str = "footswitchLED";
@@ -261,12 +282,73 @@ impl Catalog {
     /// Load from wherever HX Edit is installed.
     pub fn load() -> Result<Catalog, Error> {
         let dir = resources_dir().ok_or_else(|| Error::NotInstalled(default_resources()))?;
-        Catalog::load_from(&dir)
+        let mut catalog = Catalog::load_from(&dir)?;
+        if std::env::var_os("TONEPUSH_HX_NAM_LITE").as_deref() == Some(std::ffi::OsStr::new("1")) {
+            catalog.enable_nam_lite();
+        }
+        Ok(catalog)
     }
 
     /// Load from an explicit resources directory.
     pub fn load_from(dir: &Path) -> Result<Catalog, Error> {
         load::catalog(dir)
+    }
+
+    fn enable_nam_lite(&mut self) {
+        let Some(symbol) = self.symbol(NAM_LITE_ID) else {
+            return;
+        };
+        let Some(donor) = self.model_number(NAM_LITE_ID) else {
+            return;
+        };
+        let mut model = donor.clone();
+        let controls = [
+            ("Input", Kind::Continuous, 0.0, 1.0, 0.5, Some("nam_knob")),
+            ("Treble", Kind::Continuous, 0.0, 1.0, 0.5, Some("nam_knob")),
+            ("Output", Kind::Continuous, 0.0, 1.0, 0.5, Some("nam_knob")),
+            ("Polarity", Kind::Enum, 0.0, 1.0, 0.0, Some("nam_polarity")),
+            ("Bass", Kind::Continuous, 0.0, 1.0, 0.5, Some("nam_knob")),
+            ("Mid", Kind::Continuous, 0.0, 1.0, 0.5, Some("nam_knob")),
+            ("Model", Kind::Continuous, 0.0, 128.0, 1.0, Some("nam_slot")),
+            ("Mid Freq", Kind::Continuous, 150.0, 3000.0, 650.0, Some("nam_hz")),
+            ("Q", Kind::Enum, 0.0, 2.0, 0.0, Some("nam_q")),
+            ("High Cut", Kind::Continuous, 0.0, 1.0, 1.0, Some("nam_knob")),
+        ];
+        if symbol.symbol != "HD2_DistXenomorphFuzzMono" || symbol.parameters.len() != controls.len() {
+            return;
+        }
+        model.id = NAM_LITE_CATALOG_ID.into();
+        model.name = "NAM A2 Lite".into();
+        model.stereo = false;
+        model.image = None;
+        model.params = symbol
+            .parameters
+            .iter()
+            .zip(controls)
+            .map(|(id, (name, kind, min, max, default, display))| Param {
+                id: id.clone(),
+                name: name.into(),
+                kind,
+                min,
+                max,
+                default,
+                display: display.map(str::to_owned),
+            })
+            .collect();
+        self.models.insert(model.id.clone(), model);
+        for (key, display) in [
+            ("nam_knob", format::Display::numeric(10.0, "%.1f")),
+            ("nam_slot", format::Display::numeric(1.0, "%.0f")),
+            ("nam_hz", format::Display::numeric(1.0, "%.0f Hz")),
+            ("nam_polarity", format::Display::labels(&["Normal", "Inverted"])),
+            ("nam_q", format::Display::labels(&["0.7", "1.4", "2.8"])),
+        ] {
+            self.displays.insert(key.into(), display);
+        }
+    }
+
+    pub fn is_nam_lite(&self, number: u32) -> bool {
+        number == NAM_LITE_ID && self.models.contains_key(NAM_LITE_CATALOG_ID)
     }
 
     pub fn model(&self, id: &str) -> Option<&Model> {
@@ -280,6 +362,9 @@ impl Catalog {
 
     /// The model behind a wire model number.
     pub fn model_number(&self, number: u32) -> Option<&Model> {
+        if self.is_nam_lite(number) {
+            return self.model(NAM_LITE_CATALOG_ID);
+        }
         let symbol = self.symbol(number)?;
         self.models.get(symbol.model.as_deref()?)
     }
@@ -576,7 +661,8 @@ impl Catalog {
         let typed: f32 = text[..number_end].parse().ok()?;
         let unit = text[number_end..].trim();
         let native = entry.map_or(typed, |d| d.to_native(typed, unit, self));
-        param.accepts(native).then_some(native)
+        (param.accepts(native) && (param.display.as_deref() != Some("nam_slot") || native.fract() == 0.0))
+            .then_some(native)
     }
 
     /// The list a parameter is chosen from, when it is a menu rather than a
@@ -681,6 +767,36 @@ pub(crate) mod tests {
             }
             Err(e) => panic!("HX Edit is installed but its catalog failed to load: {e}"),
         }
+    }
+
+    #[test]
+    fn nam_capture_names_use_the_firmware_slot_number() {
+        let mut values = vec![0.0; 10];
+        values[NAM_LITE_MODEL_PARAM] = 100.75;
+        let irs = [(99, " Benson Clean ".to_owned()), (100, "Matchless".to_owned())];
+        assert_eq!(nam_lite_label(&values, &irs), "Benson Clean");
+        values[NAM_LITE_MODEL_PARAM] = 101.0;
+        assert_eq!(nam_lite_label(&values, &irs), "Matchless");
+        values[NAM_LITE_MODEL_PARAM] = 102.0;
+        assert_eq!(nam_lite_label(&values, &irs), "NAM A2 Lite (slot 102)");
+        values[NAM_LITE_MODEL_PARAM] = 129.0;
+        assert_eq!(nam_lite_slot(&values), None);
+    }
+
+    #[test]
+    fn nam_overlay_uses_float_slots_and_preserves_the_stock_catalog() {
+        let Some(mut catalog) = catalog() else { return };
+        assert!(!catalog.is_nam_lite(NAM_LITE_ID));
+        let stock = catalog.model_number(NAM_LITE_ID).unwrap().name.clone();
+        catalog.enable_nam_lite();
+        assert_eq!(catalog.model_number(NAM_LITE_ID).unwrap().name, "NAM A2 Lite");
+        let param = catalog.param(NAM_LITE_ID, NAM_LITE_MODEL_PARAM).unwrap();
+        assert_eq!(param.name, "Model");
+        assert_eq!(catalog.format(param, 100.0), "100");
+        assert_eq!(catalog.parse(param, "100"), Some(100.0));
+        assert_eq!(catalog.parse(param, "100.5"), None);
+        assert_eq!(param.kind.wire(100.0), hx_proto::msgpack::Value::F32(100.0));
+        assert_eq!(catalog.model("HD2_DistXenomorphFuzz").map(|m| &m.name), Some(&stock));
     }
 
     #[test]

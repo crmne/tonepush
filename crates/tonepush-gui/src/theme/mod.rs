@@ -678,7 +678,7 @@ impl Category {
             "Pitch/Synth" => Category::PitchSynth,
             "Filter" => Category::Filter,
             "Wah" => Category::Wah,
-            "Amp" | "Amp+Cab" => Category::Amp,
+            "Amp" | "Amp+Cab" | "NAM" => Category::Amp,
             "Preamp" => Category::Preamp,
             "Cab" => Category::Cab,
             "IR" => Category::Ir,
