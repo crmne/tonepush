@@ -62,7 +62,9 @@ impl Display {
 
     pub(crate) fn labels(labels: &[&str]) -> Self {
         Self {
-            format: Some(Pattern::Labels(labels.iter().map(|s| (*s).to_owned()).collect())),
+            format: Some(Pattern::Labels(
+                labels.iter().map(|s| (*s).to_owned()).collect(),
+            )),
             ..Self::default()
         }
     }

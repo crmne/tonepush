@@ -770,7 +770,10 @@ fn run_on(s: &mut hx_usb::Session, cmd: &Cmd) -> Result<()> {
             let catalog = hx_catalog::Catalog::load().ok();
             let irs = nam_capture_names(s, &preset, catalog.as_ref())?;
             let name = |slot: &hx_proto::preset::Slot| -> String {
-                if slot.model.is_some_and(|m| catalog.as_ref().is_some_and(|c| c.is_nam_lite(m))) {
+                if slot
+                    .model
+                    .is_some_and(|m| catalog.as_ref().is_some_and(|c| c.is_nam_lite(m)))
+                {
                     return hx_catalog::nam_lite_label(&slot.values, &irs);
                 }
                 slot.model
@@ -1714,7 +1717,10 @@ fn show_chain(session: &mut hx_usb::Session) -> Result<()> {
             "{:>2}. {:<24} {}",
             position + 1,
             if catalog.as_ref().is_some_and(|c| c.is_nam_lite(model)) {
-                format!("NAM A2 Lite · {}", hx_catalog::nam_lite_label(&block.values, &irs))
+                format!(
+                    "NAM A2 Lite · {}",
+                    hx_catalog::nam_lite_label(&block.values, &irs)
+                )
             } else {
                 named.map_or_else(|| format!("model {model}"), |m| m.name.clone())
             },
@@ -1744,9 +1750,11 @@ fn nam_capture_names(
     preset: &hx_proto::Preset,
     catalog: Option<&hx_catalog::Catalog>,
 ) -> Result<Vec<(i64, String)>> {
-    if catalog.is_some_and(|c| preset.blocks().any(|(_, block)| {
-        block.model.is_some_and(|model| c.is_nam_lite(model))
-    })) {
+    if catalog.is_some_and(|c| {
+        preset
+            .blocks()
+            .any(|(_, block)| block.model.is_some_and(|model| c.is_nam_lite(model)))
+    }) {
         return Ok(optional_device_value(session.irs())?.unwrap_or_default());
     }
     Ok(Vec::new())

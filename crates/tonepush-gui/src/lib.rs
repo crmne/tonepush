@@ -2009,7 +2009,11 @@ impl App {
     /// than the slot kind.
     fn slot_label(&self, block: &session::Block) -> String {
         use hx_proto::preset::Kind;
-        if self.catalog.as_ref().is_some_and(|catalog| catalog.is_nam_lite(block.model)) {
+        if self
+            .catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.is_nam_lite(block.model))
+        {
             return hx_catalog::nam_lite_label(&block.values, &self.irs);
         }
         let named = |fallback: &str| {

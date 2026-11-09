@@ -38,7 +38,7 @@ const NAM_LITE_CATALOG_ID: &str = "TonePush_NAMA2Lite";
 /// The mod stores a one-based IR slot as a float and truncates it on playback.
 pub fn nam_lite_slot(values: &[f32]) -> Option<i64> {
     let value = *values.get(NAM_LITE_MODEL_PARAM)?;
-    (value.is_finite() && (1.0..129.0).contains(&value)).then(|| value as i64)
+    (value.is_finite() && (1.0..129.0).contains(&value)).then_some(value as i64)
 }
 
 pub fn nam_lite_label(values: &[f32], irs: &[(i64, String)]) -> String {
@@ -309,12 +309,27 @@ impl Catalog {
             ("Polarity", Kind::Enum, 0.0, 1.0, 0.0, Some("nam_polarity")),
             ("Bass", Kind::Continuous, 0.0, 1.0, 0.5, Some("nam_knob")),
             ("Mid", Kind::Continuous, 0.0, 1.0, 0.5, Some("nam_knob")),
-            ("Model", Kind::Continuous, 0.0, 128.0, 1.0, Some("nam_slot")),
-            ("Mid Freq", Kind::Continuous, 150.0, 3000.0, 650.0, Some("nam_hz")),
+            ("Model", Kind::Continuous, 1.0, 128.0, 1.0, Some("nam_slot")),
+            (
+                "Mid Freq",
+                Kind::Continuous,
+                150.0,
+                3000.0,
+                650.0,
+                Some("nam_hz"),
+            ),
             ("Q", Kind::Enum, 0.0, 2.0, 0.0, Some("nam_q")),
-            ("High Cut", Kind::Continuous, 0.0, 1.0, 1.0, Some("nam_knob")),
+            (
+                "High Cut",
+                Kind::Continuous,
+                0.0,
+                1.0,
+                1.0,
+                Some("nam_knob"),
+            ),
         ];
-        if symbol.symbol != "HD2_DistXenomorphFuzzMono" || symbol.parameters.len() != controls.len() {
+        if symbol.symbol != "HD2_DistXenomorphFuzzMono" || symbol.parameters.len() != controls.len()
+        {
             return;
         }
         model.id = NAM_LITE_CATALOG_ID.into();
@@ -340,7 +355,10 @@ impl Catalog {
             ("nam_knob", format::Display::numeric(10.0, "%.1f")),
             ("nam_slot", format::Display::numeric(1.0, "%.0f")),
             ("nam_hz", format::Display::numeric(1.0, "%.0f Hz")),
-            ("nam_polarity", format::Display::labels(&["Normal", "Inverted"])),
+            (
+                "nam_polarity",
+                format::Display::labels(&["Normal", "Inverted"]),
+            ),
             ("nam_q", format::Display::labels(&["0.7", "1.4", "2.8"])),
         ] {
             self.displays.insert(key.into(), display);
@@ -661,7 +679,8 @@ impl Catalog {
         let typed: f32 = text[..number_end].parse().ok()?;
         let unit = text[number_end..].trim();
         let native = entry.map_or(typed, |d| d.to_native(typed, unit, self));
-        (param.accepts(native) && (param.display.as_deref() != Some("nam_slot") || native.fract() == 0.0))
+        (param.accepts(native)
+            && (param.display.as_deref() != Some("nam_slot") || native.fract() == 0.0))
             .then_some(native)
     }
 
@@ -773,7 +792,10 @@ pub(crate) mod tests {
     fn nam_capture_names_use_the_firmware_slot_number() {
         let mut values = vec![0.0; 10];
         values[NAM_LITE_MODEL_PARAM] = 100.75;
-        let irs = [(99, " Benson Clean ".to_owned()), (100, "Matchless".to_owned())];
+        let irs = [
+            (99, " Benson Clean ".to_owned()),
+            (100, "Matchless".to_owned()),
+        ];
         assert_eq!(nam_lite_label(&values, &irs), "Benson Clean");
         values[NAM_LITE_MODEL_PARAM] = 101.0;
         assert_eq!(nam_lite_label(&values, &irs), "Matchless");
@@ -789,14 +811,20 @@ pub(crate) mod tests {
         assert!(!catalog.is_nam_lite(NAM_LITE_ID));
         let stock = catalog.model_number(NAM_LITE_ID).unwrap().name.clone();
         catalog.enable_nam_lite();
-        assert_eq!(catalog.model_number(NAM_LITE_ID).unwrap().name, "NAM A2 Lite");
+        assert_eq!(
+            catalog.model_number(NAM_LITE_ID).unwrap().name,
+            "NAM A2 Lite"
+        );
         let param = catalog.param(NAM_LITE_ID, NAM_LITE_MODEL_PARAM).unwrap();
         assert_eq!(param.name, "Model");
         assert_eq!(catalog.format(param, 100.0), "100");
         assert_eq!(catalog.parse(param, "100"), Some(100.0));
         assert_eq!(catalog.parse(param, "100.5"), None);
         assert_eq!(param.kind.wire(100.0), hx_proto::msgpack::Value::F32(100.0));
-        assert_eq!(catalog.model("HD2_DistXenomorphFuzz").map(|m| &m.name), Some(&stock));
+        assert_eq!(
+            catalog.model("HD2_DistXenomorphFuzz").map(|m| &m.name),
+            Some(&stock)
+        );
     }
 
     #[test]
