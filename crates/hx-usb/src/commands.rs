@@ -1326,8 +1326,12 @@ impl Session {
         if behind {
             self.ack_channel(ChannelId::EVENTS)?;
         }
-        let mut out = Vec::new();
-        for ch in self.channels.values_mut() {
+        let mut out = self.take_notifications()?;
+        for (_, ch) in self
+            .channels
+            .iter_mut()
+            .filter(|(device, _)| **device != ChannelId::EVENTS.device)
+        {
             for sm in ch
                 .reader
                 .take_messages()
