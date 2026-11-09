@@ -103,6 +103,7 @@ pub struct Button<'a> {
     size: Size,
     enabled: bool,
     min_width: f32,
+    max_width: Option<f32>,
 }
 
 impl<'a> Button<'a> {
@@ -116,6 +117,7 @@ impl<'a> Button<'a> {
             size: Size::Medium,
             enabled: true,
             min_width: 0.0,
+            max_width: None,
         }
     }
 
@@ -172,6 +174,11 @@ impl<'a> Button<'a> {
         self
     }
 
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.max_width = Some(width);
+        self
+    }
+
     pub fn show(self, ui: &mut Ui) -> Response {
         let Button {
             label,
@@ -182,6 +189,7 @@ impl<'a> Button<'a> {
             size,
             enabled,
             min_width,
+            max_width,
         } = self;
         let weight = if tone == Tone::Ghost {
             Weight::Medium
@@ -199,11 +207,36 @@ impl<'a> Button<'a> {
                 Tone::DangerLine => (danger(), danger()),
             }
         };
-        let text_galley =
-            (!label.is_empty()).then(|| layout(ui, label, font(size.font(), weight), ink));
-        let hint_galley = hint.map(|hint| layout(ui, hint, medium(11.0), alpha(ink, 0.7)));
         let gap = if size == Size::Small { 6.0 } else { 7.0 };
         let icon_size = size.icon();
+        let hint_galley = hint.map(|hint| layout(ui, hint, medium(11.0), alpha(ink, 0.7)));
+        let text_galley = (!label.is_empty()).then(|| {
+            let font = font(size.font(), weight);
+            let mut galley = layout(ui, label, font.clone(), ink);
+            if let Some(max) = max_width {
+                let non_text = size.padding() * 2.0
+                    + if icon.is_some() { icon_size + gap } else { 0.0 }
+                    + if hint.is_some() {
+                        hint_galley.as_ref().map_or(0.0, |g| g.size().x + gap)
+                    } else {
+                        0.0
+                    }
+                    + if trailing.is_some() { 12.0 + gap } else { 0.0 };
+                let text_max = (max - non_text).max(10.0);
+                if galley.size().x > text_max {
+                    let chars: Vec<char> = label.chars().collect();
+                    for len in (1..chars.len()).rev() {
+                        let candidate: String = chars[..len].iter().collect::<String>() + "…";
+                        let g = layout(ui, &candidate, font.clone(), ink);
+                        if g.size().x <= text_max || len == 1 {
+                            galley = g;
+                            break;
+                        }
+                    }
+                }
+            }
+            galley
+        });
         let mut width = size.padding() * 2.0;
         let mut parts = 0;
         if icon.is_some() {
@@ -227,21 +260,28 @@ impl<'a> Button<'a> {
             // An icon on its own is a square.
             width = size.height();
         }
+        let total_width = match max_width {
+            Some(max) => width.max(min_width).min(max),
+            None => width.max(min_width),
+        };
         let sense = if enabled {
             Sense::click()
         } else {
             Sense::hover()
         };
-        let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(width.max(min_width), size.height()), sense);
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(total_width, size.height()), sense);
         if !ui.is_rect_visible(rect) {
             return response;
         }
-        let painter = ui.painter();
+        let painter = if max_width.is_some() {
+            ui.painter().with_clip_rect(rect)
+        } else {
+            ui.painter().clone()
+        };
         let hovered = enabled && response.hovered();
         let pressed = enabled && response.is_pointer_button_down_on();
         match (tone, enabled) {
-            (Tone::Primary, true) => paint_primary(painter, rect, hovered, pressed),
+            (Tone::Primary, true) => paint_primary(&painter, rect, hovered, pressed),
             (Tone::Primary, false) => {
                 painter.rect(
                     rect,
@@ -312,7 +352,7 @@ impl<'a> Button<'a> {
         }
 
         // The contents, centred as one group.
-        let content = width - size.padding() * 2.0;
+        let content = (width.min(total_width) - size.padding() * 2.0).max(0.0);
         let mut x = rect.center().x - content / 2.0;
         if label.is_empty() && icon.is_some() && trailing.is_none() {
             x = rect.center().x - icon_size / 2.0;
@@ -2279,6 +2319,30 @@ pub fn paint_footswitch(
 #[cfg(test)]
 mod tests {
     use super::knob_drag_delta;
+
+    #[test]
+    fn button_with_max_width_does_not_exceed_limit() {
+        use egui_kittest::Harness;
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(200.0, 100.0))
+            .build_ui(|ui| {
+                if ui.ctx().cumulative_pass_nr() == 0 {
+                    super::super::install(ui.ctx(), super::super::Appearance::Dark);
+                    return;
+                }
+                let response =
+                    super::Button::new("Very Long Impulse Response Name That Exceeds Width")
+                        .small()
+                        .max_width(64.0)
+                        .show(ui);
+                assert!(
+                    response.rect.width() <= 64.0,
+                    "width {} exceeds max_width 64.0",
+                    response.rect.width()
+                );
+            });
+        harness.run_steps(2);
+    }
 
     #[test]
     fn shift_drag_is_ten_times_finer_than_an_ordinary_knob_drag() {

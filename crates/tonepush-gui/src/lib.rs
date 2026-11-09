@@ -2009,6 +2009,22 @@ impl App {
     /// than the slot kind.
     fn slot_label(&self, block: &session::Block) -> String {
         use hx_proto::preset::Kind;
+        if let Some(catalog) = self.catalog.as_ref() {
+            if catalog
+                .symbol(block.model)
+                .is_some_and(|s| s.symbol.starts_with("HD2_ImpulseResponse"))
+            {
+                if let Some(&val) = block.values.first() {
+                    let slot = val.round() as i64;
+                    if let Some((_, name)) = self.irs.iter().find(|(s, _)| *s == slot) {
+                        let trimmed = name.trim();
+                        if !trimmed.is_empty() {
+                            return trimmed.to_owned();
+                        }
+                    }
+                }
+            }
+        }
         let named = |fallback: &str| {
             let name = self.model_name(block.model);
             if name.is_empty() {

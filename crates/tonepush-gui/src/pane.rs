@@ -333,10 +333,38 @@ impl App {
                             Target::Param(index as i64),
                             param.name.clone(),
                         );
+                        let is_ir = param.display.as_deref() == Some("ir_select");
+                        let (reading, choices) = if is_ir {
+                            let slot = (*value).round() as i64;
+                            let ir_name = |s: i64| {
+                                self.irs
+                                    .iter()
+                                    .find(|(index, _)| *index == s)
+                                    .map(|(_, name)| name.trim().to_owned())
+                                    .filter(|name| !name.is_empty())
+                            };
+                            let num = slot + 1;
+                            let reading = match ir_name(slot) {
+                                Some(name) => format!("{num}: {name}"),
+                                None => format!("{num}: ---"),
+                            };
+                            let choices: Vec<String> = (0..session::IR_SLOTS)
+                                .map(|s| match ir_name(s) {
+                                    Some(name) => format!("{:03}: {name}", s + 1),
+                                    None => format!("{:03}: ---", s + 1),
+                                })
+                                .collect();
+                            (reading, Some(choices))
+                        } else {
+                            (
+                                catalog.format(&param, *value),
+                                catalog.choices(&param).map(<[String]>::to_vec),
+                            )
+                        };
                         Some(Control {
                             index,
-                            reading: catalog.format(&param, *value),
-                            choices: catalog.choices(&param).map(<[String]>::to_vec),
+                            reading,
+                            choices,
                             tags: self.tags_for(menu.under),
                             menu,
                             param,
@@ -742,13 +770,24 @@ fn control_cell(
                     ))
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
+            let chosen = current.round().max(0.0) as usize;
+            let tooltip = match choices.get(chosen) {
+                Some(full) => format!("{}: {full}", param.name),
+                None => format!("{}: choose", param.name),
+            };
             let button = theme::Button::new(&control.reading)
                 .small()
                 .trailing(Icon::ChevronDown)
                 .min_width(width)
+                .max_width(width)
                 .show(&mut child)
-                .on_hover_text(format!("{}: choose", param.name));
-            let chosen = current.round().max(0.0) as usize;
+                .on_hover_text(tooltip);
+            let menu_width = choices
+                .iter()
+                .map(|s| s.len())
+                .max()
+                .map(|len| (len as f32 * 7.5 + 44.0).clamp(220.0, 360.0))
+                .unwrap_or(220.0);
             // Its own id: the button's default one is the right-click
             // assignment menu's too, which closes on a click and so shut the
             // list in the frame it opened.
@@ -756,7 +795,7 @@ fn control_cell(
                 .id(button.id.with("choices"))
                 .gap(4.0)
                 .show(|ui| {
-                    theme::menu_width(ui, 220.0);
+                    theme::menu_width(ui, menu_width);
                     egui::ScrollArea::vertical()
                         .max_height(320.0)
                         .show(ui, |ui| {
