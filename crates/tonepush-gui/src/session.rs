@@ -2228,7 +2228,12 @@ impl Worker {
         let setlist = self.setlist;
         // Which preset is playing is the pedal's word, not the last one we
         // heard: a footswitch since then would have the wrong one followed.
-        self.follow_preset();
+        // Without its word, the move does not guess.
+        if self.check_preset().is_none() {
+            return self.send(Evt::Failed(
+                "the pedal did not say which preset is playing: nothing moved".into(),
+            ));
+        }
         if self.setlist != setlist {
             // Following it showed another setlist, which this move is not for.
             return self.send(Evt::Failed(
@@ -2432,14 +2437,21 @@ impl Worker {
     /// Save and every knob acted on the new one with the old one's state.
     /// Returns whether it reloaded.
     fn follow_preset(&mut self) -> bool {
+        self.check_preset().unwrap_or(false)
+    }
+
+    /// [`follow_preset`](Self::follow_preset), telling a check that could
+    /// not be made (`None`) from a preset that did not change: a refused
+    /// question, or a switch noticed whose preset could not be read.
+    fn check_preset(&mut self) -> Option<bool> {
         // Asked quietly: a pedal in the middle of a load may refuse, which is
         // patience rather than news, so it is asked again next time.
         let Some((setlist, index, name)) = self.try_optional_on_device(|d| d.preset_info()) else {
             self.recheck = self.device.is_some();
-            return false;
+            return None;
         };
         if (setlist, index) == (self.shown.setlist, self.shown.index) {
-            return false;
+            return Some(false);
         }
         let label = self.slot_label(index);
         self.send(Evt::Activity(format!("the pedal loaded {label} {name}")));
@@ -2447,10 +2459,11 @@ impl Worker {
         // to the one it plays from now; one being browsed stays put.
         let follow = self.setlist == self.shown.setlist && setlist != self.setlist;
         self.reload();
+        let caught_up = (self.shown.setlist, self.shown.index) == (setlist, index);
         if follow {
             self.show_setlist(setlist);
         }
-        true
+        caught_up.then_some(true)
     }
 
     /// Run something on the device, reporting failure. Returns whether it worked.
@@ -4440,6 +4453,26 @@ mod tests {
         assert!(events
             .try_iter()
             .any(|e| matches!(e, Evt::Failed(why) if why.contains("save it first"))));
+    }
+
+    /// A pedal that will not say which preset plays gets no move: the one
+    /// last seen may not be the one playing.
+    #[test]
+    fn a_move_without_the_pedals_word_on_what_plays_moves_nothing() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = floor_worker(&pedal);
+        pedal.lock().unwrap().refuse.insert(op::PRESET_INFO, -3);
+
+        worker.handle(Cmd::MovePreset { from: 5, to: 1 });
+
+        assert!(!pedal
+            .lock()
+            .unwrap()
+            .opcodes()
+            .contains(&op::WRITE_DIRECTORY));
+        assert!(events
+            .try_iter()
+            .any(|e| matches!(e, Evt::Failed(why) if why.contains("nothing moved"))));
     }
 
     /// An audition over a preset with nothing unsaved is put back, and the
