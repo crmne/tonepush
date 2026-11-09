@@ -587,7 +587,7 @@ impl Session {
         }
 
         if debug() && discarded > 0 {
-            eprintln!("drained {discarded} stale frames");
+            eprintln!("{} drained {discarded} stale frames", since_start());
         }
     }
 
@@ -596,7 +596,13 @@ impl Session {
             .encode()
             .map_err(|error| Error::Protocol(error.to_string()))?;
         if debug() {
-            eprintln!("TX {:#06x}->{:#06x} {}", f.src, f.dst, hex(&bytes));
+            eprintln!(
+                "{} TX {:#06x}->{:#06x} {}",
+                since_start(),
+                f.src,
+                f.dst,
+                hex(&bytes)
+            );
         }
         if let Some(why) = &self.poisoned {
             return Err(Error::Protocol(why.clone()));
@@ -622,7 +628,7 @@ impl Session {
             return Ok(None);
         }
         if debug() {
-            eprintln!("RX {}", hex(&data));
+            eprintln!("{} RX {}", since_start(), hex(&data));
         }
         let frames = Frame::decode_transfer(&data).map_err(|e| Error::Protocol(e.to_string()))?;
         let first = frames.first().cloned();
@@ -1333,6 +1339,14 @@ impl Drop for Session {
         // hardware suite could not open the device at all; without it, the
         // suite runs repeatedly. Draining is enough.
     }
+}
+
+/// Milliseconds since the first debug line, so a trace shows the timing
+/// between frames as well as their order.
+fn since_start() -> String {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let start = START.get_or_init(Instant::now);
+    format!("{:>10.3}", start.elapsed().as_secs_f64() * 1000.0)
 }
 
 fn debug() -> bool {
