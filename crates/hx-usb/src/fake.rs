@@ -70,11 +70,14 @@ pub struct Pedal {
     events_held: VecDeque<Vec<u8>>,
     inbox: BTreeMap<u16, StreamReader>,
     seq: BTreeMap<u16, u16>,
-    /// Stream bytes received from the host on each channel, as the pedal
-    /// acknowledges them: this plus a base of 0x1000.
+    /// Stream bytes received from the host on each channel.
     received: BTreeMap<u16, u32>,
+    /// What the pedal last acknowledged of them, plus a base of 0x1000:
+    /// everything received, except while it withholds acknowledgements.
+    advertised: BTreeMap<u16, u32>,
     /// Stop acknowledging what the host sends, as a pedal that has stopped
-    /// taking a message does.
+    /// taking a message does. The bytes still count, and the next
+    /// acknowledgement after withholding ends covers them.
     pub withholds_acks: bool,
 }
 
@@ -102,6 +105,7 @@ impl Pedal {
             inbox: BTreeMap::new(),
             seq: BTreeMap::new(),
             received: BTreeMap::new(),
+            advertised: BTreeMap::new(),
             withholds_acks: false,
         }))
     }
@@ -158,10 +162,8 @@ impl Pedal {
             return;
         }
         self.frames_in += 1;
-        if !self.withholds_acks {
-            let total = self.received.entry(frame.dst).or_insert(0);
-            *total = total.wrapping_add(rest.len() as u32);
-        }
+        let total = self.received.entry(frame.dst).or_insert(0);
+        *total = total.wrapping_add(rest.len() as u32);
         if let Some(why) = self.fail_reads_after_data.take() {
             self.failing_reads = Some(why);
         }
@@ -375,19 +377,25 @@ impl Pedal {
     }
 
     /// What the pedal acknowledges of the host's bytes on a channel.
-    fn acked(&self, node: u16) -> u32 {
-        0x1000u32.wrapping_add(self.received.get(&node).copied().unwrap_or(0))
+    /// Frozen at what was acknowledged last while it withholds them.
+    fn acked(&mut self, node: u16) -> u32 {
+        if !self.withholds_acks {
+            let received = self.received.get(&node).copied().unwrap_or(0);
+            self.advertised.insert(node, received);
+        }
+        0x1000u32.wrapping_add(self.advertised.get(&node).copied().unwrap_or(0))
     }
 
     /// Acknowledge the host's bytes on a channel with a bare ACK frame, as
     /// the pedal does after each chunk of a long message.
     fn acknowledge(&mut self, node: u16) {
+        let ack = self.acked(node);
         let seq = self.seq.entry(node).or_insert(0);
         let mut payload = Vec::new();
         ChannelHeader {
             seq: *seq,
             msg_type: MSG_ACK,
-            ack: 0x1000u32.wrapping_add(self.received.get(&node).copied().unwrap_or(0)),
+            ack,
         }
         .encode_into(&mut payload);
         let host = ChannelId::ALL
