@@ -82,6 +82,11 @@ pub struct DeviceProfile {
     /// Without it an HX Stomp (3.80) stays on "transferring data" after the
     /// read, even once the session has closed. Unmeasured elsewhere.
     pub closes_ir_reads: bool,
+    /// Whether a session ends with a bare 0x02 frame on each channel, as HX
+    /// Edit quits. Without it a Helix Floor (3.80) stops updating its display
+    /// once the session has gone, at the next preset switch, until power
+    /// cycled. On an HX Stomp it kept the next session from opening.
+    pub closes_sessions: bool,
 }
 
 impl DeviceProfile {
@@ -107,6 +112,7 @@ pub const HX_STOMP: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: true,
+    closes_sessions: false,
 };
 pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     product_id: 0x4253,
@@ -119,6 +125,7 @@ pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    closes_sessions: false,
 };
 pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     product_id: 0x4248,
@@ -138,6 +145,7 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     dsp_budget: Some(7500),
     controls: rpc::ControlLayout::Helix,
     closes_ir_reads: false,
+    closes_sessions: true,
 };
 pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     product_id: 0x4249,
@@ -150,6 +158,7 @@ pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    closes_sessions: false,
 };
 pub const HELIX_LT: DeviceProfile = DeviceProfile {
     product_id: 0x424A,
@@ -162,6 +171,7 @@ pub const HELIX_LT: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    closes_sessions: false,
 };
 pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     product_id: 0x4245,
@@ -174,6 +184,7 @@ pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    closes_sessions: false,
 };
 
 /// Every device profile we recognise.

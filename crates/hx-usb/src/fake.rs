@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use hx_proto::frame::{ChannelHeader, MSG_ACK, MSG_DATA};
+use hx_proto::frame::{ChannelHeader, MSG_ACK, MSG_DATA, MSG_HELLO};
 use hx_proto::msgpack::{Encoder, Value};
 use hx_proto::rpc::{key, op, Message, StreamReader};
 use hx_proto::{ChannelId, Frame};
@@ -50,6 +50,9 @@ pub struct Pedal {
     pub frames_in: usize,
     /// Every transfer received, data or not.
     pub transfers_in: usize,
+    /// The channels each bare 0x02 frame came in on, opening or closing a
+    /// service, in order.
+    pub hellos: Vec<u16>,
     /// Bytes the events channel may have unacknowledged before the pedal
     /// stops sending on it. `None` sends without limit.
     ///
@@ -84,6 +87,7 @@ impl Pedal {
             fail_next_send: None,
             frames_in: 0,
             transfers_in: 0,
+            hellos: Vec::new(),
             events_window: None,
             events_sent: 0,
             events_acked: 0,
@@ -124,6 +128,9 @@ impl Pedal {
         let Some((header, rest)) = ChannelHeader::decode(&frame.payload) else {
             return;
         };
+        if header.msg_type == MSG_HELLO && rest.is_empty() {
+            self.hellos.push(frame.dst);
+        }
         if frame.dst == ChannelId::EVENTS.device
             && (header.msg_type & MSG_ACK != 0 || header.has_data())
         {

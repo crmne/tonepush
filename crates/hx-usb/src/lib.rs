@@ -1324,14 +1324,26 @@ impl Drop for Session {
         // transaction in flight at this boundary, so a final ACK is safe on
         // every channel that advanced.
         let _ = self.ack_pending(None);
-        // No closing handshake. HX Edit sends a bare type-0x02 frame per
-        // channel when it quits, and this used to imitate that - but the
-        // capture behind it turned out to record HX Edit failing against an
-        // already-wedged device, so it was never evidence of a clean teardown.
-        // Sending it per session, rather than once when an application exits,
-        // degrades the device: with it, a second consecutive run of the
-        // hardware suite could not open the device at all; without it, the
-        // suite runs repeatedly. Draining is enough.
+        // Where the profile says so, the closing handshake: a bare type-0x02
+        // frame per channel, as HX Edit sends when it quits, each answered by
+        // the device's own. A Helix Floor (3.80) needs it: without it the
+        // pedal keeps working after the session, but its display stops at
+        // the next preset switch until power cycled; with it, eleven sessions
+        // in a row opened and the display kept up.
+        //
+        // Elsewhere there is none. The capture behind it turned out to record
+        // HX Edit failing against an already-wedged device, and on an HX
+        // Stomp sending it per session, rather than once when an application
+        // exits, degrades the device: with it, a second consecutive run of
+        // the hardware suite could not open the device at all; without it,
+        // the suite runs repeatedly. Draining is enough there.
+        if self.profile.closes_sessions {
+            for id in ChannelId::ALL {
+                if self.channels.contains_key(&id.device) {
+                    let _ = self.close_service(id);
+                }
+            }
+        }
     }
 }
 
@@ -1455,6 +1467,36 @@ mod tests {
             retry_device_refusal::<()>(Err(Error::Protocol("bad reply".into()))),
             Err(Error::Protocol(_))
         ));
+    }
+
+    /// The bare 0x02 frames a session sends once it is dropped.
+    fn closing_hellos(profile: hx_proto::DeviceProfile) -> Vec<u16> {
+        let pedal = fake::Pedal::new();
+        let mut session = fake::session_as(&pedal, profile);
+        session.preset_info().expect("answered");
+        let opened = pedal.lock().unwrap().hellos.len();
+        drop(session);
+        let hellos = pedal.lock().unwrap().hellos[opened..].to_vec();
+        hellos
+    }
+
+    /// A Helix Floor's session ends as HX Edit quits: a bare 0x02 frame on
+    /// each channel. Without it the Floor's display stopped at the next
+    /// preset switch after the session had gone.
+    #[test]
+    fn a_floors_session_closes_every_channel() {
+        let mut closed = closing_hellos(hx_proto::HELIX_FLOOR);
+        closed.sort_unstable();
+        let mut channels: Vec<u16> = ChannelId::ALL.iter().map(|id| id.device).collect();
+        channels.sort_unstable();
+        assert_eq!(closed, channels);
+    }
+
+    /// An HX Stomp's session ends without them, as before: sent per session
+    /// they kept the next one from opening.
+    #[test]
+    fn an_hx_stomps_session_ends_without_closing_frames() {
+        assert!(closing_hellos(hx_proto::HX_STOMP).is_empty());
     }
 
     #[test]
