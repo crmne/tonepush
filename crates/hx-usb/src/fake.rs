@@ -36,6 +36,13 @@ pub struct Pedal {
     /// How many more questions about IRs are answered from the old contents
     /// before an accepted upload lands.
     pub ir_delay: usize,
+    /// The presets in the pedal's slots, by setlist and index, as documents.
+    /// A slot not listed is empty.
+    pub slots: BTreeMap<(i64, i64), Vec<u8>>,
+    /// Each setlist's presets by name, in slot order, as its directory lists
+    /// them. A preset's number in the directory is its setlist times 128
+    /// plus its slot when it was put there, as on a Helix Floor.
+    pub directories: BTreeMap<i64, Vec<(i64, String)>>,
     /// Every request received, as `(channel, transaction, opcode, arguments)`.
     pub requests: Vec<(u16, i64, i64, Value)>,
     /// Transfers waiting for the host to read.
@@ -80,6 +87,8 @@ impl Pedal {
             irs: BTreeMap::new(),
             writing_ir: None,
             ir_delay: 0,
+            slots: BTreeMap::new(),
+            directories: BTreeMap::new(),
             requests: Vec::new(),
             outbox: VecDeque::new(),
             fail_reads_after_data: None,
@@ -197,6 +206,33 @@ impl Pedal {
                 },
             ),
             op::READ_PRESET => (0, Value::Bin(self.buffer.clone(), 2)),
+            op::FETCH_PRESET => (
+                0,
+                self.slots
+                    .get(&(number(key::SETLIST), number(key::PRESET_INDEX)))
+                    .map_or(Value::Nil, |document| Value::Bin(document.clone(), 2)),
+            ),
+            op::LIST_PRESETS => match self.directories.get(&number(key::SETLIST)) {
+                Some(directory) => (
+                    0,
+                    Value::Array(
+                        directory
+                            .iter()
+                            .map(|(number, name)| {
+                                hx_proto::msgmap! {
+                                    *number => hx_proto::msgmap! {
+                                        key::NAME => Value::Str(name.clone()),
+                                        123 => Value::Bool(false),
+                                        124 => Value::Bool(false),
+                                        125 => Value::Int(0),
+                                    },
+                                }
+                            })
+                            .collect(),
+                    ),
+                ),
+                None => (0, Value::Nil),
+            },
             op::WRITE_PRESET => {
                 if self.applies_writes {
                     if let Some(document) = args.get(key::DOCUMENT).and_then(Value::as_raw) {
