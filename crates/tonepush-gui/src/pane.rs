@@ -524,8 +524,16 @@ impl App {
     /// Turn one control: kept in our copy at once, and sent to the pedal.
     /// The cab's controls are addressed on the same block by the same index;
     /// only which half they belong to differs, and the pedal tells them apart.
-    fn set_param(&mut self, position: i64, index: usize, value: f32, kind: Kind, paired: bool) {
+    fn set_param(&mut self, position: i64, index: usize, mut value: f32, kind: Kind, paired: bool) {
         if let Some(slot) = self.chain.iter_mut().find(|b| b.position == position) {
+            if !paired && index == hx_catalog::NAM_LITE_MODEL_PARAM
+                && self.catalog.as_ref().is_some_and(|catalog| catalog.is_nam_lite(slot.model))
+            {
+                value = value.round();
+                if slot.values.get(index) == Some(&value) {
+                    return;
+                }
+            }
             let values = if paired {
                 &mut slot.paired_values
             } else {

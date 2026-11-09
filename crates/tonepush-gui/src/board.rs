@@ -884,7 +884,11 @@ impl App {
         }
         TileFacts {
             name: self.slot_label(block),
-            caption: theme::Category::named(&category).short().to_owned(),
+            caption: if category == "NAM" {
+                category.clone()
+            } else {
+                theme::Category::named(&category).short().to_owned()
+            },
             colour,
             drawing: theme::category_icon(&category),
             on: block.enabled,

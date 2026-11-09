@@ -52,6 +52,21 @@ struct Range {
 }
 
 impl Display {
+    pub(crate) fn numeric(scale: f32, pattern: &str) -> Self {
+        Self {
+            scale: Some(scale),
+            format: Some(Pattern::Printf(pattern.into())),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn labels(labels: &[&str]) -> Self {
+        Self {
+            format: Some(Pattern::Labels(labels.iter().map(|s| (*s).to_owned()).collect())),
+            ..Self::default()
+        }
+    }
+
     /// Follow aliases without trusting the external catalog to be acyclic.
     ///
     /// A missing target keeps the last usable entry, matching the old
