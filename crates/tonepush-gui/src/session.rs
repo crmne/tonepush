@@ -44,6 +44,16 @@ pub(crate) fn tempo_refusal() -> String {
 
 /// What the UI asks for.
 pub enum Cmd {
+    #[cfg(unix)]
+    Cli(
+        tonepush_cli::bridge::Request,
+        Sender<tonepush_cli::bridge::Reply>,
+    ),
+    #[cfg(unix)]
+    CliWatch(
+        mpsc::SyncSender<String>,
+        Sender<tonepush_cli::bridge::Reply>,
+    ),
     Connect,
     Disconnect,
     /// Let the pedal go and stop, once everything sent before this has run.
@@ -563,6 +573,8 @@ pub fn spawn_repainting() -> (
 }
 
 struct Worker {
+    #[cfg(unix)]
+    cli_watchers: Vec<mpsc::SyncSender<String>>,
     cmds: Receiver<Cmd>,
     events: Events,
     device: Option<hx_usb::Session>,
@@ -631,6 +643,8 @@ struct Audition {
 impl Worker {
     fn new(cmds: Receiver<Cmd>, events: Events, automatic: Option<std::path::PathBuf>) -> Worker {
         Worker {
+            #[cfg(unix)]
+            cli_watchers: Vec::new(),
             cmds,
             events,
             automatic,
@@ -725,6 +739,22 @@ impl Worker {
     }
 
     fn handle(&mut self, cmd: Cmd) {
+        #[cfg(unix)]
+        let cmd = match cmd {
+            Cmd::Cli(request, reply) => return self.run_cli(request, reply),
+            Cmd::CliWatch(watcher, reply) => {
+                use tonepush_cli::bridge::Reply;
+                let result = if self.device.is_some() {
+                    self.cli_watchers.push(watcher);
+                    Reply::ok()
+                } else {
+                    Reply::failed("connect the HX device in TonePush first")
+                };
+                let _ = reply.send(result);
+                return;
+            }
+            cmd => cmd,
+        };
         // Anything else done while models are being tried keeps the one
         // playing, as the shelf always did: what you hear is the edit. Only
         // Put back undoes the tries. ReadSwitches follows every presented
@@ -745,6 +775,8 @@ impl Worker {
             self.end_audition();
         }
         match cmd {
+            #[cfg(unix)]
+            Cmd::Cli(..) | Cmd::CliWatch(..) => unreachable!(),
             Cmd::Connect => self.connect(),
             Cmd::Disconnect => self.let_go(),
             Cmd::Quit => {
@@ -1380,6 +1412,8 @@ impl Worker {
     /// was clicked after reconnecting.
     fn let_go(&mut self) {
         self.device = None;
+        #[cfg(unix)]
+        self.cli_watchers.clear();
         self.forget_audition();
         self.trial = None;
         // A block from this pedal may not fit the next one.
@@ -2229,7 +2263,57 @@ impl Worker {
         let _ = self.try_on_device(|d| hx_usb::backup::capture_one_in(d, &dir, setlist, index));
     }
 
+    #[cfg(unix)]
+    fn run_cli(
+        &mut self,
+        request: tonepush_cli::bridge::Request,
+        reply: Sender<tonepush_cli::bridge::Reply>,
+    ) {
+        use tonepush_cli::bridge::Reply;
+
+        if self.audition.is_some() || self.trial.is_some() {
+            let _ = reply.send(Reply::failed("finish the current TonePush audition first"));
+            return;
+        }
+        let Some(device) = self.device.as_mut() else {
+            let _ = reply.send(Reply::failed("connect the HX device in TonePush first"));
+            return;
+        };
+        let (result, changes) = request.run(device);
+        if changes.lost {
+            self.let_go();
+        } else {
+            if changes.buffer {
+                self.forget_history();
+            }
+            if changes.buffer || changes.switched || changes.presets {
+                let follow = self.setlist == self.shown.setlist;
+                self.reload_with_dirty(changes.dirty);
+                if follow && self.setlist != self.shown.setlist {
+                    self.show_setlist(self.shown.setlist);
+                } else if changes.presets {
+                    self.show_setlist(self.setlist);
+                }
+            }
+            if changes.irs {
+                self.handle(Cmd::ListIrs);
+            }
+            if changes.settings {
+                if let Some(hx_proto::msgpack::Value::Bool(on)) =
+                    self.try_optional_on_device(|device| device.object(203))
+                {
+                    self.send(Evt::Settings { global_eq: on });
+                }
+            }
+        }
+        let _ = reply.send(result);
+    }
+
     fn reload(&mut self) {
+        self.reload_with_dirty(None);
+    }
+
+    fn reload_with_dirty(&mut self, dirty: Option<bool>) {
         let Some(preset) = self.read_settled() else {
             return;
         };
@@ -2237,6 +2321,9 @@ impl Worker {
             return;
         };
         self.adopt(info);
+        if let Some(dirty) = dirty {
+            self.dirty = dirty;
+        }
         self.present(&preset);
     }
 
@@ -2334,8 +2421,11 @@ impl Worker {
         let mut snapshot = None;
         if let Ok(events) = &polled {
             for (event, args) in events {
-                self.events
-                    .send(Evt::Activity(format!("event {event}: {args:?}")));
+                let line = format!("event {event}: {args:?}");
+                #[cfg(unix)]
+                self.cli_watchers
+                    .retain(|watcher| watcher.try_send(line.clone()).is_ok());
+                self.events.send(Evt::Activity(line));
                 match notice(*event, args) {
                     Notice::Preset | Notice::Unknown => look = true,
                     Notice::Snapshot(index) => snapshot = Some(index),

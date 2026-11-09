@@ -207,6 +207,26 @@ tonepush models           # browse the catalog; needs no hardware
 tonepush-gui              # the editor
 ```
 
+On macOS and Linux, a running TonePush editor can own the HX connection
+for the CLI. Start both with the same `TONEPUSH_GUI_SOCKET` value:
+
+```sh
+socket_dir=$(mktemp -d)
+export TONEPUSH_GUI_SOCKET="$socket_dir/cli.sock"
+tonepush-gui &
+# Once the editor shows the HX device is connected:
+tonepush select 20B
+tonepush tempo 111
+```
+
+Use an absolute socket path in a private directory owned by your account.
+With this variable set, HX commands run on the editor's USB session and the
+window refreshes when a command or batch finishes. `watch` follows device
+notifications without holding up other commands. Relative file arguments
+resolve from the CLI's working directory. Direct USB access is available when
+the variable is unset. Offline and StompStation PRO commands still run in the
+CLI. Close the editor to remove the socket.
+
 StompStation PRO commands live under `tonepush pro`, so the two devices'
 different slot conventions cannot be confused:
 

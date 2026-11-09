@@ -36,6 +36,8 @@ mod publish;
 mod put;
 #[cfg(test)]
 mod screenshots;
+#[cfg(unix)]
+pub mod cli_bridge;
 mod session;
 mod shell;
 mod table;

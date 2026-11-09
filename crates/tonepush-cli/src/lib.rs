@@ -1,10 +1,51 @@
 //! `tonepush`, the command-line editor for supported guitar processors.
 
+#[cfg(unix)]
+pub mod bridge;
+
+thread_local! {
+    static OUTPUT: std::cell::RefCell<Option<CommandOutput>> = const { std::cell::RefCell::new(None) };
+}
+
+#[derive(Default)]
+struct CommandOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn emit(args: std::fmt::Arguments<'_>, stderr: bool) {
+    OUTPUT.with(|output| {
+        if let Some(buffer) = output.borrow_mut().as_mut() {
+            let stream = if stderr {
+                &mut buffer.stderr
+            } else {
+                &mut buffer.stdout
+            };
+            let _ = stream.write_fmt(args);
+        } else if stderr {
+            let _ = std::io::stderr().write_fmt(args);
+        } else {
+            let _ = std::io::stdout().write_fmt(args);
+        }
+    });
+}
+
+macro_rules! print {
+    ($($arg:tt)*) => { $crate::emit(format_args!($($arg)*), false) };
+}
+macro_rules! println {
+    () => { print!("\n") };
+    ($($arg:tt)*) => { print!("{}\n", format_args!($($arg)*)) };
+}
+macro_rules! eprintln {
+    ($($arg:tt)*) => { $crate::emit(format_args!("{}\n", format_args!($($arg)*)), true) };
+}
+
 mod hlx;
 mod voidx;
 mod wav;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use std::io::Write;
 
@@ -494,7 +535,7 @@ enum Cmd {
     },
 }
 
-fn main() -> Result<()> {
+pub fn main() -> Result<()> {
     // Before anything looks for the extracted resources, which a machine that
     // knew this program under its old name has filed under that name. Either
     // binary may be the first to run after an upgrade, so both do this.
@@ -526,7 +567,13 @@ fn main() -> Result<()> {
         {
             bail!("{index:?} is not a preset; use a label like 03B or an index like 7")
         }
-        cmd => on_device(cmd),
+        cmd => {
+            #[cfg(unix)]
+            if let Some(socket) = std::env::var_os(bridge::ENV) {
+                return bridge::forward(&socket, std::env::args_os().skip(1).collect());
+            }
+            on_device(cmd)
+        }
     }
 }
 
@@ -667,6 +714,11 @@ fn run_batch(file: Option<&std::path::Path>) -> Result<()> {
     let steps = parse_batch(&text)?;
     if steps.is_empty() {
         return Ok(());
+    }
+
+    #[cfg(unix)]
+    if let Some(socket) = std::env::var_os(bridge::ENV) {
+        return bridge::forward_batch(&socket, &text);
     }
 
     let mut session = open_session()?;
@@ -2350,7 +2402,7 @@ mod tests {
 
         use hx_proto::frame::{ChannelHeader, MSG_DATA};
         use hx_proto::msgpack::{Encoder, Value};
-        use hx_proto::rpc::{key, op, Message, StreamReader};
+        use hx_proto::rpc::{Message, StreamReader, key, op};
         use hx_proto::{ChannelId, Frame};
 
         #[derive(Default)]
