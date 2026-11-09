@@ -209,7 +209,16 @@ current sequence and acknowledgement. An earlier version of this section
 claimed HX Edit sent nothing recognisable on quit; that conclusion came from
 `captures/04-quit.log`, which on re-reading records HX Edit failing against an
 already-wedged device - repeating stale ACKs answering every HELLO - not a
-quit. This client now performs the same teardown when a session drops.
+quit.
+
+Which devices need it differs. Sent at the end of every session, it kept an
+HX Stomp's next session from opening, so a session there ends by draining and
+acknowledging, without it. A Helix Floor (3.80) needs it: a session ended
+without it leaves the pedal working, snapshots and joystick included, but its
+display stops at the next preset switch until power cycled. With it, the
+Floor answers each channel's 0x02 with its own, eleven sessions in a row
+opened one after another, and the display kept up after a session of the
+editor. Only the Floor's profile closes its sessions so far.
 
 ## Layer 1 - USB framing [confirmed]
 
