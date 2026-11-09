@@ -2770,6 +2770,9 @@ mod tests {
         inbox: BTreeMap<u16, StreamReader>,
         /// The next sequence number on each channel.
         seq: BTreeMap<u16, u16>,
+        /// Stream bytes received from the host on each channel, which the
+        /// pedal acknowledges as this plus a base of 0x1000.
+        received: BTreeMap<u16, u32>,
     }
 
     /// The test preset with its tempo changed, so two slots hold documents
@@ -2824,6 +2827,7 @@ mod tests {
                 outbox: VecDeque::new(),
                 inbox: BTreeMap::new(),
                 seq: BTreeMap::new(),
+                received: BTreeMap::new(),
             }))
         }
 
@@ -2884,9 +2888,16 @@ mod tests {
                 return;
             }
             let node = frame.dst;
+            let total = self.received.entry(node).or_insert(0);
+            *total = total.wrapping_add(rest.len() as u32);
             let reader = self.inbox.entry(node).or_default();
             reader.push(rest);
             let messages = reader.take_messages().unwrap_or_default();
+            // Part of a long message: acknowledge it, so the next part fits
+            // the window. A whole one is acknowledged by its reply.
+            if messages.is_empty() {
+                self.acknowledge(node);
+            }
             for message in messages {
                 if let Ok(Message::Request { txn, opcode, args }) =
                     Message::try_from_value(message.body)
@@ -3001,15 +3012,40 @@ mod tests {
             }
         }
 
+        /// What the pedal acknowledges of the host's bytes on a channel.
+        fn acked(&self, node: u16) -> u32 {
+            0x1000u32.wrapping_add(self.received.get(&node).copied().unwrap_or(0))
+        }
+
+        /// A bare acknowledgement of the host's bytes on a channel.
+        fn acknowledge(&mut self, node: u16) {
+            let ack = self.acked(node);
+            let seq = self.seq.entry(node).or_insert(0);
+            let mut payload = Vec::new();
+            ChannelHeader {
+                seq: *seq,
+                msg_type: hx_proto::frame::MSG_ACK,
+                ack,
+            }
+            .encode_into(&mut payload);
+            let host = ChannelId::ALL
+                .iter()
+                .find(|channel| channel.device == node)
+                .map_or(0, |channel| channel.host);
+            self.outbox
+                .push_back(Frame::new(host, node, payload).encode().unwrap());
+        }
+
         /// Queue one message for the host, on the channel `node` names.
         fn reply(&mut self, node: u16, message: &Message) {
             let body = Encoder::encode(&message.to_value());
+            let ack = self.acked(node);
             let seq = self.seq.entry(node).or_insert(0);
             let mut payload = Vec::new();
             ChannelHeader {
                 seq: *seq,
                 msg_type: MSG_DATA,
-                ack: 0x1000,
+                ack,
             }
             .encode_into(&mut payload);
             *seq = seq.wrapping_add(1);

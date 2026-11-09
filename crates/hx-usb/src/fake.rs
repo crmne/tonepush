@@ -36,6 +36,12 @@ pub struct Pedal {
     /// How many more questions about IRs are answered from the old contents
     /// before an accepted upload lands.
     pub ir_delay: usize,
+    /// The presets in the pedal's slots, by setlist and index, as documents.
+    /// A slot not listed is empty.
+    pub slots: BTreeMap<(i64, i64), Vec<u8>>,
+    /// Announce a deferred write's commit as notification 1 with its
+    /// transaction, as a Helix Floor does for a slot write.
+    pub announces_commits: bool,
     /// Every request received, as `(channel, transaction, opcode, arguments)`.
     pub requests: Vec<(u16, i64, i64, Value)>,
     /// Transfers waiting for the host to read.
@@ -66,6 +72,15 @@ pub struct Pedal {
     events_held: VecDeque<Vec<u8>>,
     inbox: BTreeMap<u16, StreamReader>,
     seq: BTreeMap<u16, u16>,
+    /// Stream bytes received from the host on each channel.
+    received: BTreeMap<u16, u32>,
+    /// What the pedal last acknowledged of them, plus a base of 0x1000:
+    /// everything received, except while it withholds acknowledgements.
+    advertised: BTreeMap<u16, u32>,
+    /// Stop acknowledging what the host sends, as a pedal that has stopped
+    /// taking a message does. The bytes still count, and the next
+    /// acknowledgement after withholding ends covers them.
+    pub withholds_acks: bool,
 }
 
 impl Pedal {
@@ -77,6 +92,8 @@ impl Pedal {
             irs: BTreeMap::new(),
             writing_ir: None,
             ir_delay: 0,
+            slots: BTreeMap::new(),
+            announces_commits: false,
             requests: Vec::new(),
             outbox: VecDeque::new(),
             fail_reads_after_data: None,
@@ -90,6 +107,9 @@ impl Pedal {
             events_held: VecDeque::new(),
             inbox: BTreeMap::new(),
             seq: BTreeMap::new(),
+            received: BTreeMap::new(),
+            advertised: BTreeMap::new(),
+            withholds_acks: false,
         }))
     }
 
@@ -107,6 +127,12 @@ impl Pedal {
             .rev()
             .find(|(node, ..)| *node == channel.device)
             .map(|(_, txn, ..)| *txn)
+    }
+
+    /// Notifications held back until the host acknowledges enough of the
+    /// events channel: see [`events_window`](Self::events_window).
+    pub fn events_waiting(&self) -> usize {
+        self.events_held.len()
     }
 
     /// Say something unasked, on the events channel.
@@ -139,6 +165,8 @@ impl Pedal {
             return;
         }
         self.frames_in += 1;
+        let total = self.received.entry(frame.dst).or_insert(0);
+        *total = total.wrapping_add(rest.len() as u32);
         if let Some(why) = self.fail_reads_after_data.take() {
             self.failing_reads = Some(why);
         }
@@ -146,6 +174,11 @@ impl Pedal {
         let reader = self.inbox.entry(node).or_default();
         reader.push(rest);
         let messages = reader.take_messages().unwrap_or_default();
+        // Part of a long message: acknowledge it, so the next part fits the
+        // window. A whole one is acknowledged by its reply.
+        if messages.is_empty() && !self.withholds_acks {
+            self.acknowledge(node);
+        }
         for message in messages {
             if let Ok(Message::Request { txn, opcode, args }) =
                 Message::try_from_value(message.body)
@@ -160,6 +193,16 @@ impl Pedal {
                         result,
                     },
                 );
+                if status == 1 && self.announces_commits {
+                    self.notify(
+                        1,
+                        hx_proto::msgmap! {
+                            key::TXN => Value::Int(txn),
+                            key::STATUS => Value::Int(0),
+                            key::RESULT => Value::Nil,
+                        },
+                    );
+                }
             }
         }
     }
@@ -190,6 +233,26 @@ impl Pedal {
                 },
             ),
             op::READ_PRESET => (0, Value::Bin(self.buffer.clone(), 2)),
+            op::FETCH_PRESET => (
+                0,
+                self.slots
+                    .get(&(number(key::SETLIST), number(key::PRESET_INDEX)))
+                    .map_or(Value::Nil, |document| Value::Bin(document.clone(), 2)),
+            ),
+            op::WRITE_SLOT_NAMED => {
+                if let Some(document) = args.get(key::DOCUMENT).and_then(Value::as_raw) {
+                    self.slots.insert(
+                        (number(key::SETLIST), number(key::PRESET_INDEX)),
+                        document.to_vec(),
+                    );
+                }
+                (i64::from(self.defers_writes), Value::Nil)
+            }
+            op::CLEAR_SLOT => {
+                self.slots
+                    .remove(&(number(key::SETLIST), number(key::PRESET_INDEX)));
+                (0, Value::Nil)
+            }
             op::WRITE_PRESET => {
                 if self.applies_writes {
                     if let Some(document) = args.get(key::DOCUMENT).and_then(Value::as_raw) {
@@ -287,15 +350,46 @@ impl Pedal {
         self.outbox.push_back(frame);
     }
 
+    /// What the pedal acknowledges of the host's bytes on a channel.
+    /// Frozen at what was acknowledged last while it withholds them.
+    fn acked(&mut self, node: u16) -> u32 {
+        if !self.withholds_acks {
+            let received = self.received.get(&node).copied().unwrap_or(0);
+            self.advertised.insert(node, received);
+        }
+        0x1000u32.wrapping_add(self.advertised.get(&node).copied().unwrap_or(0))
+    }
+
+    /// Acknowledge the host's bytes on a channel with a bare ACK frame, as
+    /// the pedal does after each chunk of a long message.
+    fn acknowledge(&mut self, node: u16) {
+        let ack = self.acked(node);
+        let seq = self.seq.entry(node).or_insert(0);
+        let mut payload = Vec::new();
+        ChannelHeader {
+            seq: *seq,
+            msg_type: MSG_ACK,
+            ack,
+        }
+        .encode_into(&mut payload);
+        let host = ChannelId::ALL
+            .iter()
+            .find(|channel| channel.device == node)
+            .map_or(0, |channel| channel.host);
+        self.outbox
+            .push_back(Frame::new(host, node, payload).encode().unwrap());
+    }
+
     /// Queue one message for the host, on the channel `node` names.
     fn reply(&mut self, node: u16, message: &Message) {
         let body = Encoder::encode(&message.to_value());
+        let ack = self.acked(node);
         let seq = self.seq.entry(node).or_insert(0);
         let mut payload = Vec::new();
         ChannelHeader {
             seq: *seq,
             msg_type: MSG_DATA,
-            ack: 0x1000,
+            ack,
         }
         .encode_into(&mut payload);
         *seq = seq.wrapping_add(1);

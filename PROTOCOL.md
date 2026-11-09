@@ -141,6 +141,23 @@ untouched, three minutes of `watch`: 195 notifications and then silence before
 (195 ticks of 21 bytes is 4095 bytes), 1095 and still flowing after. The device
 tests do not cover this; `fake::Pedal::events_window` models it.
 
+**A channel must stay inside a 512-byte window. [confirmed]** The device
+acknowledges each channel's stream in bytes. HX Edit (on an HX Stomp, every
+large message in the captures) never has more than 512 bytes unacknowledged
+on a channel: it sends 496 + 16 bytes, waits for the acknowledgement to move
+by `0x200`, and tops up by exactly as much as was acknowledged - 8 bytes when
+the device acknowledges 8. A client that sends its next chunk whenever
+anything arrives, or after a short wait, can run past that. A Helix Floor
+(3.80) froze part-way through six preset writes sent that way, answering
+nothing on any channel until power cycled, and in every one of the six, 1.2
+to 2.5 KB were unacknowledged; writes that happened to stay within about 512
+bytes landed. Only the Floor's profile keeps the window so far; the other
+devices send a chunk after each short read, as before, until someone measures
+them. The Floor's profile counts the window per channel, across messages:
+bytes an earlier message left unacknowledged take up room in it, so a new
+message does not get 512 bytes of its own, and its first chunk waits for
+room like any other.
+
 **Idle channels need keep-alives during long reads. [confirmed]** A Helix Floor
 (3.80) probes a channel that has carried no traffic with keep-alive frames
 (type 0x10) at growing intervals. After four that the host leaves unanswered, it
@@ -796,6 +813,15 @@ leave an HX Stomp (3.80) showing "transferring data" until it hears END, as an
 upload's opcode 9 does: it was still on that screen after a backup had finished
 and its session closed, and an END after each read cleared it. Other devices
 are unmeasured, so only the Stomp's profile closes its reads.
+
+**A restore spares the flash and waits for each commit. [confirmed on a Helix
+Floor]** A slot write (opcode 8) answers status 1 within about 8 ms and announces
+its commit later as notification 1 carrying its transaction, 0.6 to 2.9 s after
+the write began on a Helix Floor (3.80), along with notification 6 naming the
+slot and its new name - longer than the fixed settle after a write. A restore
+now waits for that announcement on a Floor, keeps the channels alive as a
+backup does, and empties only slots that hold something: reading a slot first
+is a quick read, and most of a Floor's 1024 slots are empty already.
 
 ### Writing a preset document back [confirmed]
 

@@ -821,6 +821,9 @@ pub fn restore(
 
     if let Some(presets) = presets {
         let total = presets.len();
+        // A restore is minutes of requests on the data channel; the others
+        // must hear from us meanwhile, as during a backup.
+        let mut alive = KeepAlive::new();
         for (done, (setlist, index, name, preset)) in presets.into_iter().enumerate() {
             progress(Step::Presets {
                 done,
@@ -829,10 +832,19 @@ pub fn restore(
                 slot: index,
                 name: &name,
             });
+            alive.tick(session)?;
             let (setlist, index) = (setlist as i64, index as i64);
             match preset {
                 Some(preset) => session.write_preset_at(setlist, index, &name, &preset)?,
-                None => session.clear_preset_at(setlist, index)?,
+                // Emptying a slot is a flash write too, and most slots a
+                // backup holds nothing for are empty already: on a Helix
+                // Floor that is hundreds of the 1024. Reading one is quick
+                // and leaves the flash alone.
+                None => {
+                    if session.read_preset_at(setlist, index)?.is_some() {
+                        session.clear_preset_at(setlist, index)?;
+                    }
+                }
             }
         }
     }
@@ -1962,6 +1974,57 @@ mod tests {
         assert!(!dir.join("001 Keep.hxpreset").exists());
         assert!(dir.join("001 New.hxpreset").exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A restore empties only the slots that hold something: on a Helix
+    /// Floor most of the 1024 a backup holds nothing for are empty already,
+    /// and every emptying is a flash write.
+    #[test]
+    fn a_restore_empties_only_slots_that_hold_something() {
+        const PRESET: &[u8] = include_bytes!("../../hx-proto/tests/preset.bin");
+        let root = scratch("restore-empties");
+        let bundle = root.join("bundle.hxbundle");
+        let mut saved = manifest();
+        saved.presets = vec![String::new(); 126];
+        saved.presets[0] = "Named".into();
+        std::fs::write(
+            bundle.join("manifest.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(bundle.join("presets/000 Named.hxpreset"), PRESET).unwrap();
+        let pedal = crate::fake::Pedal::new();
+        pedal.lock().unwrap().slots.insert((0, 5), PRESET.to_vec());
+        let mut session = crate::fake::session(&pedal);
+
+        restore(
+            &bundle,
+            &mut session,
+            Parts {
+                presets: true,
+                globals: false,
+                irs: false,
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        let pedal = pedal.lock().unwrap();
+        let emptied: Vec<i64> = pedal
+            .requests
+            .iter()
+            .filter(|(_, _, opcode, _)| *opcode == hx_proto::rpc::op::CLEAR_SLOT)
+            .filter_map(|(_, _, _, args)| {
+                args.get(hx_proto::rpc::key::PRESET_INDEX)
+                    .and_then(Value::as_i64)
+            })
+            .collect();
+        assert_eq!(emptied, [5], "only the slot that held something");
+        assert!(
+            pedal.slots.contains_key(&(0, 0)),
+            "the named preset is back"
+        );
+        assert_eq!(pedal.slots.len(), 1);
     }
 
     #[test]

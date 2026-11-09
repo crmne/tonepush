@@ -82,6 +82,19 @@ pub struct DeviceProfile {
     /// Without it an HX Stomp (3.80) stays on "transferring data" after the
     /// read, even once the session has closed. Unmeasured elsewhere.
     pub closes_ir_reads: bool,
+    /// Whether a preset written straight into a slot is waited on until the
+    /// device announces it committed, rather than for a fixed settle. A Helix
+    /// Floor (3.80) announces it as notification 1 with the write's
+    /// transaction, 0.6 to 2.9 s after the write begins - longer than the
+    /// fixed settle, so without the wait a restore's next write can start
+    /// while a commit is still running.
+    pub awaits_slot_commits: bool,
+    /// Whether a long message is kept inside the device's 512-byte receive
+    /// window, as HX Edit keeps it: each chunk waits until the device has
+    /// acknowledged enough of the ones before. Sent past it, a Helix Floor
+    /// (3.80) froze part-way through preset writes. Without it, a chunk goes
+    /// out after a short read, as before.
+    pub keeps_send_window: bool,
 }
 
 impl DeviceProfile {
@@ -107,6 +120,8 @@ pub const HX_STOMP: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: true,
+    awaits_slot_commits: false,
+    keeps_send_window: false,
 };
 pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     product_id: 0x4253,
@@ -119,6 +134,8 @@ pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    awaits_slot_commits: false,
+    keeps_send_window: false,
 };
 pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     product_id: 0x4248,
@@ -138,6 +155,8 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     dsp_budget: Some(7500),
     controls: rpc::ControlLayout::Helix,
     closes_ir_reads: false,
+    awaits_slot_commits: true,
+    keeps_send_window: true,
 };
 pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     product_id: 0x4249,
@@ -150,6 +169,8 @@ pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    awaits_slot_commits: false,
+    keeps_send_window: false,
 };
 pub const HELIX_LT: DeviceProfile = DeviceProfile {
     product_id: 0x424A,
@@ -162,6 +183,8 @@ pub const HELIX_LT: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    awaits_slot_commits: false,
+    keeps_send_window: false,
 };
 pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     product_id: 0x4245,
@@ -174,6 +197,8 @@ pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    awaits_slot_commits: false,
+    keeps_send_window: false,
 };
 
 /// Every device profile we recognise.
