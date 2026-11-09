@@ -436,6 +436,9 @@ pub enum Evt {
     /// comes back as `None` so the setlist can record that it is empty rather
     /// than silently shortening.
     CapturedSetlist(Vec<(String, Option<Vec<u8>>)>),
+    /// Something in the loaded preset changed on the pedal, and this is all
+    /// of it: the rest of what [`Evt::Loaded`] said still holds.
+    Changed(Change),
     Activity(String),
     Failed(String),
 }
@@ -454,6 +457,105 @@ pub struct Block {
     /// The cab riding along with an amp, if any.
     pub paired: Option<u32>,
     pub paired_values: Vec<f32>,
+}
+
+/// A change the pedal announced in the loaded preset, whole enough to show
+/// without reading the preset again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Change {
+    /// A block switched on or off: by a footswitch, MIDI, or an expression
+    /// pedal's auto-engage.
+    Enabled { block: i64, enabled: bool },
+    /// One of a block's own parameters moved: a knob under the pedal's
+    /// screen, an expression pedal, a footswitch assigned to it.
+    Param {
+        block: i64,
+        index: usize,
+        value: f32,
+    },
+    /// The tempo, tapped or set on the pedal.
+    Tempo(f32),
+}
+
+impl Change {
+    /// Show the change in a view of the loaded preset.
+    pub fn apply(self, chain: &mut [Block], tempo: &mut Option<f32>) {
+        match self {
+            Change::Enabled { block, enabled } => {
+                if let Some(slot) = chain.iter_mut().find(|b| b.position == block) {
+                    slot.enabled = enabled;
+                }
+            }
+            Change::Param {
+                block,
+                index,
+                value,
+            } => {
+                let slot = chain.iter_mut().find(|b| b.position == block);
+                if let Some(held) = slot.and_then(|b| b.values.get_mut(index)) {
+                    *held = value;
+                }
+            }
+            Change::Tempo(bpm) => *tempo = Some(bpm),
+        }
+    }
+
+    /// Whether two changes are to the same thing, whatever they set it to.
+    fn same_target(self, other: Change) -> bool {
+        match (self, other) {
+            (Change::Enabled { block: a, .. }, Change::Enabled { block: b, .. }) => a == b,
+            (
+                Change::Param {
+                    block: a, index: i, ..
+                },
+                Change::Param {
+                    block: b, index: j, ..
+                },
+            ) => (a, i) == (b, j),
+            (Change::Tempo(_), Change::Tempo(_)) => true,
+            _ => false,
+        }
+    }
+}
+
+/// The editor's own changes the pedal has yet to echo back.
+///
+/// The pedal announces a change the editor sent exactly as it announces one
+/// made on the pedal. A drag comes back as a run of announcements, the last
+/// of them landing after the drag has moved on, and showing those would pull
+/// the knob back under the pointer. So each change sent is remembered until
+/// its echo arrives.
+#[derive(Default)]
+struct Echoes(Vec<Change>);
+
+impl Echoes {
+    /// A change to a value the parameter already had is never echoed, so
+    /// what is remembered has to be bounded.
+    const KEPT: usize = 64;
+
+    fn expect(&mut self, change: Change) {
+        if self.0.len() == Self::KEPT {
+            self.0.remove(0);
+        }
+        self.0.push(change);
+    }
+
+    /// Whether the pedal announcing `change` is it echoing one of ours.
+    ///
+    /// Echoes come in order, so one settles every earlier change to the same
+    /// thing as well. A change to that thing matching none of ours was made
+    /// on the pedal, and leaves ours still awaited stale: they are dropped
+    /// rather than left to swallow a later change of the pedal's.
+    fn is_echo(&mut self, change: Change) -> bool {
+        let echoed = self.0.iter().position(|ours| *ours == change);
+        let mut at = 0;
+        self.0.retain(|ours| {
+            let settled = ours.same_target(change) && echoed.is_none_or(|echoed| at <= echoed);
+            at += 1;
+            !settled
+        });
+        echoed.is_some()
+    }
 }
 
 /// One block of a symbolic tone, resolved and ready to apply: the model
@@ -592,6 +694,9 @@ struct Worker {
     /// Whether the pedal declined, after an announcement, to say which
     /// preset it has loaded, so the next poll asks again.
     recheck: bool,
+    /// Changes sent to the pedal whose announcements are still to come, so
+    /// they are not mistaken for changes made on it.
+    echoes: Echoes,
     /// Everything an audition temporarily displaces. Histories are moved here
     /// rather than copied: while a cloud Tone is sounding it is not an edit
     /// somebody can accidentally fold into their existing undo stack.
@@ -649,6 +754,7 @@ impl Worker {
                 snapshot: None,
             },
             recheck: false,
+            echoes: Echoes::default(),
             audition: None,
             trial: None,
         }
@@ -662,9 +768,9 @@ impl Worker {
     }
 
     fn run(mut self) {
-        let mut last_poll = Instant::now();
+        let mut fed = Instant::now();
         loop {
-            match self.cmds.recv_timeout(Duration::from_millis(120)) {
+            match self.cmds.recv_timeout(Self::LISTEN) {
                 Ok(cmd) => {
                     let (cmd, follow_up) = self.gather(cmd);
                     // Bracket the work so the UI can say the device is being
@@ -683,15 +789,23 @@ impl Worker {
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
 
-            // The device drops idle sessions, and it pushes front-panel
-            // activity between our requests, so keep it fed and drain what it
-            // sent.
-            if last_poll.elapsed() > Duration::from_millis(700) {
-                last_poll = Instant::now();
-                self.poll();
+            // The device pushes front-panel activity between our requests,
+            // and drops sessions that go quiet: hear it out often, and keep
+            // it fed.
+            self.poll();
+            if fed.elapsed() > Self::KEEP_ALIVE {
+                fed = Instant::now();
+                self.keep_alive();
             }
         }
     }
+
+    /// How long the worker waits for a request before listening to the
+    /// pedal again. HX Edit answers each notification within about 50 ms,
+    /// so a footswitch shows as it is pressed.
+    const LISTEN: Duration = Duration::from_millis(50);
+    /// How often every channel is sent a keep-alive.
+    const KEEP_ALIVE: Duration = Duration::from_millis(700);
 
     /// Collapse a run of the same kind of request into its last one.
     ///
@@ -801,14 +915,26 @@ impl Worker {
                 kind,
             } => {
                 self.snapshot();
-                if self.run_on_device(|d| d.set_param(block, index, kind.wire(value))) {
+                let wire = kind.wire(value);
+                // Remembered as the pedal will say it back: a switch as on or
+                // off, a choice as a whole number.
+                let sent = as_number(&wire).zip(usize::try_from(index).ok());
+                if self.run_on_device(|d| d.set_param(block, index, wire)) {
                     self.dirty = true;
+                    if let Some((value, index)) = sent {
+                        self.echoes.expect(Change::Param {
+                            block,
+                            index,
+                            value,
+                        });
+                    }
                 }
             }
             Cmd::SetEnabled { block, enabled } => {
                 self.snapshot();
                 if self.run_on_device(|d| d.set_enabled(block, enabled)) {
                     self.dirty = true;
+                    self.echoes.expect(Change::Enabled { block, enabled });
                 }
             }
             Cmd::SetRouting { block, to } => {
@@ -1292,6 +1418,7 @@ impl Worker {
         self.forget_audition();
         self.trial = None;
         self.dirty = false;
+        self.echoes = Echoes::default();
         self.send(Evt::Connected {
             device: profile.name.to_owned(),
             presets: profile.presets,
@@ -2237,6 +2364,9 @@ impl Worker {
             return;
         };
         self.adopt(info);
+        // What was awaited was awaited of the preset as it stood; read again,
+        // it may hold another model with the same knob numbers.
+        self.echoes = Echoes::default();
         self.present(&preset);
     }
 
@@ -2255,6 +2385,8 @@ impl Worker {
             self.trial = None;
             self.forget_history();
             self.dirty = false;
+            // The positions they name are other blocks now.
+            self.echoes = Echoes::default();
         }
         self.shown.setlist = setlist;
         self.shown.index = index;
@@ -2325,6 +2457,16 @@ impl Worker {
         });
     }
 
+    fn keep_alive(&mut self) {
+        let Some(device) = self.device.as_mut() else {
+            return;
+        };
+        if let Err(e) = device.keepalive() {
+            self.send(Evt::Failed(e.to_string()));
+            self.let_go();
+        }
+    }
+
     fn poll(&mut self) {
         let mut look = std::mem::take(&mut self.recheck);
         let Some(device) = self.device.as_mut() else {
@@ -2332,13 +2474,24 @@ impl Worker {
         };
         let polled = device.poll_notifications();
         let mut snapshot = None;
+        let mut reread = false;
         if let Ok(events) = &polled {
             for (event, args) in events {
                 self.events
                     .send(Evt::Activity(format!("event {event}: {args:?}")));
                 match notice(*event, args) {
-                    Notice::Preset | Notice::Unknown => look = true,
+                    Notice::Preset => look = true,
                     Notice::Snapshot(index) => snapshot = Some(index),
+                    Notice::Changed(change) => {
+                        if !self.echoes.is_echo(change) {
+                            self.events.send(Evt::Changed(change));
+                        }
+                    }
+                    Notice::Edited => reread = true,
+                    Notice::Unknown => {
+                        look = true;
+                        reread = true;
+                    }
                     Notice::Chatter => {}
                 }
             }
@@ -2346,14 +2499,16 @@ impl Worker {
         // An idle read timeout is already represented as `Ok(None)`. Anything
         // that reaches this error arm is transport or protocol loss, and the
         // next poll cannot safely reuse the session's sequence state.
-        if let Err(e) = polled.map(|_| ()).and_then(|_| device.keepalive()) {
+        if let Err(e) = polled {
             self.send(Evt::Failed(e.to_string()));
             return self.let_go();
         }
         let reloaded = look && self.follow_preset();
-        if !reloaded && snapshot.is_some_and(|index| self.shown.snapshot != Some(index)) {
-            // Another snapshot is the same preset in another state: the
-            // chain is read again, and the history and unsaved changes stay.
+        // Another snapshot is the same preset in another state, shown the way
+        // an edit only a read reveals is: the chain is read again, and the
+        // history and unsaved changes stay.
+        let stale = reread || snapshot.is_some_and(|index| self.shown.snapshot != Some(index));
+        if !reloaded && stale {
             self.reload();
         }
     }
@@ -2464,7 +2619,13 @@ enum Notice {
     Preset,
     /// A snapshot was selected, by its zero-based index.
     Snapshot(usize),
-    /// Nothing to follow: completions, the steady tick, edits echoed back.
+    /// Something in the loaded preset changed, and this says exactly what.
+    Changed(Change),
+    /// Something in the loaded preset changed that only reading it again
+    /// shows: a model swapped on the pedal's screen, a cab's parameter.
+    Edited,
+    /// Nothing to follow: completions, the steady tick, what a change of
+    /// another kind already says.
     Chatter,
     /// An event never seen in a capture, which could be any of the above.
     Unknown,
@@ -2472,33 +2633,78 @@ enum Notice {
 
 /// Read a notification by its id and arguments.
 ///
-/// The ids are the ones every capture shows (docs/_reference/opcodes.md,
-/// section 3). A preset load is announced as event 8 when it starts and 4
-/// when it ends, each with the setlist and slot, and as event 22 reporting
-/// object 28, the loaded slot. Selecting a snapshot announces events 42 and
-/// 46 with its index under key 92 (`captures/05-snapshots.log`). Those were
-/// all captured from switches HX Edit asked for; a footswitch has not been
-/// captured, so an event that is not known to be chatter is treated as
-/// possibly a switch, which costs one question to the device.
+/// The ids are the ones the captures show (docs/_reference/opcodes.md,
+/// section 3), and the pedal announces what its own footswitches and knobs
+/// do the same way it echoes what the editor sends. A preset load is
+/// announced as event 8 when it starts and 4 when it ends, each with the
+/// setlist and slot, and as event 22 reporting object 28, the loaded slot.
+/// Selecting a snapshot announces events 42 and 46 with its index under key
+/// 92 (`captures/05-snapshots.log`). Event 49 tagged 17 switches a block on
+/// or off, event 30 moves a parameter, and event 22 reporting object 16 is
+/// the tempo. An event not known to be chatter is never just dropped: it
+/// could be a switch or an edit, so both are checked.
 fn notice(event: i64, args: &hx_proto::msgpack::Value) -> Notice {
     use hx_proto::msgpack::Value;
     use hx_proto::rpc::key;
 
     // State changes carry their own arguments one level down, under the
-    // same key the notification used for its arguments.
+    // same key the notification used for its arguments, and say which of
+    // the things their id covers they are under key 121.
     let inner = args.get(key::EVENT_ARGS).unwrap_or(args);
     let number = |k| inner.get(k).and_then(Value::as_i64);
+    let tag = args.get(121).and_then(Value::as_i64);
     const LOADED_SLOT: i64 = 28;
+    const TEMPO: i64 = 16;
+    const SWITCHED: i64 = 17;
+    const REBUILT: i64 = 10;
+    // Key 26 picks the model in the slot, 1 being the cab riding with an
+    // amp, and key 29 false counts from the values past the model's own
+    // parameters, a delay's Trails. Only a block's own parameters are
+    // numbered the way the view numbers them.
+    let own_param = || {
+        if number(key::PATH).unwrap_or(0) != 0
+            || inner.get(key::COMMIT).and_then(Value::as_bool) == Some(false)
+        {
+            return None;
+        }
+        Some(Change::Param {
+            block: number(key::BLOCK)?,
+            index: usize::try_from(number(key::PARAM_INDEX)?).ok()?,
+            value: as_number(inner.get(key::VALUE)?)?,
+        })
+    };
     match event {
         4 | 8 => Notice::Preset,
-        22 if number(key::OBJECT_ID) == Some(LOADED_SLOT) => Notice::Preset,
+        22 => match number(key::OBJECT_ID) {
+            Some(LOADED_SLOT) => Notice::Preset,
+            Some(TEMPO) => match inner.get(key::VALUE).and_then(as_number) {
+                Some(bpm) => Notice::Changed(Change::Tempo(bpm)),
+                None => Notice::Edited,
+            },
+            // Global settings, and the steady tick that carries nothing.
+            _ => Notice::Chatter,
+        },
+        30 => own_param().map_or(Notice::Edited, Notice::Changed),
+        49 => match tag {
+            Some(SWITCHED) => match (
+                number(key::BLOCK),
+                inner.get(key::ENABLED).and_then(Value::as_bool),
+            ) {
+                (Some(block), Some(enabled)) => Notice::Changed(Change::Enabled { block, enabled }),
+                _ => Notice::Edited,
+            },
+            Some(REBUILT) => Notice::Edited,
+            // Tag 47 rides along with every rebuild.
+            _ => Notice::Chatter,
+        },
         42 | 46 => match number(key::SNAPSHOT).and_then(|n| usize::try_from(n).ok()) {
             Some(index) => Notice::Snapshot(index),
             None => Notice::Unknown,
         },
-        1 | 6 | 20 | 21 | 22 | 23 | 30 | 31 | 33 | 34 | 37 | 39 | 49 | 56 | 59 | 60 => {
-            Notice::Chatter
-        }
+        // 41 is a footswitch's light following what it drives, 39 the
+        // pedal's cursor, 23 a snapshot settling: each rides along with an
+        // event that says what changed.
+        1 | 6 | 20 | 21 | 23 | 31 | 33 | 34 | 37 | 39 | 41 | 56 | 59 | 60 => Notice::Chatter,
         _ => Notice::Unknown,
     }
 }
@@ -2865,6 +3071,80 @@ mod tests {
             self.announce_load(index);
         }
 
+        /// Rewrite one slot of the edit buffer.
+        fn edit_slot(&mut self, position: i64, edit: impl FnOnce(&mut Value)) {
+            const BODY: i64 = 20;
+            let position = usize::try_from(position).unwrap();
+            let mut preset = hx_proto::Preset::parse(&self.buffer).unwrap();
+            let mut slot = preset.copy_slot(position).unwrap();
+            edit(slot.get_mut(BODY).unwrap());
+            assert!(preset.paste_slot(position, &slot));
+            self.buffer = preset.encode();
+        }
+
+        /// Switch a block on or off, and say so: a footswitch, or the echo
+        /// of the editor's own switch, which the pedal announces alike.
+        fn switch_block(&mut self, block: i64, enabled: bool) {
+            const ENABLED: i64 = 10;
+            self.edit_slot(block, |body| {
+                *body.get_mut(ENABLED).unwrap() = Value::Bool(enabled);
+            });
+            let args = hx_proto::msgmap! {
+                key::BLOCK => Value::Int(block),
+                key::ENABLED => Value::Bool(enabled),
+            };
+            self.notify(49, state_change([0, 5, 17], args));
+        }
+
+        /// Move a parameter of the block's own model (0) or of the cab
+        /// riding with it (1), and say so: a knob, or the echo of the
+        /// editor's own change. A value the parameter already had changes
+        /// nothing, and the pedal says nothing about it.
+        fn turn(&mut self, block: i64, model: i64, index: i64, value: Value) {
+            let values = if model == 0 { 11 } else { 12 };
+            let mut changed = false;
+            self.edit_slot(block, |body| {
+                let Some(Value::Array(held)) = body.at_mut(&[values, 4]) else {
+                    panic!("block {block} has no values");
+                };
+                let held = &mut held[usize::try_from(index).unwrap()];
+                changed = *held != value;
+                *held = value.clone();
+            });
+            if changed {
+                let args = hx_proto::msgmap! {
+                    key::BLOCK => Value::Int(block),
+                    key::COMMIT => Value::Bool(true),
+                    key::PATH => Value::Int(model),
+                    key::PARAM_INDEX => Value::Int(index),
+                    key::VALUE => value,
+                };
+                self.notify(30, state_change([0, 6, 20], args));
+            }
+        }
+
+        /// Tap a tempo in.
+        fn tap(&mut self, bpm: f32) {
+            let mut preset = hx_proto::Preset::parse(&self.buffer).unwrap();
+            assert!(preset.set_tempo(bpm));
+            self.buffer = preset.encode();
+            let args = hx_proto::msgmap! {
+                key::OBJECT_ID => Value::Int(16),
+                key::VALUE => Value::F32(bpm),
+            };
+            self.notify(22, state_change([0, 9, 25], args));
+        }
+
+        /// Pick another model for a block on the pedal's own screen.
+        fn swap_model(&mut self, block: i64, model: u32) {
+            self.edit_slot(block, |body| {
+                *body.at_mut(&[24, 25]).unwrap() = Value::Int(i64::from(model));
+            });
+            self.notify(49, state_change([0, 5, 47], Value::Nil));
+            let args = hx_proto::msgmap! { key::BLOCK => Value::Int(block) };
+            self.notify(49, state_change([0, 5, 10], args));
+        }
+
         /// Send the last `count` messages in one transfer, the way the
         /// device coalesces frames when it has several to say.
         fn coalesce(&mut self, count: usize) {
@@ -2880,6 +3160,13 @@ mod tests {
             let Some((header, rest)) = ChannelHeader::decode(&frame.payload) else {
                 return;
             };
+            if frame.flags == hx_proto::frame::FLAG_HANDSHAKE {
+                if let Some(channel) = ChannelId::ALL.into_iter().find(|c| c.device == frame.dst) {
+                    let answer = Frame::opening_answer(channel).encode().unwrap();
+                    self.outbox.push_back(answer);
+                }
+                return;
+            }
             if !header.has_data() || rest.is_empty() {
                 return;
             }
@@ -2888,6 +3175,12 @@ mod tests {
             reader.push(rest);
             let messages = reader.take_messages().unwrap_or_default();
             for message in messages {
+                // Picking a service on a channel just opened: the device
+                // says the number back.
+                if message.body.as_i64().is_some() {
+                    self.send_body(node, &message.body);
+                    continue;
+                }
                 if let Ok(Message::Request { txn, opcode, args }) =
                     Message::try_from_value(message.body)
                 {
@@ -2987,6 +3280,17 @@ mod tests {
                     }
                     (0, Value::Nil)
                 }
+                op::SET_ENABLED => {
+                    let enabled = args.get(key::ENABLED).and_then(Value::as_bool);
+                    self.switch_block(number(key::BLOCK), enabled.unwrap_or_default());
+                    (0, Value::Nil)
+                }
+                op::SET_PARAM => {
+                    let value = args.get(key::VALUE).cloned().unwrap_or(Value::Nil);
+                    let (block, index) = (number(key::BLOCK), number(key::PARAM_INDEX));
+                    self.turn(block, number(key::PATH), index, value);
+                    (0, args.clone())
+                }
                 op::SAVE_PRESET => {
                     let name = args
                         .get(key::NAME)
@@ -3003,7 +3307,12 @@ mod tests {
 
         /// Queue one message for the host, on the channel `node` names.
         fn reply(&mut self, node: u16, message: &Message) {
-            let body = Encoder::encode(&message.to_value());
+            self.send_body(node, &message.to_value());
+        }
+
+        /// Queue one stream message, whatever its body, on the channel `node`.
+        fn send_body(&mut self, node: u16, body: &Value) {
+            let body = Encoder::encode(body);
             let seq = self.seq.entry(node).or_insert(0);
             let mut payload = Vec::new();
             ChannelHeader {
@@ -3489,7 +3798,11 @@ mod tests {
             )
         };
         assert_eq!(notice(22, &object(28, Value::Int(12))), Notice::Preset);
-        assert_eq!(notice(22, &object(16, Value::F32(120.0))), Notice::Chatter);
+        assert_eq!(
+            notice(22, &object(16, Value::F32(120.0))),
+            Notice::Changed(Change::Tempo(120.0))
+        );
+        assert_eq!(notice(22, &object(21, Value::Int(2))), Notice::Chatter);
         assert_eq!(
             notice(22, &state_change([0, 10, 27], Value::Nil)),
             Notice::Chatter
@@ -3507,9 +3820,48 @@ mod tests {
 
         let done = hx_proto::msgmap! { 102 => Value::Int(1009), 103 => Value::Int(0) };
         assert_eq!(notice(20, &done), Notice::Chatter);
-        let turned = hx_proto::msgmap! { 98 => Value::Int(6), 28 => Value::Int(2) };
+
+        // `captures/02-ui-actions.log`, and a knob on the pedal says the same.
+        let turned = |model, own| {
+            let args = hx_proto::msgmap! {
+                98 => Value::Int(6), 29 => Value::Bool(own), 26 => Value::Int(model),
+                28 => Value::Int(2), 119 => Value::F32(0.05),
+            };
+            notice(30, &state_change([0, 6, 20], args))
+        };
+        let moved = Change::Param {
+            block: 6,
+            index: 2,
+            value: 0.05,
+        };
+        assert_eq!(turned(0, true), Notice::Changed(moved));
         assert_eq!(
-            notice(30, &state_change([0, 6, 20], turned)),
+            turned(1, true),
+            Notice::Edited,
+            "the cab riding with an amp"
+        );
+        assert_eq!(turned(0, false), Notice::Edited, "a delay's Trails");
+
+        // A footswitch on an HX Stomp: its light, then the block it drives.
+        let light = hx_proto::msgmap! {
+            70 => Value::Int(0), 63 => Value::Bool(false), 66 => Value::Int(67840),
+        };
+        assert_eq!(notice(41, &light), Notice::Chatter);
+        let switched = hx_proto::msgmap! { 98 => Value::Int(6), 59 => Value::Bool(false) };
+        assert_eq!(
+            notice(49, &state_change([0, 5, 17], switched)),
+            Notice::Changed(Change::Enabled {
+                block: 6,
+                enabled: false
+            })
+        );
+        let rebuilt = hx_proto::msgmap! { 98 => Value::Int(1) };
+        assert_eq!(
+            notice(49, &state_change([0, 5, 10], rebuilt)),
+            Notice::Edited
+        );
+        assert_eq!(
+            notice(49, &state_change([0, 5, 47], Value::Nil)),
             Notice::Chatter
         );
         assert_eq!(notice(77, &Value::Nil), Notice::Unknown);
@@ -3873,8 +4225,8 @@ mod tests {
             .any(|e| matches!(e, Evt::Loaded { index: 5, .. })));
     }
 
-    /// Once a preset is loaded the pedal ticks every 75 ms, and it echoes
-    /// every edit back. None of that is a reason to ask it anything.
+    /// Once a preset is loaded the pedal ticks every 75 ms, and it announces
+    /// every value that moves. None of that is a reason to ask it anything.
     #[test]
     fn chatter_is_not_a_reason_to_ask_the_pedal_anything() {
         let pedal = Pedal::new();
@@ -3882,8 +4234,7 @@ mod tests {
         {
             let mut pedal = pedal.lock().unwrap();
             pedal.notify(22, state_change([0, 10, 27], Value::Nil));
-            let turned = hx_proto::msgmap! { 98 => Value::Int(1), 119 => Value::F32(0.5) };
-            pedal.notify(30, state_change([0, 6, 20], turned));
+            pedal.turn(1, 0, 0, Value::F32(0.5));
         }
         let asked = pedal.lock().unwrap().requests.len();
 
@@ -3893,8 +4244,159 @@ mod tests {
         assert_eq!(pedal.lock().unwrap().requests.len(), asked);
     }
 
-    /// No footswitch has been captured, so an event never seen before is
-    /// taken as a possible switch and settled by asking.
+    /// What the editor shows of the loaded preset, in terms that can be
+    /// held against the pedal's own buffer: each slot's model, switch and
+    /// values, and the tempo.
+    type View = (Vec<(i64, u32, bool, Vec<f32>, Vec<f32>)>, Option<f32>);
+
+    fn view_of(chain: &[Block], tempo: Option<f32>) -> View {
+        let slots = chain.iter().map(|b| {
+            let values = (b.values.clone(), b.paired_values.clone());
+            (b.position, b.model, b.enabled, values.0, values.1)
+        });
+        (slots.collect(), tempo)
+    }
+
+    /// What the pedal's edit buffer holds, as the editor would show it.
+    fn held(pedal: &Arc<Mutex<Pedal>>) -> View {
+        let preset = hx_proto::Preset::parse(&pedal.lock().unwrap().buffer).unwrap();
+        view_of(&chain_of(&preset), preset.tempo())
+    }
+
+    /// Follow the worker the way the window does: a load replaces the view,
+    /// a change is applied to it.
+    fn follow(view: &mut (Vec<Block>, Option<f32>), events: &Receiver<Evt>) {
+        for evt in events.try_iter() {
+            match evt {
+                Evt::Loaded { chain, tempo, .. } => *view = (chain, tempo),
+                Evt::Changed(change) => change.apply(&mut view.0, &mut view.1),
+                _ => {}
+            }
+        }
+    }
+
+    /// Whatever is changed on the pedal itself, the editor goes on showing
+    /// what the pedal holds: told exactly what changed, it shows that, and
+    /// told in a way it cannot place, it reads the preset again rather than
+    /// let the change go by.
+    #[test]
+    fn the_editor_shows_every_change_made_on_the_pedal() {
+        type Done = fn(&mut Pedal);
+        let changes: [(&str, Done); 6] = [
+            ("a footswitch", |pedal| pedal.switch_block(1, false)),
+            ("a knob", |pedal| pedal.turn(2, 0, 1, Value::F32(-3.0))),
+            ("a knob on the amp's cab", |pedal| {
+                pedal.turn(3, 1, 0, Value::F32(4.0));
+            }),
+            ("tap tempo", |pedal| pedal.tap(96.0)),
+            ("a model picked on the pedal's screen", |pedal| {
+                pedal.swap_model(4, 101);
+            }),
+            ("an announcement never seen before", |pedal| {
+                pedal.swap_model(6, 101);
+                pedal.outbox.clear();
+                pedal.notify(77, Value::Nil);
+            }),
+        ];
+        for (what, change) in changes {
+            let pedal = Pedal::new();
+            let (mut worker, events) = worker(&pedal);
+            let shown = hx_proto::Preset::parse(&pedal.lock().unwrap().buffer).unwrap();
+            let mut view = (chain_of(&shown), shown.tempo());
+            let before = held(&pedal);
+
+            change(&mut pedal.lock().unwrap());
+            assert_ne!(held(&pedal), before, "{what} changes the preset");
+            // As many polls as it takes to read all the pedal said.
+            while worker.device.is_some() && !pedal.lock().unwrap().outbox.is_empty() {
+                worker.poll();
+            }
+
+            follow(&mut view, &events);
+            assert_eq!(view_of(&view.0, view.1), held(&pedal), "{what}");
+        }
+    }
+
+    /// The pedal announces the editor's own changes the way it announces
+    /// its own. Coming back they move nothing and ask nothing: a drag's
+    /// late echoes would pull the knob back under the pointer. A change made
+    /// on the pedal to the same knob afterwards still shows.
+    #[test]
+    fn the_editors_own_changes_coming_back_move_nothing() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        for value in [0.2, 0.4, 0.6] {
+            worker.handle(Cmd::SetParam {
+                block: 1,
+                index: 0,
+                value,
+                kind: hx_catalog::Kind::Continuous,
+            });
+        }
+        worker.handle(Cmd::SetEnabled {
+            block: 2,
+            enabled: false,
+        });
+        let _ = events.try_iter().count();
+        let asked = pedal.lock().unwrap().requests.len();
+
+        worker.poll();
+
+        assert!(!events
+            .try_iter()
+            .any(|e| matches!(e, Evt::Changed(_) | Evt::Loaded { .. })));
+        assert_eq!(pedal.lock().unwrap().requests.len(), asked);
+
+        pedal.lock().unwrap().turn(1, 0, 0, Value::F32(0.9));
+        worker.poll();
+        let turned = Change::Param {
+            block: 1,
+            index: 0,
+            value: 0.9,
+        };
+        assert!(events
+            .try_iter()
+            .any(|e| matches!(e, Evt::Changed(change) if change == turned)));
+    }
+
+    /// A change to a value a knob already had is never echoed. Once the
+    /// pedal puts another model in the block, the knob is another one, and
+    /// what was awaited for the old one must not swallow a change to it.
+    #[test]
+    fn a_change_never_echoed_does_not_outlive_the_model_it_was_made_to() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        let shown = hx_proto::Preset::parse(&pedal.lock().unwrap().buffer).unwrap();
+        let mut view = (chain_of(&shown), shown.tempo());
+        let knob = view.0.iter().find(|b| b.position == 1).unwrap().values[0];
+        worker.handle(Cmd::SetParam {
+            block: 1,
+            index: 0,
+            value: knob,
+            kind: hx_catalog::Kind::Continuous,
+        });
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.swap_model(1, 101);
+            // The new model's knob starts somewhere else.
+            pedal.edit_slot(1, |body| {
+                let Some(Value::Array(held)) = body.at_mut(&[11, 4]) else {
+                    panic!("block 1 has no values");
+                };
+                held[0] = Value::F32(knob + 1.0);
+            });
+        }
+        worker.poll();
+
+        pedal.lock().unwrap().turn(1, 0, 0, Value::F32(knob));
+        worker.poll();
+
+        follow(&mut view, &events);
+        assert_eq!(view_of(&view.0, view.1), held(&pedal));
+    }
+
+    /// An event never seen before could be a preset switch as much as an
+    /// edit, so it is settled by asking and reading.
     #[test]
     fn an_event_never_seen_still_checks_which_preset_is_loaded() {
         let pedal = Pedal::new();

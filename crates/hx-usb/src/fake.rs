@@ -7,11 +7,11 @@
 //! session did. This answers requests from a small model of the device's
 //! state instead, so a test can arrange exactly the misbehaviour it is about.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use hx_proto::frame::{ChannelHeader, MSG_ACK, MSG_DATA};
+use hx_proto::frame::{ChannelHeader, FLAG_HANDSHAKE, MSG_ACK, MSG_DATA, MSG_HELLO};
 use hx_proto::msgpack::{Encoder, Value};
 use hx_proto::rpc::{key, op, Message, StreamReader};
 use hx_proto::{ChannelId, Frame};
@@ -64,6 +64,12 @@ pub struct Pedal {
     events_acked: u32,
     /// Notifications waiting for the window to open.
     events_held: VecDeque<Vec<u8>>,
+    /// Channels a session that ended without closing them left open. An
+    /// opening of one goes unanswered until the channel is closed, as an HX
+    /// Stomp ignores one for a few seconds after the last session.
+    pub left_open: BTreeSet<u16>,
+    /// Channels that open but never confirm the service picked on them.
+    pub ignores_services: BTreeSet<u16>,
     inbox: BTreeMap<u16, StreamReader>,
     seq: BTreeMap<u16, u16>,
 }
@@ -88,6 +94,8 @@ impl Pedal {
             events_sent: 0,
             events_acked: 0,
             events_held: VecDeque::new(),
+            left_open: BTreeSet::new(),
+            ignores_services: BTreeSet::new(),
             inbox: BTreeMap::new(),
             seq: BTreeMap::new(),
         }))
@@ -111,10 +119,13 @@ impl Pedal {
 
     /// Say something unasked, on the events channel.
     pub fn notify(&mut self, event: i64, args: Value) {
-        self.reply(
-            ChannelId::EVENTS.device,
-            &Message::Notification { event, args },
-        );
+        self.notify_on(ChannelId::EVENTS, event, args);
+    }
+
+    /// Say something unasked on another channel, as no pedal has been seen
+    /// to do.
+    pub fn notify_on(&mut self, channel: ChannelId, event: i64, args: Value) {
+        self.reply(channel.device, &Message::Notification { event, args });
     }
 
     fn receive(&mut self, bytes: &[u8]) {
@@ -135,6 +146,19 @@ impl Pedal {
             }
             self.release_events();
         }
+        if frame.flags == FLAG_HANDSHAKE {
+            if let Some(channel) = ChannelId::ALL.into_iter().find(|channel| {
+                channel.device == frame.dst && !self.left_open.contains(&channel.device)
+            }) {
+                self.outbox
+                    .push_back(Frame::opening_answer(channel).encode().unwrap());
+            }
+            return;
+        }
+        if header.msg_type == MSG_HELLO {
+            self.left_open.remove(&frame.dst);
+            return;
+        }
         if !header.has_data() || rest.is_empty() {
             return;
         }
@@ -147,6 +171,14 @@ impl Pedal {
         reader.push(rest);
         let messages = reader.take_messages().unwrap_or_default();
         for message in messages {
+            // Picking a service on a channel just opened: the device says
+            // the number back.
+            if message.body.as_i64().is_some() {
+                if !self.ignores_services.contains(&node) {
+                    self.send_body(node, &message.body);
+                }
+                continue;
+            }
             if let Ok(Message::Request { txn, opcode, args }) =
                 Message::try_from_value(message.body)
             {
@@ -287,9 +319,25 @@ impl Pedal {
         self.outbox.push_back(frame);
     }
 
+    fn host_of(node: u16) -> u16 {
+        ChannelId::ALL
+            .iter()
+            .find(|channel| channel.device == node)
+            .map_or(0, |channel| channel.host)
+    }
+
     /// Queue one message for the host, on the channel `node` names.
     fn reply(&mut self, node: u16, message: &Message) {
-        let body = Encoder::encode(&message.to_value());
+        self.send_body(node, &message.to_value());
+    }
+
+    /// Queue one stream message, whatever its body, on the channel `node`.
+    /// Nothing reaches the host on a channel it has not managed to open.
+    fn send_body(&mut self, node: u16, body: &Value) {
+        if self.left_open.contains(&node) {
+            return;
+        }
+        let body = Encoder::encode(body);
         let seq = self.seq.entry(node).or_insert(0);
         let mut payload = Vec::new();
         ChannelHeader {
@@ -303,11 +351,9 @@ impl Pedal {
         payload.extend_from_slice(&0u16.to_le_bytes());
         payload.extend_from_slice(&(body.len() as u32).to_le_bytes());
         payload.extend_from_slice(&body);
-        let host = ChannelId::ALL
-            .iter()
-            .find(|channel| channel.device == node)
-            .map_or(0, |channel| channel.host);
-        let frame = Frame::new(host, node, payload).encode().unwrap();
+        let frame = Frame::new(Self::host_of(node), node, payload)
+            .encode()
+            .unwrap();
         if node != ChannelId::EVENTS.device {
             self.outbox.push_back(frame);
         } else if self.events_held.is_empty() && self.events_fit(&frame) {

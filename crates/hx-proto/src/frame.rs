@@ -86,6 +86,16 @@ fn pad4(n: usize) -> usize {
 }
 
 impl Frame {
+    /// How a device answers the opening of one of its channels, byte for
+    /// byte as an HX Stomp (3.80) does. For pretend devices: the host takes
+    /// the handshake flag as the answer and reads nothing else in it.
+    pub fn opening_answer(channel: ChannelId) -> Frame {
+        let payload = vec![0, 0, 0, 2, 0, 1, 0, 1, 0, 2, 0, 0];
+        let mut frame = Frame::new(channel.host, channel.device, payload);
+        frame.flags = FLAG_HANDSHAKE;
+        frame
+    }
+
     pub fn new(dst: u16, src: u16, payload: Vec<u8>) -> Self {
         let padding = vec![0; pad4(8 + payload.len()) - (8 + payload.len())];
         Frame {

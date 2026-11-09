@@ -127,6 +127,20 @@ received bytes while nobody was waiting on it, moved this from failing on the
 third preset-document write to comfortably past ten. Measured on an HX Stomp
 running 3.80.
 
+**What the device holds back, it garbles. [confirmed]** Draining before each
+request still left the device nowhere to write between polls: one read was
+posted, and posted again only when the next poll asked for it. An HX Stomp
+(3.80) ticks on the events channel every 75 ms, and polled every 700 ms it fell
+behind by seconds and packed what it held into frames of four to eight
+notifications with their bytes out of order: a frame starting four bytes into a
+stream prefix, four-byte fragments of a tick between whole ones, sequence numbers
+unbroken throughout. Read as a stream, a body byte became a length (`stream
+message declares 1779853698 bytes`) and the session ended, within ten seconds in
+every capture. Acknowledged at once, the same ticks came one 21-byte frame each.
+On an HX Stomp, reads now stay posted eight deep for as long as the interface
+is held (its profile's `reads_ahead`), a poll takes all that has arrived, and
+the editor listens every 50 ms.
+
 **The events channel needs ACK frames, not keep-alives. [confirmed]** The device
 sends at most 4 KB of notifications that have not been acknowledged by an ACK frame
 (type 0x08), then stops sending on channel `0x1002` and stays silent, across new
@@ -209,7 +223,13 @@ current sequence and acknowledgement. An earlier version of this section
 claimed HX Edit sent nothing recognisable on quit; that conclusion came from
 `captures/04-quit.log`, which on re-reading records HX Edit failing against an
 already-wedged device - repeating stale ACKs answering every HELLO - not a
-quit. This client now performs the same teardown when a session drops.
+quit. This client does not send it: sent as each session dropped rather than
+once as an application quit, it kept a second consecutive run of the hardware
+suite from opening the device at all. The channels are left open instead, and
+an HX Stomp (3.80) holds them for a few seconds, leaving a new opening of one
+unanswered; a session opened meanwhile closes each such channel with this frame
+and opens it again, which the device answers within a millisecond (its
+profile's `checks_openings`).
 
 ## Layer 1 - USB framing [confirmed]
 
@@ -1222,6 +1242,9 @@ bundles are a zlib-sectioned container (signature `AF6L`).
   deepest prior effort. Found the three-channel structure and a module catalog.
 - [`allansomensi/openhx`](https://github.com/allansomensi/openhx) - Rust;
   implements list and select preset, models a single channel.
+- [`john-baxter-dev/fretwire`](https://github.com/john-baxter-dev/fretwire) -
+  Rust; an editor that follows the pedal's footswitches and knobs, with the
+  notifications they send decoded in its `docs/protocol.md`.
 - [`AntonyCorbett/HelixBackupFiles`](https://github.com/AntonyCorbett/HelixBackupFiles),
   [`frankdeath/hx-tools`](https://github.com/frankdeath/hx-tools) - file formats.
 

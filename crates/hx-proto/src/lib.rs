@@ -82,6 +82,17 @@ pub struct DeviceProfile {
     /// Without it an HX Stomp (3.80) stays on "transferring data" after the
     /// read, even once the session has closed. Unmeasured elsewhere.
     pub closes_ir_reads: bool,
+    /// Whether opening a channel waits for the device to answer it and take
+    /// its service. An HX Stomp (3.80) holds a channel the last session left
+    /// open for a few seconds and answers no opening of it until it is
+    /// closed, so one left unanswered is closed and opened again. Unmeasured
+    /// elsewhere, where a channel is opened once and taken to be open.
+    pub checks_openings: bool,
+    /// How many reads stay posted for the device to send into. An HX Stomp
+    /// (3.80) holds back what it has no read for, and what it held between
+    /// two polls came back garbled. With none, a read is posted only when the
+    /// host looks at the wire. Unmeasured elsewhere.
+    pub reads_ahead: usize,
 }
 
 impl DeviceProfile {
@@ -107,6 +118,9 @@ pub const HX_STOMP: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: true,
+    checks_openings: true,
+    // Idle it ticks every 75 ms, one transfer each.
+    reads_ahead: 8,
 };
 pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     product_id: 0x4253,
@@ -119,6 +133,8 @@ pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    checks_openings: false,
+    reads_ahead: 0,
 };
 pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     product_id: 0x4248,
@@ -138,6 +154,8 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     dsp_budget: Some(7500),
     controls: rpc::ControlLayout::Helix,
     closes_ir_reads: false,
+    checks_openings: false,
+    reads_ahead: 0,
 };
 pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     product_id: 0x4249,
@@ -150,6 +168,8 @@ pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    checks_openings: false,
+    reads_ahead: 0,
 };
 pub const HELIX_LT: DeviceProfile = DeviceProfile {
     product_id: 0x424A,
@@ -162,6 +182,8 @@ pub const HELIX_LT: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    checks_openings: false,
+    reads_ahead: 0,
 };
 pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     product_id: 0x4245,
@@ -174,6 +196,8 @@ pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     dsp_budget: None,
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
+    checks_openings: false,
+    reads_ahead: 0,
 };
 
 /// Every device profile we recognise.

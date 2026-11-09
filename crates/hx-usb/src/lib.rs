@@ -4,7 +4,7 @@
 //! the per-channel bookkeeping straight: sequence numbers, cumulative
 //! acknowledgements, and reassembly of streams that straddle transfers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use hx_proto::frame::{ChannelHeader, MSG_ACK, MSG_DATA, MSG_HELLO, MSG_KEEPALIVE};
@@ -191,6 +191,8 @@ struct Channel {
     /// by the difference, so a channel that is never acknowledged eventually
     /// stops the device dead - including the channels nobody is waiting on.
     acked: u32,
+    /// Whether the device has answered our opening of the channel.
+    answered: bool,
     reader: StreamReader,
     txn: i64,
 }
@@ -206,6 +208,7 @@ impl Channel {
             seq: 0,
             rx_bytes: 0,
             acked: 0,
+            answered: false,
             reader: StreamReader::new(),
             txn: rpc::FIRST_TXN,
         }
@@ -240,6 +243,12 @@ pub struct Session {
     /// do on this session, and continuing to write only digs deeper - so the
     /// session refuses further work and says why.
     poisoned: Option<String>,
+    /// Notifications read and not yet handed out by `poll_notifications`.
+    ///
+    /// A request reads whatever arrives while it waits for its answer, and
+    /// what the device announced meanwhile waits here rather than being
+    /// lost: a footswitch pressed during a preset write is still pressed.
+    notifications: VecDeque<(i64, Value)>,
     pub profile: DeviceProfile,
 }
 
@@ -262,12 +271,38 @@ const WRITE_TIMED_OUT: &str = "write timed out";
 /// A write still in flight after being cancelled.
 const WRITE_STUCK: &str = "an earlier write never completed";
 
-/// The live USB transport. Exactly one read is kept posted so the device's
-/// unsolicited notifications are never dropped.
+/// The live USB transport.
+///
+/// The device sends only into a read the host has posted, and holds back
+/// whatever it cannot send. A device whose profile says so is left
+/// `reads_ahead` reads for as long as the interface is held; otherwise one
+/// is posted when the host next looks at the wire.
 struct UsbWire {
     ep_out: nusb::Endpoint<Bulk, Out>,
     ep_in: nusb::Endpoint<Bulk, In>,
-    read_posted: bool,
+    ahead: usize,
+}
+
+impl UsbWire {
+    fn new(
+        ep_out: nusb::Endpoint<Bulk, Out>,
+        ep_in: nusb::Endpoint<Bulk, In>,
+        profile: &DeviceProfile,
+    ) -> UsbWire {
+        let mut wire = UsbWire {
+            ep_out,
+            ep_in,
+            ahead: profile.reads_ahead,
+        };
+        wire.post_ahead();
+        wire
+    }
+
+    fn post_ahead(&mut self) {
+        while self.ep_in.pending() < self.ahead {
+            self.ep_in.submit(Buffer::new(512));
+        }
+    }
 }
 
 impl Wire for UsbWire {
@@ -299,14 +334,13 @@ impl Wire for UsbWire {
     }
 
     fn recv(&mut self, timeout: Duration) -> Result<Vec<u8>> {
-        if !self.read_posted {
+        if self.ep_in.pending() == 0 {
             self.ep_in.submit(Buffer::new(512));
-            self.read_posted = true;
         }
         let Some(c) = self.ep_in.wait_next_complete(timeout) else {
             return Err(Error::Usb("read timed out".into()));
         };
-        self.read_posted = false;
+        self.post_ahead();
         let data = c.into_result().map_err(|e| Error::Usb(e.to_string()))?;
         Ok(data.to_vec())
     }
@@ -315,9 +349,10 @@ impl Wire for UsbWire {
 impl Found {
     /// Open the device and bring every channel up.
     ///
-    /// Retried once, because the device ignores a fresh session's opening
-    /// handshake on almost exactly every other attempt - a deterministic
-    /// alternation we have not explained. Opening again clears it.
+    /// Retried once, for a session whose first request still goes unanswered.
+    /// That was every other session once, when a session opened straight
+    /// after another found the channels still held and went on regardless;
+    /// `connect` now waits for each to be answered where the profile says so.
     ///
     /// This belongs here rather than in each caller: it was in the CLI for a
     /// while and every other consumer was quietly unreliable, which is what the
@@ -331,11 +366,7 @@ impl Found {
 
     fn open_once(&self) -> Result<Session> {
         let (interface, ep_out, ep_in) = self.claim()?;
-        let wire: Box<dyn Wire> = Box::new(UsbWire {
-            ep_out,
-            ep_in,
-            read_posted: false,
-        });
+        let wire: Box<dyn Wire> = Box::new(UsbWire::new(ep_out, ep_in, &self.profile));
         Session::bring_up(Some(interface), wire, self.profile)
     }
 
@@ -356,11 +387,7 @@ impl Found {
 
     fn open_recording_once(&self, log: &replay::Log) -> Result<Session> {
         let (interface, ep_out, ep_in) = self.claim()?;
-        let usb: Box<dyn Wire> = Box::new(UsbWire {
-            ep_out,
-            ep_in,
-            read_posted: false,
-        });
+        let usb: Box<dyn Wire> = Box::new(UsbWire::new(ep_out, ep_in, &self.profile));
         let wire: Box<dyn Wire> = Box::new(replay::RecordingWire::new(usb, log.clone()));
         Session::bring_up(Some(interface), wire, self.profile)
     }
@@ -436,6 +463,7 @@ impl Session {
             wire,
             channels: BTreeMap::new(),
             poisoned: None,
+            notifications: VecDeque::new(),
             profile,
         };
         s.handshake()?;
@@ -516,20 +544,7 @@ impl Session {
         } else {
             self.channels.get(&id.device).map_or(0, |c| c.rx_bytes)
         };
-        self.channels.insert(id.device, Channel::new());
-
-        let mut payload = Vec::new();
-        ChannelHeader {
-            seq: 0,
-            msg_type: MSG_HELLO,
-            ack: Self::HELLO_FIELD,
-        }
-        .encode_into(&mut payload);
-        payload.extend_from_slice(&Self::HELLO_TAIL);
-        let mut hello = Frame::new(id.device, id.host, payload);
-        hello.flags = hx_proto::frame::FLAG_HANDSHAKE;
-        self.write(&hello)?;
-        self.read_available(Self::REPLY)?;
+        self.connect(id)?;
 
         // Byte accounting starts here; the handshake restarts the channel.
         if let Some(ch) = self.channels.get_mut(&id.device) {
@@ -543,13 +558,80 @@ impl Session {
         }
 
         self.send_stream(id, service, &Value::UInt(service as u64))?;
-        self.read_available(Self::REPLY)?;
+        // Its answer, not merely the next thing to arrive: left behind, it
+        // would be read later as a notification that is not one.
+        let taken = self.await_reply(id, |ch| ch.rx_bytes != carried)?;
+        if !taken && self.profile.checks_openings {
+            return Err(Error::Protocol(format!(
+                "the device did not take service {service} on channel {:#06x}",
+                id.device
+            )));
+        }
         if let Some(ch) = self.channels.get_mut(&id.device) {
             ch.reader
                 .take_messages()
                 .map_err(|error| Error::Protocol(error.to_string()))?;
         }
         self.ack_channel(id)
+    }
+
+    /// Open a channel, and where the profile says so, see that the device
+    /// took it.
+    ///
+    /// A session ends without closing its channels (see `Drop`), and an HX
+    /// Stomp keeps one it was not told to close for a few seconds, ignoring
+    /// an opening sent meanwhile: hx-stomp-nam-lite reads Line 6's updater as
+    /// dropping a quiet stream after four. Every unanswered opening captured
+    /// fits that, the recorded session's events channel among them, and
+    /// every one followed by a close and a second opening was answered within
+    /// a millisecond. An editor opened again straight after closing went on
+    /// as though its events channel were open, and never heard a footswitch.
+    fn connect(&mut self, id: ChannelId) -> Result<()> {
+        for _ in 0..Self::OPENINGS {
+            self.channels.insert(id.device, Channel::new());
+            let mut payload = Vec::new();
+            ChannelHeader {
+                seq: 0,
+                msg_type: MSG_HELLO,
+                ack: Self::HELLO_FIELD,
+            }
+            .encode_into(&mut payload);
+            payload.extend_from_slice(&Self::HELLO_TAIL);
+            let mut hello = Frame::new(id.device, id.host, payload);
+            hello.flags = hx_proto::frame::FLAG_HANDSHAKE;
+            self.write(&hello)?;
+            if self.await_reply(id, |ch| ch.answered)? || !self.profile.checks_openings {
+                return Ok(());
+            }
+            if let Some(ch) = self.channels.get_mut(&id.device) {
+                ch.seq = 2;
+            }
+            self.close_service(id)?;
+        }
+        Err(Error::Protocol(format!(
+            "the device did not answer the opening of channel {:#06x}",
+            id.device
+        )))
+    }
+
+    /// How many times a channel is opened before the device is taken not to
+    /// want it.
+    const OPENINGS: usize = 4;
+
+    /// Read until `done` holds for the channel, for at most [`Self::REPLY`].
+    /// Returns whether it did.
+    fn await_reply(&mut self, id: ChannelId, done: impl Fn(&Channel) -> bool) -> Result<bool> {
+        let deadline = Instant::now() + Self::REPLY;
+        loop {
+            if self.channels.get(&id.device).is_some_and(&done) {
+                return Ok(true);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(false);
+            }
+            self.read_available(left)?;
+        }
     }
 
     /// Empty the endpoint before saying anything.
@@ -648,6 +730,7 @@ impl Session {
         let Some(ch) = self.channels.get_mut(&f.src) else {
             return;
         };
+        ch.answered |= f.flags == hx_proto::frame::FLAG_HANDSHAKE;
         if hdr.has_data() && !rest.is_empty() {
             ch.rx_bytes = ch.rx_bytes.wrapping_add(rest.len() as u32);
             ch.reader.push(rest);
@@ -775,31 +858,28 @@ impl Session {
     /// A completion names only its transaction, and transactions are counted
     /// per channel from the same 1000, so a completion owed to another
     /// channel's request can carry this one's number. Notifications already
-    /// waiting when the request goes out cannot be about it, and are set
-    /// aside before it is sent rather than read as its completion.
+    /// waiting when the request goes out cannot be about it: they are queued
+    /// before it is sent, and only what arrives after is searched.
     fn command_deferred(&mut self, id: ChannelId, opcode: i64, args: Value) -> Result<()> {
-        let (txn, status, _) = self.request_raw_after(id, opcode, args, Self::forget_events)?;
+        let (txn, status, _) =
+            self.request_raw_after(id, opcode, args, Self::collect_notifications)?;
         if !is_deferred(status)? {
             return Ok(()); // completed synchronously
         }
+        let earlier = self.notifications.len();
         let deadline = Instant::now() + Self::COMPLETION_BUDGET;
         while Instant::now() < deadline {
             let before = self.rx_bytes(id);
             self.read_available(Self::REPLY_READ)?;
             let got = self.rx_bytes(id) != before;
-            let messages = self
-                .channels
-                .get_mut(&ChannelId::EVENTS.device)
-                .map(|ch| ch.reader.take_messages())
-                .transpose()
-                .map_err(|error| Error::Protocol(error.to_string()))?
-                .unwrap_or_default();
-            let mut done = false;
-            for sm in messages {
-                if let Message::Notification { args, .. } = decode_message(sm.body)? {
-                    done |= completion_matches(&args, txn);
-                }
-            }
+            self.collect_notifications()?;
+            let completion = self
+                .notifications
+                .iter()
+                .skip(earlier)
+                .position(|(_, args)| completion_matches(args, txn));
+            let done =
+                completion.is_some_and(|at| self.notifications.remove(earlier + at).is_some());
             if got {
                 self.ack_channel(id)?;
             }
@@ -893,14 +973,21 @@ impl Session {
         self.request_raw_after(id, opcode, args, |_| Ok(()))
     }
 
-    /// Everything on the events channel so far, dropped unread. Only for just
-    /// before a deferred request is sent: see `command_deferred`.
-    fn forget_events(&mut self) -> Result<()> {
-        if let Some(events) = self.channels.get_mut(&ChannelId::EVENTS.device) {
-            events
+    /// Queue every notification read so far, for `poll_notifications`.
+    ///
+    /// Run just before a deferred request is sent too: what is queued by then
+    /// cannot be its completion (see `command_deferred`).
+    fn collect_notifications(&mut self) -> Result<()> {
+        for channel in self.channels.values_mut() {
+            for sm in channel
                 .reader
                 .take_messages()
-                .map_err(|error| Error::Protocol(error.to_string()))?;
+                .map_err(|error| Error::Protocol(error.to_string()))?
+            {
+                if let Message::Notification { event, args } = decode_message(sm.body)? {
+                    self.notifications.push_back((event, args));
+                }
+            }
         }
         Ok(())
     }
@@ -952,32 +1039,39 @@ impl Session {
                 .transpose()
                 .map_err(|error| Error::Protocol(error.to_string()))?
                 .unwrap_or_default();
+            // What came with the answer is kept too: a notification read here
+            // is queued as one read anywhere else is.
+            let mut answer = None;
             for sm in ready {
-                if let Message::Response {
-                    txn: t,
-                    status,
-                    result,
-                } = decode_message(sm.body)?
-                {
-                    if t == txn {
-                        // Key 103 is not a plain error code. A successful
-                        // select-preset answers with 1 and a nil result, while
-                        // a preset read answers with 0 and a blob - HX Edit
-                        // sees the same values. Since no value is known to mean
-                        // failure, the status is reported rather than judged.
-                        // 0 is done and 1 is accepted-completes-later; 255 is
-                        // the device refusing, with a signed error code under
-                        // key 111 (-3 bad reference, -46 bad snapshot, -302
-                        // unknown model - the map is in PROTOCOL.md). Statuses
-                        // were unjudged for a long time because every value HX
-                        // Edit's own traffic shows is 0 or 1; the refusals only
-                        // appeared once we sent deliberately bad requests.
-                        if status == 255 {
-                            return Err(Error::Device(refusal_code(&result)?));
-                        }
-                        return Ok((txn, status, result));
+                match decode_message(sm.body)? {
+                    Message::Response {
+                        txn: t,
+                        status,
+                        result,
+                    } if t == txn && answer.is_none() => answer = Some((status, result)),
+                    Message::Notification { event, args } => {
+                        self.notifications.push_back((event, args))
                     }
+                    _ => {}
                 }
+            }
+            if let Some((status, result)) = answer {
+                // Key 103 is not a plain error code. A successful
+                // select-preset answers with 1 and a nil result, while
+                // a preset read answers with 0 and a blob - HX Edit
+                // sees the same values. Since no value is known to mean
+                // failure, the status is reported rather than judged.
+                // 0 is done and 1 is accepted-completes-later; 255 is
+                // the device refusing, with a signed error code under
+                // key 111 (-3 bad reference, -46 bad snapshot, -302
+                // unknown model - the map is in PROTOCOL.md). Statuses
+                // were unjudged for a long time because every value HX
+                // Edit's own traffic shows is 0 or 1; the refusals only
+                // appeared once we sent deliberately bad requests.
+                if status == 255 {
+                    return Err(Error::Device(refusal_code(&result)?));
+                }
+                return Ok((txn, status, result));
             }
             // Large results arrive in 256-byte chunks, and each one is released
             // by acknowledging the bytes already received.
@@ -991,20 +1085,24 @@ impl Session {
         Err(Error::Timeout(txn))
     }
 
-    /// Read whatever the device is holding, without waiting for more.
+    /// Read whatever the device has sent, without waiting for more.
     ///
     /// Bounded: a device that never stops talking must not stop us working.
-    fn drain_pending(&mut self, busy: ChannelId) -> Result<()> {
+    fn read_arrived(&mut self) -> Result<()> {
         const BUDGET: Duration = Duration::from_millis(60);
         let deadline = Instant::now() + BUDGET;
         while Instant::now() < deadline {
-            match self.read_available(Duration::from_millis(5)) {
-                Ok(Some(_)) => {}
-                // Nothing there, or nothing more: either way we are current.
-                Ok(None) => break,
-                Err(error) => return Err(error),
+            // Nothing there, or nothing more: either way we are current.
+            if self.read_available(Duration::from_millis(5))?.is_none() {
+                break;
             }
         }
+        Ok(())
+    }
+
+    /// Read whatever the device is holding, and acknowledge it.
+    fn drain_pending(&mut self, busy: ChannelId) -> Result<()> {
+        self.read_arrived()?;
         // Whatever arrived on a channel nobody is waiting on still has to be
         // acknowledged, or the device keeps counting it against us.
         // The first frame of the request about to be sent carries the busy
@@ -1135,10 +1233,11 @@ impl Session {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             // Every switch streams notifications, and a browse through a
-            // setlist streams a flood of them; drained here, they cannot
-            // back the control channel up. The keepalive feeds the channels
-            // the storm is not using, because the device drops quiet ones.
-            if let Err(error) = self.poll_notifications() {
+            // setlist streams a flood of them; taken in here, they cannot
+            // back the control channel up, and they wait for the caller's
+            // next poll. The keepalive feeds the channels the storm is not
+            // using, because the device drops quiet ones.
+            if let Err(error) = self.take_in_notifications() {
                 self.poisoned = Some(format!(
                     "the session was lost while switching to preset {index}: {error}"
                 ));
@@ -1288,15 +1387,11 @@ pub fn checksum(bytes: &[u8]) -> u64 {
 }
 
 impl Drop for Session {
-    /// Close the session the way HX Edit does.
+    /// Let the session go: take in and acknowledge what is still in flight.
     ///
-    /// A captured clean quit shows the actual teardown: acknowledge whatever
-    /// is outstanding, send a bare type-0x02 (HELLO) frame on each channel,
-    /// collect the device's answering HELLOs, release the interface. The 0x02
-    /// message is a session boundary marker, not just an opening handshake -
-    /// it appears at both ends of the conversation. A session that vanishes
-    /// without this is what leaves the device refusing new connections until
-    /// its power is pulled.
+    /// The channels are left open, for the reason at the end. An HX Stomp
+    /// holds them a few seconds more, and the next session's openings go
+    /// unanswered until it closes them first (see `connect`).
     fn drop(&mut self) {
         if self.poisoned.is_some() {
             return;

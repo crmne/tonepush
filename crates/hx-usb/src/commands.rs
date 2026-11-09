@@ -10,13 +10,9 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use hx_proto::msgpack::Value;
-use hx_proto::rpc::Message;
 use hx_proto::{rpc, ChannelId, DeviceProfile, Preset};
 
-use crate::{
-    checksum, decode_message, non_negative, preset_index, retry_device_refusal, Error, Result,
-    Session,
-};
+use crate::{checksum, non_negative, preset_index, retry_device_refusal, Error, Result, Session};
 
 fn assignment_source(layout: rpc::ControlLayout, reply: &Value) -> Result<Option<rpc::Source>> {
     if matches!(reply, Value::Nil) {
@@ -1307,7 +1303,13 @@ impl Session {
         )
     }
 
-    /// Any notifications the device has pushed since the last call.
+    /// Every notification the device has pushed since the last call.
+    ///
+    /// Everything that has arrived, not one transfer of it: the device says
+    /// something every 75 ms, and a poll that took a transfer at a time fell
+    /// further behind with each one, until a footswitch showed seconds after
+    /// it was pressed. Notifications a request read while it waited come
+    /// first.
     ///
     /// Acknowledges the events channel with an ACK frame whenever it has
     /// unacknowledged bytes, as HX Edit does after almost every notification.
@@ -1318,7 +1320,14 @@ impl Session {
     /// the events channel, so
     /// this cannot land mid-transaction.
     pub fn poll_notifications(&mut self) -> Result<Vec<(i64, Value)>> {
-        self.read_available(Duration::from_millis(20))?;
+        self.take_in_notifications()?;
+        Ok(self.notifications.drain(..).collect())
+    }
+
+    /// Read what has arrived, acknowledge the events channel and queue the
+    /// notifications, keeping them for `poll_notifications`.
+    pub(crate) fn take_in_notifications(&mut self) -> Result<()> {
+        self.read_arrived()?;
         let behind = self
             .channels
             .get(&ChannelId::EVENTS.device)
@@ -1326,20 +1335,7 @@ impl Session {
         if behind {
             self.ack_channel(ChannelId::EVENTS)?;
         }
-        let mut out = Vec::new();
-        for ch in self.channels.values_mut() {
-            for sm in ch
-                .reader
-                .take_messages()
-                .map_err(|error| Error::Protocol(error.to_string()))?
-            {
-                let message = decode_message(sm.body)?;
-                if let Message::Notification { event, args } = message {
-                    out.push((event, args));
-                }
-            }
-        }
-        Ok(out)
+        self.collect_notifications()
     }
 }
 
@@ -1858,6 +1854,147 @@ mod pedal_tests {
             session.keepalive().unwrap();
             assert_eq!(seen, 6 * (round + 1), "stalled after {seen} notifications");
         }
+    }
+
+    /// A footswitch on an HX Stomp switching block 6 off.
+    fn switched() -> Value {
+        hx_proto::msgmap! {
+            82 => Value::Int(0),
+            68 => Value::Int(5),
+            121 => Value::Int(17),
+            106 => hx_proto::msgmap! { 98 => Value::Int(6), 59 => Value::Bool(false) },
+        }
+    }
+
+    /// Whether a notification is that footswitch.
+    fn is_switched((event, args): &(i64, Value)) -> bool {
+        let block = args.get(106).and_then(|inner| inner.get(98));
+        *event == 49 && block.and_then(Value::as_i64) == Some(6)
+    }
+
+    /// The pedal says something every 75 ms, and a poll that read one
+    /// transfer of it fell further behind with every one: a footswitch
+    /// showed seconds after it was pressed, behind the ticks before it.
+    #[test]
+    fn one_poll_takes_everything_the_pedal_has_said() {
+        let pedal = Pedal::new();
+        let mut session = fake::session(&pedal);
+        session.poll_notifications().unwrap();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            for _ in 0..20 {
+                pedal.notify(22, tick());
+            }
+            pedal.notify(49, switched());
+        }
+
+        let polled = session.poll_notifications().unwrap();
+
+        assert_eq!(polled.len(), 21);
+        assert!(polled.last().is_some_and(is_switched));
+    }
+
+    /// A deferred request used to drop whatever was waiting when it went
+    /// out, so none of it could pass for its completion, and a footswitch
+    /// pressed just before a preset write went with it.
+    #[test]
+    fn what_the_pedal_said_before_a_deferred_write_is_still_handed_out() {
+        let pedal = Pedal::new();
+        let mut session = fake::session(&pedal);
+        let preset = session.read_preset().unwrap();
+        session.poll_notifications().unwrap();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.defers_writes = true;
+            pedal.notify(49, switched());
+        }
+
+        session.write_preset(&preset).expect("the write lands");
+
+        assert!(session
+            .poll_notifications()
+            .unwrap()
+            .iter()
+            .any(is_switched));
+    }
+
+    /// Notifications come on the events channel, where no request is ever
+    /// made, but one beside an answer was dropped with it.
+    #[test]
+    fn a_notification_beside_an_answer_is_still_handed_out() {
+        let pedal = Pedal::new();
+        let mut session = fake::session(&pedal);
+        session.poll_notifications().unwrap();
+        pedal
+            .lock()
+            .unwrap()
+            .notify_on(ChannelId::DATA, 49, switched());
+
+        session.preset_info().unwrap();
+
+        assert!(session
+            .poll_notifications()
+            .unwrap()
+            .iter()
+            .any(is_switched));
+    }
+
+    /// A session opened straight after another finds every channel still
+    /// held, and its openings go unanswered. Taken as open regardless, the
+    /// events channel heard nothing for the whole session: a footswitch
+    /// never reached the editor. Each channel is closed and opened again
+    /// until the pedal answers.
+    #[test]
+    fn a_session_opened_straight_after_another_still_hears_the_pedal() {
+        let pedal = Pedal::new();
+        pedal
+            .lock()
+            .unwrap()
+            .left_open
+            .extend(ChannelId::ALL.iter().map(|channel| channel.device));
+        let mut session = fake::session(&pedal);
+        session.poll_notifications().unwrap();
+
+        pedal.lock().unwrap().notify(49, switched());
+
+        assert!(session
+            .poll_notifications()
+            .unwrap()
+            .iter()
+            .any(is_switched));
+    }
+
+    /// Where the profile says so, a channel the last session left held is
+    /// closed and opened again. A device whose profile does not say so is
+    /// opened as before, and nothing it holds is closed.
+    #[test]
+    fn a_held_channel_is_closed_where_the_profile_says_so() {
+        let events = ChannelId::EVENTS.device;
+        for profile in [hx_proto::HX_STOMP, hx_proto::HX_EFFECTS] {
+            let pedal = Pedal::new();
+            pedal.lock().unwrap().left_open.insert(events);
+
+            drop(fake::session_as(&pedal, profile));
+
+            let held = pedal.lock().unwrap().left_open.contains(&events);
+            assert_eq!(held, !profile.checks_openings, "{}", profile.name);
+        }
+    }
+
+    /// A channel whose service the pedal never takes would leave the session
+    /// deaf on it with nothing to say so, so the opening fails instead.
+    #[test]
+    fn a_service_the_pedal_never_takes_fails_the_opening() {
+        let pedal = Pedal::new();
+        pedal
+            .lock()
+            .unwrap()
+            .ignores_services
+            .insert(ChannelId::EVENTS.device);
+
+        let opened = Session::replaying(Box::new(fake::Cable(pedal)), hx_proto::HX_STOMP);
+
+        assert!(opened.is_err());
     }
 
     const SAMPLES: [f32; 4] = [0.5, -0.25, 0.125, 0.0];
