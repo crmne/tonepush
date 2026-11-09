@@ -213,7 +213,7 @@ impl Panel {
         let mut publish = None;
         let mut row_rects = BTreeMap::new();
         let mut menu_by_key = std::mem::take(&mut self.menu_by_key);
-        shell::preset_list(ui, "pro-presets", empty, &rows, |ui, row| {
+        self.rows_shown = shell::preset_list(ui, "pro-presets", empty, &rows, |ui, row| {
             let index = row.index;
             if mode == RowMode::Normal {
                 if let Some((editing, draft)) = renaming.as_mut() {

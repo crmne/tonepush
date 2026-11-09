@@ -307,7 +307,7 @@ pub(crate) fn preset_list(
     empty: &str,
     rows: &[PresetRow],
     mut row: impl FnMut(&mut Ui, &PresetRow),
-) {
+) -> Option<Rect> {
     if rows.is_empty() {
         ui.horizontal(|ui| {
             ui.add_space(16.0);
@@ -327,7 +327,7 @@ pub(crate) fn preset_list(
                 },
             );
         });
-        return;
+        return None;
     }
     let output = egui::ScrollArea::vertical()
         .id_salt(id)
@@ -362,6 +362,7 @@ pub(crate) fn preset_list(
             &[(0.0, theme::alpha(theme::bg(), 0.0)), (1.0, theme::bg())],
         );
     }
+    Some(shown)
 }
 
 /// The pedal as the device card shows it.
@@ -2034,7 +2035,7 @@ impl App {
         let mut reveal = self.reveal_preset;
         let mut renaming = self.renaming.clone();
         let mut menu_by_key = std::mem::take(&mut self.preset_menu_by_key);
-        preset_list(ui, "hx-presets", empty, &rows, |ui, row| {
+        self.rows_shown = preset_list(ui, "hx-presets", empty, &rows, |ui, row| {
             let index = row.index as i64;
             if mode == RowMode::Normal {
                 if let Some((editing, draft)) = renaming.as_mut() {

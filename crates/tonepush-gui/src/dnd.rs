@@ -99,6 +99,15 @@ fn gap_bands(rows: &[(i64, Rect)], count: i64) -> Vec<(i64, Rect)> {
     bands
 }
 
+/// The part of a drop zone inside the list's view, if any shows.
+fn visible(zone: Rect, shown: Option<Rect>) -> Option<Rect> {
+    let Some(shown) = shown else {
+        return Some(zone);
+    };
+    let part = zone.intersect(shown);
+    part.is_positive().then_some(part)
+}
+
 /// What a drop would do, in the ghost's words, or why it would not.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Outcome {
@@ -758,14 +767,25 @@ impl App {
                 .map(|(slot, rect)| (*slot, *rect))
                 .collect()
         };
+        // Only where the list shows them: a row scrolled away is not under
+        // the header or footer it scrolled behind.
+        let shown = if self.pro_active() {
+            self.pro.rows_shown
+        } else {
+            self.rows_shown
+        };
         for (slot, rect) in &rows {
-            self.drop_zone(*rect, Target::Slot(*slot));
+            if let Some(rect) = visible(*rect, shown) {
+                self.drop_zone(rect, Target::Slot(*slot));
+            }
         }
         // A preset also goes between two others: a band over each gap,
         // registered after the rows so it wins over their edges.
         if matches!(dragged, Dragged::Preset(_)) && self.moves_presets() {
             for (before, band) in gap_bands(&rows, self.slot_count()) {
-                self.drop_zone(band, Target::Between(before));
+                if let Some(band) = visible(band, shown) {
+                    self.drop_zone(band, Target::Between(before));
+                }
             }
             self.paint_gap_drop(ctx, &dragged, &rows);
         }
@@ -1139,6 +1159,50 @@ mod tests {
             .all(|(_, band)| !band.contains(Pos2::new(50.0, 39.0))));
         // Under the last preset: after it.
         assert!(bands[4].1.contains(Pos2::new(50.0, 116.0)));
+    }
+
+    /// A preset dragged over a list scrolled part-way: the rows and gaps
+    /// scrolled out of view take no drop, so releasing it over the header
+    /// or footer they lie behind neither copies nor moves anything.
+    #[test]
+    fn rows_scrolled_out_of_view_take_no_drop() {
+        let (mut app, _events, _cmds) = app();
+        online(&mut app);
+        app.device = "Helix Floor".into();
+        let ctx = egui::Context::default();
+        egui::DragAndDrop::set_payload(&ctx, Dragged::Preset(1));
+        app.row_rects = (0..16)
+            .map(|slot| {
+                let top = slot as f32 * 26.0 - 100.0;
+                (
+                    slot,
+                    Rect::from_min_size(Pos2::new(0.0, top), Vec2::new(200.0, 26.0)),
+                )
+            })
+            .collect();
+        // The list shows 0 to 200: the rows from 03D to 04C.
+        app.rows_shown = Some(Rect::from_min_max(Pos2::ZERO, Pos2::new(200.0, 200.0)));
+
+        app.register_drop_zones(&ctx);
+
+        let zones = &app.drops.zones;
+        let header = Pos2::new(50.0, -40.0);
+        let footer = Pos2::new(50.0, 260.0);
+        for pointer in [header, footer] {
+            assert!(
+                zones.iter().all(|(rect, target)| !rect.contains(pointer)
+                    || !matches!(target, Target::Slot(_) | Target::Between(_))),
+                "{pointer:?}: {zones:?}"
+            );
+        }
+        // What shows still takes both.
+        assert!(zones.iter().any(
+            |(rect, target)| *target == Target::Slot(5) && rect.contains(Pos2::new(50.0, 40.0))
+        ));
+        assert!(zones
+            .iter()
+            .any(|(rect, target)| *target == Target::Between(5)
+                && rect.contains(Pos2::new(50.0, 30.0))));
     }
 
     fn app() -> (App, mpsc::Sender<Evt>, mpsc::Receiver<Cmd>) {

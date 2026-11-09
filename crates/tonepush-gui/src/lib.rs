@@ -587,6 +587,9 @@ pub struct App {
     board_rect: Option<egui::Rect>,
     /// Where the preset list was drawn, for a setlist dropped on it.
     presets_rect: Option<egui::Rect>,
+    /// The part of the preset list scrolled into view: rows outside it take
+    /// no drops.
+    rows_shown: Option<egui::Rect>,
     /// Where each preset's row was drawn this frame, for a question to
     /// hang beside.
     row_rects: std::collections::BTreeMap<i64, egui::Rect>,
@@ -1523,6 +1526,7 @@ impl App {
             account: account::Account::default(),
             board_rect: None,
             presets_rect: None,
+            rows_shown: None,
             row_rects: std::collections::BTreeMap::new(),
             put_after_backup: None,
             wrote: None,
