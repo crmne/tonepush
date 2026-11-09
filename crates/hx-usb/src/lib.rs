@@ -1781,6 +1781,27 @@ mod tests {
         assert_eq!(pedal.lock().unwrap().frames_in, before, "nothing went out");
     }
 
+    /// Bytes a pedal took while it withheld its acknowledgements are
+    /// acknowledged once it acknowledges again, so they stop counting
+    /// against the window.
+    #[test]
+    fn acknowledgements_resumed_cover_the_bytes_taken_meanwhile() {
+        let pedal = fake::Pedal::new();
+        let mut session = fake::session_as(&pedal, hx_proto::HELIX_FLOOR);
+        let preset = session.read_preset().unwrap();
+        pedal.lock().unwrap().withholds_acks = true;
+        for _ in 0..20 {
+            session.preset_info().expect("answered all the same");
+        }
+        pedal.lock().unwrap().withholds_acks = false;
+        // Its answer carries the acknowledgement of everything so far.
+        session.preset_info().expect("answered");
+
+        session
+            .write_preset(&preset)
+            .expect("the window is open again");
+    }
+
     /// Notifications arriving while a long send waits for the window are
     /// acknowledged, or the device would stop sending them for good.
     #[test]
