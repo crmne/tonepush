@@ -90,7 +90,10 @@ impl Display {
         display
     }
 
-    pub(crate) fn render(&self, value: f32, catalog: &Catalog) -> String {
+    /// `first` is the parameter's lowest value, which a menu's first label
+    /// stands for: Note Sync runs 1 to 19 over nineteen labels, and a pitch
+    /// interval runs -8 to 8 over seventeen.
+    pub(crate) fn render(&self, value: f32, first: f32, catalog: &Catalog) -> String {
         let display = self.resolved(catalog);
 
         let scaled = value * display.scale.unwrap_or(1.0) + display.offset.unwrap_or(0.0);
@@ -99,7 +102,7 @@ impl Display {
             // Only an index a label has picks one. Clamping a negative or
             // NaN value to zero would show the first label for a value that
             // is not it.
-            Some(Pattern::Labels(labels)) => Some(scaled.round())
+            Some(Pattern::Labels(labels)) => Some((scaled - first).round())
                 .filter(|index| *index >= 0.0)
                 .and_then(|index| labels.get(index as usize))
                 .cloned()
@@ -147,13 +150,14 @@ impl Display {
         (scaled - display.offset.unwrap_or(0.0)) / display.scale.unwrap_or(1.0)
     }
 
-    /// The index of a menu label, for parameters displayed as a word.
-    pub(crate) fn label_index(&self, text: &str, catalog: &Catalog) -> Option<f32> {
+    /// The value a menu label stands for, for parameters displayed as a
+    /// word. The first label is the parameter's lowest value, `first`.
+    pub(crate) fn label_value(&self, text: &str, first: f32, catalog: &Catalog) -> Option<f32> {
         match &self.resolved(catalog).format {
             Some(Pattern::Labels(labels)) => labels
                 .iter()
                 .position(|l| l.eq_ignore_ascii_case(text))
-                .map(|i| i as f32),
+                .map(|i| i as f32 + first),
             _ => None,
         }
     }

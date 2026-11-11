@@ -590,22 +590,27 @@ impl App {
 
 /// The row of a menu control's list that `value` picks, if it picks one.
 ///
-/// A catalog menu's labels are indexed by the value itself, whatever the
-/// parameter's minimum: Note Sync runs 1..19 over labels 0..18 and a Variax
-/// string -12..12 over 25. Only a list that is not a catalog menu, the NAM
-/// capture slots, starts at the minimum, and the firmware truncates it.
+/// The first row is the parameter's lowest value: Note Sync runs 1..19 over
+/// nineteen labels and a Variax string -12..12 over 25, as the pedal shows
+/// them. The NAM capture slots start at the minimum too, and the firmware
+/// truncates them. The IR slot list alone is indexed by the value itself.
 fn menu_row(param: &hx_catalog::Param, value: f32) -> Option<usize> {
-    if param.kind == Kind::Enum {
+    if param.display.as_deref() == Some("ir_select") {
         return Some(value.round().max(0.0) as usize);
     }
-    let row = (value - param.min).floor();
+    let row = value - param.min;
+    let row = if param.kind == Kind::Enum {
+        row.round()
+    } else {
+        row.floor()
+    };
     (row >= 0.0).then_some(row as usize)
 }
 
 /// The value that row `row` of a menu control's list sets: the inverse of
 /// [`menu_row`].
 fn menu_value(param: &hx_catalog::Param, row: usize) -> f32 {
-    if param.kind == Kind::Enum {
+    if param.display.as_deref() == Some("ir_select") {
         row as f32
     } else {
         row as f32 + param.min
@@ -4104,10 +4109,11 @@ fn snapshot_column_width(count: usize, width: f32, column: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// A catalog menu's rows are its values, whatever its minimum; the NAM
-    /// capture list is the one that starts at the minimum, slot 1 on row 0.
+    /// A menu's first row is its parameter's lowest value, as the pedal
+    /// shows it: Note Sync 6 is 1/4, the sixth label. The IR slot list is
+    /// the one indexed by the value itself.
     #[test]
-    fn a_menu_row_is_the_value_except_for_a_slot_list() {
+    fn a_menu_row_counts_from_the_lowest_value() {
         let param = |kind, min, max| hx_catalog::Param {
             id: "P".into(),
             name: "P".into(),
@@ -4118,11 +4124,19 @@ mod tests {
             display: None,
         };
         let note_sync = param(Kind::Enum, 1.0, 19.0);
-        assert_eq!(menu_row(&note_sync, 1.0), Some(1));
-        assert_eq!(menu_value(&note_sync, 1), 1.0);
+        assert_eq!(menu_row(&note_sync, 1.0), Some(0));
+        assert_eq!(menu_row(&note_sync, 6.0), Some(5));
+        assert_eq!(menu_value(&note_sync, 5), 6.0);
+        assert_eq!(menu_row(&note_sync, 0.0), None);
         let tuning = param(Kind::Enum, -12.0, 12.0);
-        assert_eq!(menu_row(&tuning, 12.0), Some(12));
-        assert_eq!(menu_value(&tuning, 24), 24.0);
+        assert_eq!(menu_row(&tuning, 0.0), Some(12));
+        assert_eq!(menu_value(&tuning, 24), 12.0);
+        let ir = hx_catalog::Param {
+            display: Some("ir_select".into()),
+            ..param(Kind::Enum, 1.0, 128.0)
+        };
+        assert_eq!(menu_row(&ir, 3.0), Some(3));
+        assert_eq!(menu_value(&ir, 3), 3.0);
 
         let capture = param(Kind::Continuous, 1.0, 128.0);
         assert_eq!(menu_row(&capture, 1.0), Some(0));
@@ -4159,7 +4173,7 @@ mod tests {
                 kind: Kind::Enum,
                 // Not zero: a catalog menu's rows are numbered by value, not
                 // from its minimum, as Note Sync (1..19) is.
-                min: 1.0,
+                min: 0.0,
                 max: 4.0,
                 default: 2.0,
                 display: None,
