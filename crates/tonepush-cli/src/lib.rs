@@ -2419,6 +2419,30 @@ mod tests {
             seq: BTreeMap<u16, u16>,
         }
 
+        impl Pedal {
+            /// Say something unasked, on the events channel.
+            pub fn notify(&mut self, event: i64, args: Value) {
+                let node = ChannelId::EVENTS.device;
+                let body = Encoder::encode(&Message::Notification { event, args }.to_value());
+                let seq = self.seq.entry(node).or_insert(0);
+                let mut payload = Vec::new();
+                ChannelHeader {
+                    seq: *seq,
+                    msg_type: MSG_DATA,
+                    ack: 0x1000,
+                }
+                .encode_into(&mut payload);
+                *seq = seq.wrapping_add(1);
+                payload.extend_from_slice(&[0, 0, 0, 0]);
+                payload.extend_from_slice(&(body.len() as u32).to_le_bytes());
+                payload.extend_from_slice(&body);
+                let frame = Frame::new(ChannelId::EVENTS.host, node, payload)
+                    .encode()
+                    .unwrap();
+                self.outbox.push_back(frame);
+            }
+        }
+
         pub struct Cable(pub Arc<Mutex<Pedal>>);
 
         impl hx_usb::Wire for Cable {

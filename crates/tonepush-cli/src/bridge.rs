@@ -194,6 +194,10 @@ pub struct Changes {
     pub irs: bool,
     pub settings: bool,
     pub dirty: Option<bool>,
+    /// The pedal announced something during a pause. The announcement was
+    /// read here, where the editor's own poll could not see it, so the
+    /// editor has to look at the pedal again.
+    pub heard: bool,
     pub lost: bool,
 }
 
@@ -251,13 +255,14 @@ impl Request {
         let mut error = None;
         for step in self.steps {
             match step {
-                BatchStep::Sleep(pause) => {
-                    if let Err(err) = rest(session, pause) {
+                BatchStep::Sleep(pause) => match rest(session, pause) {
+                    Ok(heard) => changes.heard |= heard,
+                    Err(err) => {
                         changes.lost = true;
                         error = Some(format!("{err:#}"));
                         break;
                     }
-                }
+                },
                 BatchStep::Run {
                     line,
                     text,
@@ -376,10 +381,17 @@ impl Changes {
 /// Wait out a batch's `sleep` without letting the session go quiet.
 ///
 /// The editor's worker is the only thing that keeps the pedal's channels
-/// alive, and it is busy here for as long as the batch runs. A pause longer
-/// than a keep-alive's interval is taken in pieces with one between them, the
-/// way `watch` paces its own; a shorter one is the plain sleep it always was.
-fn rest(session: &mut hx_usb::Session, pause: std::time::Duration) -> hx_usb::Result<()> {
+/// alive and reads what the pedal announces, and it is busy here for as
+/// long as the batch runs. A pause longer than a keep-alive's interval is
+/// taken in pieces, and between them the announcements are read and
+/// acknowledged and a keep-alive is sent, the way `watch` paces its own. A
+/// pedal left with nowhere to put its announcements stops taking writes, and
+/// one whose events go unacknowledged stops sending them (PROTOCOL.md). A
+/// shorter pause is the plain sleep it always was.
+///
+/// Returns whether the pedal announced anything, which the editor then has
+/// to catch up on, since what was read here never reaches its own poll.
+fn rest(session: &mut hx_usb::Session, pause: std::time::Duration) -> hx_usb::Result<bool> {
     rest_every(session, pause, KEEPALIVE_EVERY)
 }
 
@@ -387,15 +399,17 @@ fn rest_every(
     session: &mut hx_usb::Session,
     pause: std::time::Duration,
     every: std::time::Duration,
-) -> hx_usb::Result<()> {
+) -> hx_usb::Result<bool> {
     let mut left = pause;
+    let mut heard = false;
     while left > every {
         std::thread::sleep(every);
         left -= every;
+        heard |= !session.poll_notifications()?.is_empty();
         session.keepalive()?;
     }
     std::thread::sleep(left);
-    Ok(())
+    Ok(heard)
 }
 
 const KEEPALIVE_EVERY: std::time::Duration = std::time::Duration::from_millis(700);
@@ -610,7 +624,7 @@ mod tests {
         let sent = Arc::new(Mutex::new(0));
         let pedal = Arc::new(Mutex::new(Pedal::default()));
         let mut session = hx_usb::Session::replaying(
-            Box::new(Counted(Cable(pedal), sent.clone())),
+            Box::new(Counted(Cable(pedal.clone()), sent.clone())),
             hx_proto::HX_STOMP,
         )
         .unwrap();
@@ -633,6 +647,34 @@ mod tests {
         .unwrap();
         let channels = hx_proto::ChannelId::ALL.len();
         assert_eq!(frames() - before, 2 * channels, "two keep-alives a channel");
+    }
+
+    /// What the pedal announces during a long pause is read and
+    /// acknowledged, not left on the wire until the batch ends, and the
+    /// editor is told there is something to catch up on.
+    #[test]
+    fn a_long_pause_reads_what_the_pedal_announces() {
+        let pedal = Arc::new(Mutex::new(Pedal::default()));
+        let mut session =
+            hx_usb::Session::replaying(Box::new(Cable(pedal.clone())), hx_proto::HX_STOMP).unwrap();
+        let rest = |session: &mut hx_usb::Session| {
+            rest_every(session, Duration::from_millis(11), Duration::from_millis(5)).unwrap()
+        };
+
+        assert!(
+            !rest(&mut session),
+            "a quiet pedal leaves nothing to follow"
+        );
+
+        pedal
+            .lock()
+            .unwrap()
+            .notify(49, hx_proto::msgpack::Value::Nil);
+        assert!(rest(&mut session), "the announcement was read here");
+        assert!(
+            session.poll_notifications().unwrap().is_empty(),
+            "and is not waiting on the wire"
+        );
     }
 
     #[test]

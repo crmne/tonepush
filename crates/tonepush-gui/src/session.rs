@@ -2311,7 +2311,15 @@ impl Worker {
             self.forget_history();
         }
         let saved = !changes.saved.is_empty();
-        if changes.buffer || changes.selected || changes.snapshot || changes.presets || saved {
+        // An announcement read during a batch's pause never reached the
+        // poll that follows the pedal, so the pedal is read again for it.
+        if changes.buffer
+            || changes.selected
+            || changes.snapshot
+            || changes.presets
+            || changes.heard
+            || saved
+        {
             let follow = self.setlist == self.shown.setlist;
             self.reload_with_dirty(changes.dirty);
             if follow && self.setlist != self.shown.setlist {
