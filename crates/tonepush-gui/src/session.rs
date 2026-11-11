@@ -214,6 +214,15 @@ pub enum Cmd {
         model: u32,
         /// The cab that rides along, for an Amp+Cab. `None` for everything else.
         paired: Option<u32>,
+        /// Settings to give the model once it is in: `(parameter index,
+        /// native value, the catalog's kind for it)`. A block changed for
+        /// its own mono or stereo variant keeps what was dialled in.
+        carry: Vec<(i64, f32, hx_catalog::Kind)>,
+        /// The model is the other variant of the one the block held when
+        /// the tries began, with the same controls: renumber it in the
+        /// document, so the block keeps its assignments and what each
+        /// snapshot holds as well as its settings.
+        in_place: bool,
     },
     /// Put the preset back as it was before the first try.
     PutBack,
@@ -788,7 +797,9 @@ impl Worker {
                 block,
                 model,
                 paired,
-            } => self.try_model(block, model, paired),
+                carry,
+                in_place,
+            } => self.try_model(block, model, paired, &carry, in_place),
             Cmd::PutBack => self.put_back(),
             Cmd::KeepTry => self.keep_try(),
             Cmd::SelectBlock(block) => {
@@ -1820,7 +1831,14 @@ impl Worker {
     /// Play a model in a block's place. The first try puts the preset as it
     /// stands aside with its undo state, so Put back can restore it byte for
     /// byte and Keep can make all the tries one step.
-    fn try_model(&mut self, block: i64, model: u32, paired: Option<u32>) {
+    fn try_model(
+        &mut self,
+        block: i64,
+        model: u32,
+        paired: Option<u32>,
+        carry: &[(i64, f32, hx_catalog::Kind)],
+        in_place: bool,
+    ) {
         if self.trial.is_none() {
             let Some(original) = self.preset_bytes() else {
                 return;
@@ -1835,9 +1853,58 @@ impl Worker {
             });
             self.report_history();
         }
+        if in_place && paired.is_none() {
+            // Where it is not a block that can be renumbered after all,
+            // the model is set the ordinary way and what can be carried is.
+            if let Some(preset) = self.renumbered(block, model) {
+                if self.run_on_device(|d| d.write_preset(&preset)) {
+                    self.dirty = true;
+                    // What was written is what there is.
+                    self.present(&preset);
+                }
+                return;
+            }
+        }
         if self.run_on_device(|d| place(d, block, model, paired)) {
             self.dirty = true;
+            self.carry_settings(block, carry);
             self.reload();
+        }
+    }
+
+    /// The preset from before the tries, with one block's model renumbered.
+    ///
+    /// From before the tries and not as it stands: another model tried in
+    /// between has already cost the block its assignments, and it is the
+    /// block as it was that the other variant is taking over from.
+    fn renumbered(&self, block: i64, model: u32) -> Option<hx_proto::Preset> {
+        let original = &self.trial.as_ref()?.original;
+        let mut preset = hx_proto::Preset::parse(original)?;
+        preset
+            .set_model_number(usize::try_from(block).ok()?, model)
+            .then_some(preset)
+    }
+
+    /// Give a model just placed the settings its block had.
+    ///
+    /// A new model arrives at its defaults. The pedal is still committing it
+    /// when the first value follows, and refuses a request that lands
+    /// mid-commit, so each value is asked quietly and, refused, asked again
+    /// once the preset has read back settled.
+    fn carry_settings(&mut self, block: i64, carry: &[(i64, f32, hx_catalog::Kind)]) {
+        if carry.is_empty() {
+            return;
+        }
+        let _ = self.read_settled();
+        for &(index, value, kind) in carry {
+            let wire = kind.wire(value);
+            if self.quietly(|d| d.set_param(block, index, wire.clone())) {
+                continue;
+            }
+            let _ = self.read_settled();
+            if !self.run_on_device(|d| d.set_param(block, index, wire)) {
+                return;
+            }
         }
     }
 
@@ -3392,6 +3459,8 @@ mod tests {
             block: 1,
             model: 7,
             paired: None,
+            carry: Vec::new(),
+            in_place: false,
         });
         // The pretend pedal takes a model without changing its buffer; this
         // stands in for what a real one does.
@@ -3400,6 +3469,8 @@ mod tests {
             block: 1,
             model: 8,
             paired: None,
+            carry: Vec::new(),
+            in_place: false,
         });
         assert!(worker.history.is_empty(), "the tries are not undo steps");
         assert!(worker.dirty);
@@ -3423,6 +3494,8 @@ mod tests {
                 block: 1,
                 model,
                 paired: None,
+                carry: Vec::new(),
+                in_place: false,
             });
         }
         worker.handle(Cmd::KeepTry);
@@ -3441,6 +3514,8 @@ mod tests {
             block: 1,
             model: 7,
             paired: None,
+            carry: Vec::new(),
+            in_place: false,
         });
         pedal.lock().unwrap().buffer = document(150.0);
         worker.handle(Cmd::SetTempo(96.0));
@@ -3464,6 +3539,8 @@ mod tests {
             block: 1,
             model: 7,
             paired: None,
+            carry: Vec::new(),
+            in_place: false,
         });
         assert!(worker.trial.is_some());
         pedal.lock().unwrap().unplugged = true;
@@ -3513,6 +3590,85 @@ mod tests {
             Notice::Chatter
         );
         assert_eq!(notice(77, &Value::Nil), Notice::Unknown);
+    }
+
+    /// A block changed for its own mono or stereo variant keeps what was
+    /// dialled in: the new model arrives at its defaults, and the settings
+    /// follow it, after the model and in the order given.
+    #[test]
+    fn a_tried_model_is_given_the_settings_carried_to_it() {
+        let pedal = Pedal::new();
+        let (mut worker, _events) = worker(&pedal);
+        pedal.lock().unwrap().requests.clear();
+
+        worker.handle(Cmd::TryModel {
+            block: 1,
+            model: 8,
+            paired: None,
+            carry: vec![
+                (0, 0.25, hx_catalog::Kind::Continuous),
+                (2, 1.0, hx_catalog::Kind::Switch),
+            ],
+            in_place: false,
+        });
+
+        let pedal = pedal.lock().unwrap();
+        let placed = pedal
+            .requests
+            .iter()
+            .position(|(op, _)| *op == op::SET_MODEL)
+            .expect("the model goes in");
+        let set: Vec<(i64, Value)> = pedal.requests[placed..]
+            .iter()
+            .filter(|(op, _)| *op == op::SET_PARAM)
+            .map(|(_, args)| {
+                (
+                    args.get(key::PARAM_INDEX).and_then(Value::as_i64).unwrap(),
+                    args.get(key::VALUE).cloned().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(set, [(0, Value::F32(0.25)), (2, Value::Bool(true))]);
+    }
+
+    /// The other variant of the block's own model takes the block over as
+    /// it stands: the document is written with the model renumbered, and the
+    /// model is never set, which would cost the block its assignments and
+    /// what each snapshot holds. Put back still restores the first document.
+    #[test]
+    fn the_other_variant_is_renumbered_in_the_document() {
+        let pedal = Pedal::new();
+        let (mut worker, _events) = worker(&pedal);
+        let before = pedal.lock().unwrap().buffer.clone();
+        let held = hx_proto::Preset::parse(&before).unwrap();
+        let (slot, model) = held
+            .blocks()
+            .find_map(|(at, block)| Some((at, block.model?)))
+            .expect("the pretend preset has a block");
+        pedal.lock().unwrap().requests.clear();
+
+        worker.handle(Cmd::TryModel {
+            block: slot as i64,
+            model: model + 1,
+            paired: None,
+            carry: vec![(0, 0.25, hx_catalog::Kind::Continuous)],
+            in_place: true,
+        });
+
+        {
+            let pedal = pedal.lock().unwrap();
+            let sent = pedal.opcodes();
+            assert!(sent.contains(&op::WRITE_PRESET), "{sent:?}");
+            assert!(!sent.contains(&op::SET_MODEL), "{sent:?}");
+            assert!(!sent.contains(&op::SET_PARAM), "{sent:?}");
+            let now = hx_proto::Preset::parse(&pedal.buffer).unwrap();
+            assert_eq!(now.slots[slot].model, Some(model + 1));
+            assert_eq!(now.slots[slot].values, held.slots[slot].values);
+        }
+        assert!(worker.dirty);
+
+        worker.handle(Cmd::PutBack);
+        assert_eq!(pedal.lock().unwrap().buffer, before);
     }
 
     #[test]

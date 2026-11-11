@@ -7325,6 +7325,74 @@ fn number_of(catalog: &hx_catalog::Catalog, id: &str) -> Option<u32> {
         .map(|s| s.number)
 }
 
+/// The number of a model's mono or stereo variant.
+///
+/// The catalog folds the two into one model, and which the firmware lists
+/// first differs from model to model, so taking the first put a stereo
+/// Searchlights in a block chosen from the Mono shelf and priced a stereo
+/// Plateaux as the mono one. Falls back to [`number_of`] when no width is
+/// asked for or the model has no such variant.
+fn number_of_width(catalog: &hx_catalog::Catalog, id: &str, stereo: Option<bool>) -> Option<u32> {
+    stereo
+        .and_then(|stereo| {
+            catalog
+                .symbols()
+                .iter()
+                .find(|s| {
+                    s.model.as_deref() == Some(id) && stereo_symbol(&s.symbol) == Some(stereo)
+                })
+                .map(|s| s.number)
+        })
+        .or_else(|| number_of(catalog, id))
+}
+
+/// A block's settings, as the model numbered `to` takes them.
+///
+/// The two variants of a model list the same controls, but the firmware
+/// numbers each list by itself, so a value is carried by its control's name
+/// and one the other variant has no control for is left behind.
+fn carried_settings(
+    catalog: &hx_catalog::Catalog,
+    from: u32,
+    to: u32,
+    values: &[f32],
+) -> Vec<(i64, f32, hx_catalog::Kind)> {
+    let (Some(old), Some(new)) = (catalog.symbol(from), catalog.symbol(to)) else {
+        return Vec::new();
+    };
+    old.parameters
+        .iter()
+        .zip(values)
+        .filter_map(|(name, value)| {
+            let index = new.parameters.iter().position(|other| other == name)?;
+            let kind = catalog.param(to, index)?.kind;
+            Some((i64::try_from(index).ok()?, *value, kind))
+        })
+        .collect()
+}
+
+/// Whether a number is a model's stereo variant, or its mono one. `None`
+/// for a model that comes only one way.
+fn stereo_variant(catalog: &hx_catalog::Catalog, number: u32) -> Option<bool> {
+    let symbol = catalog.symbol(number)?;
+    // A symbol that is itself the model's id is no variant of anything,
+    // whatever its name ends in.
+    if symbol.model.as_deref() == Some(symbol.symbol.as_str()) {
+        return None;
+    }
+    stereo_symbol(&symbol.symbol)
+}
+
+fn stereo_symbol(symbol: &str) -> Option<bool> {
+    if symbol.ends_with("Stereo") {
+        Some(true)
+    } else if symbol.ends_with("Mono") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// A band's heading: its colour as a dot, then its name in that colour.
 fn eq_group_title(ui: &mut egui::Ui, name: &str, colour: egui::Color32) {
     ui.horizontal(|ui| {
@@ -8453,7 +8521,8 @@ mod tests {
             Ok(Cmd::TryModel {
                 block: 1,
                 model: 7,
-                paired: None
+                paired: None,
+                ..
             })
         ));
         assert!(app.dirty);
@@ -8488,8 +8557,14 @@ mod tests {
         let _ = cmds.try_iter().count();
         app.open_browser_swap();
         if let Some(browser) = app.browser.as_mut() {
-            if let browser::Target::Swap { original_id, .. } = &mut browser.target {
+            if let browser::Target::Swap {
+                original_id,
+                original_number,
+                ..
+            } = &mut browser.target
+            {
                 *original_id = Some("drive".into());
+                *original_number = 7;
             }
         }
         app.pick_model(("fuzz".into(), "Fuzz".into(), 8, None));
@@ -8497,6 +8572,14 @@ mod tests {
         assert!(!app.pick_model(("drive".into(), "Drive".into(), 7, None)));
         assert!(matches!(cmds.try_recv(), Ok(Cmd::PutBack)));
         assert!(app.browser.as_ref().is_some_and(|b| b.playing.is_none()));
+
+        // The same model by another number is its other variant, mono for
+        // stereo: a change, not a putting back.
+        assert!(app.pick_model(("drive".into(), "Drive".into(), 9, None)));
+        assert!(matches!(
+            cmds.try_recv(),
+            Ok(Cmd::TryModel { model: 9, .. })
+        ));
     }
 
     /// Anything else sent while a model is being tried keeps it, as the

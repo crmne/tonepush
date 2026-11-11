@@ -1332,6 +1332,47 @@ impl Preset {
         raw_slot_at(&self.tone, position).cloned()
     }
 
+    /// Renumber the model of the block in `position`, and nothing else.
+    ///
+    /// For a block changed to its own mono or stereo variant, whose controls
+    /// are the same ones in the same order. The values, the bypass, the
+    /// controller assignments, the footswitch and what each snapshot holds
+    /// all name the block by its slot and a control by its index, so they go
+    /// on meaning what they did. Setting the model by the device's own
+    /// operation resets the values, engages the block and drops its
+    /// parameter assignments; a document renumbered this way was written to
+    /// an HX Stomp at 3.80 and read back byte for byte, a snapshot's own
+    /// value for a control included.
+    ///
+    /// Returns false for anything but a block holding one model.
+    pub fn set_model_number(&mut self, position: usize, model: u32) -> bool {
+        let single = self.slots.get(position).is_some_and(|slot| {
+            slot.kind == Kind::Block && slot.model.is_some() && slot.paired.is_none()
+        });
+        if !single {
+            return false;
+        }
+        let Some(number) = raw_slot_at_mut(&mut self.tone, position)
+            .and_then(|slot| slot.at_mut(&[key::BODY, key::MODEL_REF, key::MODEL]))
+        else {
+            return false;
+        };
+        // The tag keeps its width where the new number fits it, so nothing
+        // after it in the document moves.
+        let fits =
+            |held: u64| (held > 0xff) == (model > 0xff) && (held > 0xffff) == (model > 0xffff);
+        *number = match *number {
+            Value::Wide(held, width) if fits(held) => Value::Wide(u64::from(model), width),
+            Value::WideInt(held, width) if held >= 0 && fits(held as u64) => {
+                Value::WideInt(i64::from(model), width)
+            }
+            Value::UInt(_) => Value::UInt(u64::from(model)),
+            _ => Value::Int(i64::from(model)),
+        };
+        self.slots = collect_slots(&self.tone);
+        true
+    }
+
     /// Drop a previously copied slot into `position`.
     ///
     /// Returns false if either side is not an effect/empty position. Inputs,
@@ -3069,6 +3110,47 @@ mod tests {
         );
         // The original is untouched - this is a copy, not a move.
         assert_eq!(preset.slots[from].model, source_model);
+    }
+
+    /// A block renumbered to its other variant keeps everything that names
+    /// it: only the model differs in the document that results.
+    #[test]
+    fn a_renumbered_block_keeps_everything_else() {
+        let before = Preset::parse(FIXTURE).unwrap();
+        let (position, held) = before
+            .blocks()
+            .find(|(_, slot)| slot.paired.is_none() && slot.model.is_some())
+            .map(|(position, slot)| (position, slot.model.unwrap()))
+            .unwrap();
+        let mut preset = Preset::parse(FIXTURE).unwrap();
+
+        assert!(preset.set_model_number(position, held + 1));
+
+        let after = Preset::parse(&preset.encode()).expect("it re-parses");
+        assert_eq!(after.slots[position].model, Some(held + 1));
+        assert_eq!(after.encode().len(), before.encode().len());
+        for (index, (was, is)) in before.slots.iter().zip(&after.slots).enumerate() {
+            assert_eq!(was.values, is.values, "slot {index}");
+            assert_eq!(was.enabled, is.enabled, "slot {index}");
+            if index != position {
+                assert_eq!(was.model, is.model, "slot {index}");
+            }
+        }
+        let layout = crate::rpc::ControlLayout::Stomp;
+        assert_eq!(
+            format!("{:?}", after.assignments(layout)),
+            format!("{:?}", before.assignments(layout))
+        );
+        assert_eq!(
+            format!("{:?}", after.snapshot_details()),
+            format!("{:?}", before.snapshot_details())
+        );
+
+        // An input is not a block, and has no model to renumber.
+        let fixture = (0..before.slots.len())
+            .find(|&at| before.slots[at].kind != Kind::Block)
+            .unwrap();
+        assert!(!preset.set_model_number(fixture, held));
     }
 
     /// The endpoints are fixtures of the topology. Pasting a block over the

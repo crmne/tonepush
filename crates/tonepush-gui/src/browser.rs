@@ -31,6 +31,11 @@ pub(crate) enum Target {
         /// whether a cab rode along.
         original: String,
         original_id: Option<String>,
+        /// The number the block held: which variant of that model it was.
+        original_number: u32,
+        /// What the block's controls were set to, to carry over to the
+        /// other variant of the same model.
+        original_values: Vec<f32>,
         paired: bool,
     },
     /// Choosing a block for a gap: the slot it goes into.
@@ -68,8 +73,17 @@ pub(crate) struct Price {
 /// The numbers choosing a model places: the model, and in a paired category
 /// the cab that comes with an amp. If the firmware does not know that cab
 /// the amp goes in alone.
-fn numbers_for(catalog: &Catalog, model: &Model, pairing: bool) -> Option<(u32, Option<u32>)> {
-    let number = crate::number_of(catalog, &model.id)?;
+///
+/// The catalog lists a model once and the firmware numbers its mono and
+/// stereo variants apart, so `stereo` says which of the two is meant. With
+/// neither asked for, or no such variant, it is the first the firmware lists.
+fn numbers_for(
+    catalog: &Catalog,
+    model: &Model,
+    pairing: bool,
+    stereo: Option<bool>,
+) -> Option<(u32, Option<u32>)> {
+    let number = crate::number_of_width(catalog, &model.id, stereo)?;
     let paired = pairing
         .then(|| catalog.paired_cab(model))
         .flatten()
@@ -88,6 +102,9 @@ pub(crate) struct Browser {
     list: bool,
     /// The model playing in the block's place after a try: its id and name.
     pub(crate) playing: Option<(String, String)>,
+    /// The number playing, which tells a model's mono variant from its
+    /// stereo one. Only means anything while `playing` is set.
+    playing_number: u32,
     /// Ask for the keyboard on the next frame.
     focus: bool,
     /// Every model that can be chosen, for search: id and lowercased name,
@@ -97,21 +114,35 @@ pub(crate) struct Browser {
 }
 
 /// Which shelf of a category opens: the one chosen if it is still one of
-/// this category's, else the one holding `holding`, else the first.
+/// this category's, else the one holding `holding`, else the first. A model
+/// with a mono and a stereo variant sits on both of those shelves, and
+/// `width` names the one the block's variant belongs on.
 pub(crate) fn open_shelf(
     shelves: &[(&str, Vec<&Model>)],
     chosen: Option<&str>,
     holding: Option<&str>,
+    width: Option<&str>,
 ) -> usize {
+    let holds = |models: &[&Model], held: &str| models.iter().any(|m| m.id == held);
     chosen
         .and_then(|want| shelves.iter().position(|(name, _)| *name == want))
         .or_else(|| {
             let held = holding?;
             shelves
                 .iter()
-                .position(|(_, models)| models.iter().any(|m| m.id == held))
+                .position(|(name, models)| Some(*name) == width && holds(models, held))
+                .or_else(|| shelves.iter().position(|(_, models)| holds(models, held)))
         })
         .unwrap_or(0)
+}
+
+/// The shelf a variant belongs on, where a category has such shelves.
+fn width_shelf(stereo: bool) -> &'static str {
+    if stereo {
+        "Stereo"
+    } else {
+        "Mono"
+    }
 }
 
 /// How a card's knobs are laid out: up to six in one row, or two rows of
@@ -339,6 +370,8 @@ impl App {
                 position: block.position,
                 original: self.slot_label(&block),
                 original_id,
+                original_number: block.model,
+                original_values: block.values.clone(),
                 paired: block.paired.is_some(),
             },
             rail,
@@ -383,6 +416,7 @@ impl App {
             shelf: None,
             list: false,
             playing: None,
+            playing_number: 0,
             focus: true,
             index,
             faces: HashMap::new(),
@@ -533,7 +567,27 @@ impl App {
             _ => Vec::new(),
         };
         let shelved = shelves.len() > 1;
-        let open = open_shelf(&shelves, browser.shelf.as_deref(), holding.as_deref());
+        // Which variant the block holds, where its model has two.
+        let original_number = match &browser.target {
+            Target::Swap {
+                original_number, ..
+            } => Some(*original_number),
+            Target::Insert { .. } => None,
+        };
+        let held_stereo = original_number.and_then(|number| crate::stereo_variant(catalog, number));
+        let open = open_shelf(
+            &shelves,
+            browser.shelf.as_deref(),
+            holding.as_deref(),
+            held_stereo.map(width_shelf),
+        );
+        // The variant a card stands for: its shelf's, and off those shelves
+        // (a search, Recent, Legacy) the one the block already holds.
+        let stereo = match shelves.get(open).map(|(name, _)| *name) {
+            Some("Mono") if !searching => Some(false),
+            Some("Stereo") if !searching => Some(true),
+            _ => held_stereo,
+        };
         let models: Vec<&Model> = if searching {
             let needle = browser.search.trim().to_lowercase();
             browser
@@ -561,7 +615,7 @@ impl App {
         }
         let price_of = |model: &Model| -> Option<Price> {
             let room = room?;
-            let (number, paired) = numbers_for(catalog, model, pairing)?;
+            let (number, paired) = numbers_for(catalog, model, pairing, stereo)?;
             let cost = dsp::block_cost(catalog, number, paired)?;
             let fits = room.fits(cost);
             let short = (!fits).then(|| {
@@ -844,10 +898,19 @@ impl App {
         );
         let original_id = holding.clone();
         let playing_id = trying.as_ref().map(|(id, _)| id.clone());
+        let playing_number = trying.as_ref().map(|_| browser.playing_number);
+        // By number as well as by model: a model's mono card is not the
+        // stereo variant that is playing or in the block.
+        let number_of_card =
+            |model: &Model| numbers_for(catalog, model, pairing, stereo).map(|(number, _)| number);
         let badge_of = |model: &Model| -> Option<Badge> {
-            if playing_id.as_deref() == Some(model.id.as_str()) {
+            if playing_id.as_deref() == Some(model.id.as_str())
+                && number_of_card(model) == playing_number
+            {
                 Some(Badge::Playing)
-            } else if original_id.as_deref() == Some(model.id.as_str()) {
+            } else if original_id.as_deref() == Some(model.id.as_str())
+                && number_of_card(model) == original_number
+            {
                 Some(if playing_id.is_some() {
                     Badge::WasHere
                 } else {
@@ -1102,7 +1165,7 @@ impl App {
                 .model(id)
                 .filter(|model| price_of(model).is_none_or(|price| price.fits))
                 .and_then(|model| {
-                    let (number, paired) = numbers_for(catalog, model, pairing)?;
+                    let (number, paired) = numbers_for(catalog, model, pairing, stereo)?;
                     Some((model.id.clone(), model.name.clone(), number, paired))
                 }),
             _ => None,
@@ -1139,30 +1202,68 @@ impl App {
             Target::Swap {
                 position,
                 original_id,
+                original_number,
+                original_values,
                 paired: was_paired,
                 ..
             } => {
+                // The same model by another number is its other variant,
+                // mono for stereo, and is a choice of its own.
                 if browser
                     .playing
                     .as_ref()
                     .is_some_and(|(playing, _)| *playing == id)
+                    && browser.playing_number == model
                 {
                     return false;
                 }
                 // Choosing what was there is putting it back, exactly: a
                 // fresh copy of the model would lose its settings.
-                if original_id.as_deref() == Some(id.as_str()) && was_paired == paired.is_some() {
+                if original_id.as_deref() == Some(id.as_str())
+                    && original_number == model
+                    && was_paired == paired.is_some()
+                {
                     if browser.playing.take().is_some() {
                         self.send(Cmd::PutBack);
                     }
                     return false;
                 }
                 browser.playing = Some((id.clone(), name));
+                browser.playing_number = model;
+                // The block's own model the other way round, mono for
+                // stereo, keeps what was dialled in.
+                let carry = match &self.catalog {
+                    Some(catalog)
+                        if original_id.as_deref() == Some(id.as_str())
+                            && !was_paired
+                            && paired.is_none() =>
+                    {
+                        crate::carried_settings(catalog, original_number, model, &original_values)
+                    }
+                    _ => Vec::new(),
+                };
+                // With the same controls in the same order it can take over
+                // the block as it stands, assignments and snapshots and
+                // all. Only where the path's DSP is counted: a document
+                // over the budget is one the pedal does not answer.
+                let same_controls = self.catalog.as_ref().is_some_and(|catalog| {
+                    match (catalog.symbol(original_number), catalog.symbol(model)) {
+                        (Some(held), Some(chosen)) => held.parameters == chosen.parameters,
+                        _ => false,
+                    }
+                });
+                let counted = usize::try_from(position)
+                    .ok()
+                    .and_then(|slot| self.room_at(slot))
+                    .is_some();
+                let in_place = !carry.is_empty() && same_controls && counted;
                 self.dirty = true;
                 self.send(Cmd::TryModel {
                     block: position,
                     model,
                     paired,
+                    carry,
+                    in_place,
                 });
                 true
             }
@@ -1501,9 +1602,9 @@ mod tests {
             ("Stereo", vec![&b]),
             ("Legacy", vec![&c]),
         ];
-        assert_eq!(open_shelf(&shelves, None, Some("b")), 1);
-        assert_eq!(open_shelf(&shelves, Some("Legacy"), Some("b")), 2);
+        assert_eq!(open_shelf(&shelves, None, Some("b"), None), 1);
+        assert_eq!(open_shelf(&shelves, Some("Legacy"), Some("b"), None), 2);
         // A shelf chosen in another category is not one of these.
-        assert_eq!(open_shelf(&shelves, Some("Guitar"), None), 0);
+        assert_eq!(open_shelf(&shelves, Some("Guitar"), None, None), 0);
     }
 }
