@@ -88,7 +88,8 @@ pub mod key {
     pub const LED_COLOUR: i64 = 66;
     /// What a footswitch controls: an array, one entry per assignment.
     pub const SWITCH_ASSIGNED: i64 = 67;
-    /// Assignment kind in an opcode 33 reply. A snapshot action uses 3.
+    /// Inside one of those entries, what kind of thing it is: see
+    /// [`SWITCH_KIND_PRESET_ACTION`](super::SWITCH_KIND_PRESET_ACTION).
     pub const SWITCH_ASSIGNMENT_KIND: i64 = 68;
     /// Inside one of those entries, what it points at.
     pub const SWITCH_TARGET: i64 = 69;
@@ -128,6 +129,11 @@ pub mod key {
     pub const IR_FORMAT_A: i64 = 114;
     pub const IR_FORMAT_B: i64 = 115;
 }
+
+/// The value of [`key::SWITCH_ASSIGNMENT_KIND`] on an entry that acts on the
+/// preset instead of a block. Seen on an HX Stomp for a snapshot recall, whose
+/// target carries a name and no block index. A block's bypass reports 1.
+pub const SWITCH_KIND_PRESET_ACTION: i64 = 3;
 
 /// Operation codes carried in [`key::OPCODE`].
 pub mod op {

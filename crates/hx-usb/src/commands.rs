@@ -133,6 +133,22 @@ pub struct Carried {
     pub enabled: bool,
 }
 
+/// Whether an entry of a switch's assignment list acts on the preset rather
+/// than on a block, the way a snapshot recall does.
+///
+/// Such an entry has no block index, so it has no place in `Switch::carries`.
+/// The kind is what tells it apart: a block entry that merely lost its index
+/// is still malformed and still refused.
+fn is_preset_action(item: &Value) -> bool {
+    let kind = item
+        .get(rpc::key::SWITCH_ASSIGNMENT_KIND)
+        .and_then(Value::as_i64);
+    let block = item
+        .get(rpc::key::SWITCH_TARGET)
+        .and_then(|target| target.get(rpc::key::BLOCK));
+    kind == Some(rpc::SWITCH_KIND_PRESET_ACTION) && matches!(block, None | Some(Value::Nil))
+}
+
 /// One entry of a switch's assignment list.
 fn carried(item: &Value, position: usize) -> Result<Carried> {
     let invalid = |field: &str| {
@@ -206,23 +222,7 @@ fn decode_switch(switch: u8, reply: &Value) -> Result<Switch> {
         Some(Value::Array(items)) => items
             .iter()
             .enumerate()
-            .filter(|(_, item)| {
-                // A snapshot action controls the preset, not an effect block.
-                // It has no block index and does not belong in `Switch::carries`.
-                let target = item.get(rpc::key::SWITCH_TARGET);
-                let is_snapshot = item
-                    .get(rpc::key::SWITCH_ASSIGNMENT_KIND)
-                    .and_then(Value::as_i64)
-                    == Some(3)
-                    && target
-                        .and_then(|target| target.get(rpc::key::NAME))
-                        .and_then(Value::as_str)
-                        == Some("Snapshot")
-                    && target
-                        .and_then(|target| target.get(rpc::key::BLOCK))
-                        .is_none();
-                !is_snapshot
-            })
+            .filter(|(_, item)| !is_preset_action(item))
             .map(|(position, item)| carried(item, position))
             .collect::<Result<_>>()?,
         Some(_) => {
@@ -1819,31 +1819,40 @@ mod validation_tests {
 
     #[test]
     fn snapshot_actions_are_not_treated_as_footswitch_block_assignments() {
-        let reply = hx_proto::msgmap! {
-            rpc::key::SWITCH => Value::Int(4),
-            rpc::key::MOMENTARY => Value::Bool(true),
-            rpc::key::SWITCH_ASSIGNED => Value::Array(vec![
-                hx_proto::msgmap! {
-                    rpc::key::ENABLED => Value::Bool(false),
-                    rpc::key::SWITCH_ASSIGNMENT_KIND => Value::Int(3),
-                    rpc::key::LED_COLOUR => Value::Int(462_860),
-                    rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
-                        rpc::key::NAME => Value::Str("Snapshot".into()),
-                    },
-                },
-                hx_proto::msgmap! {
-                    rpc::key::ENABLED => Value::Bool(true),
-                    rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
-                        rpc::key::NAME => Value::Str("Drive".into()),
-                        rpc::key::BLOCK => Value::Int(4),
-                    },
-                },
-            ]),
+        let snapshot = hx_proto::msgmap! {
+            rpc::key::ENABLED => Value::Bool(false),
+            rpc::key::SWITCH_ASSIGNMENT_KIND => Value::Int(3),
+            rpc::key::LED_COLOUR => Value::Int(462_860),
+            rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
+                rpc::key::NAME => Value::Str("Snapshot".into()),
+            },
         };
-        let switch = decode_switch(5, &reply).unwrap();
-        assert!(switch.momentary);
+        let reply = |assigned: Vec<Value>| {
+            hx_proto::msgmap! {
+                rpc::key::SWITCH => Value::Int(4),
+                rpc::key::MOMENTARY => Value::Bool(true),
+                rpc::key::SWITCH_ASSIGNED => Value::Array(assigned),
+            }
+        };
+
+        // The reply that made the editor reconnect: a snapshot and nothing else.
+        let alone = decode_switch(5, &reply(vec![snapshot.clone()])).unwrap();
+        assert!(alone.momentary);
+        assert!(alone.carries.is_empty());
+
+        let mixed = reply(vec![
+            snapshot,
+            hx_proto::msgmap! {
+                rpc::key::ENABLED => Value::Bool(true),
+                rpc::key::SWITCH_ASSIGNMENT_KIND => Value::Int(1),
+                rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
+                    rpc::key::NAME => Value::Str("Drive".into()),
+                    rpc::key::BLOCK => Value::Int(4),
+                },
+            },
+        ]);
         assert_eq!(
-            switch.carries,
+            decode_switch(5, &mixed).unwrap().carries,
             vec![Carried {
                 block: 4,
                 name: "Drive".into(),
@@ -1851,6 +1860,37 @@ mod validation_tests {
                 enabled: true,
             }],
         );
+    }
+
+    #[test]
+    fn only_a_preset_action_may_lack_a_block() {
+        let reply = |entry: Value| {
+            hx_proto::msgmap! {
+                rpc::key::SWITCH => Value::Int(0),
+                rpc::key::MOMENTARY => Value::Bool(false),
+                rpc::key::SWITCH_ASSIGNED => Value::Array(vec![entry]),
+            }
+        };
+        // A block assignment that lost its index is malformed, not an action.
+        let blockless = reply(hx_proto::msgmap! {
+            rpc::key::ENABLED => Value::Bool(true),
+            rpc::key::SWITCH_ASSIGNMENT_KIND => Value::Int(1),
+            rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
+                rpc::key::NAME => Value::Str("Drive".into()),
+            },
+        });
+        assert!(decode_switch(1, &blockless).is_err());
+
+        // The kind alone does not hide an entry that does name a block.
+        let with_block = reply(hx_proto::msgmap! {
+            rpc::key::ENABLED => Value::Bool(true),
+            rpc::key::SWITCH_ASSIGNMENT_KIND => Value::Int(3),
+            rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
+                rpc::key::NAME => Value::Str("Drive".into()),
+                rpc::key::BLOCK => Value::Int(2),
+            },
+        });
+        assert_eq!(decode_switch(1, &with_block).unwrap().carries.len(), 1);
     }
 
     #[test]
