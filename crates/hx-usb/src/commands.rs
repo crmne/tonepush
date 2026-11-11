@@ -1335,7 +1335,7 @@ impl Session {
         if behind {
             self.ack_channel(ChannelId::EVENTS)?;
         }
-        let mut out = Vec::new();
+        let mut out = std::mem::take(&mut self.set_aside);
         for ch in self.channels.values_mut() {
             for sm in ch
                 .reader
@@ -1867,6 +1867,38 @@ mod pedal_tests {
             session.keepalive().unwrap();
             assert_eq!(seen, 6 * (round + 1), "stalled after {seen} notifications");
         }
+    }
+
+    /// A deferred request clears the events channel to find its own
+    /// completion. What the pedal said about itself in the meantime - a
+    /// stomp, a knob - is kept for the next poll, not dropped with the stale
+    /// completions.
+    #[test]
+    fn a_deferred_request_keeps_what_the_pedal_announced() {
+        let pedal = Pedal::new();
+        let mut session = fake::session(&pedal);
+        let preset = session.read_preset().unwrap();
+        session.poll_notifications().unwrap();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            let stale = hx_proto::msgmap! {
+                rpc::key::TXN => Value::Int(999),
+                rpc::key::STATUS => Value::Int(0),
+            };
+            pedal.notify(20, stale);
+            pedal.notify(49, hx_proto::msgmap! { 98 => Value::Int(2) });
+        }
+
+        session.write_preset(&preset).expect("the write lands");
+
+        let events: Vec<i64> = session
+            .poll_notifications()
+            .unwrap()
+            .into_iter()
+            .map(|(event, _)| event)
+            .filter(|event| [20, 49].contains(event))
+            .collect();
+        assert_eq!(events, [49], "the stale completion goes, the stomp stays");
     }
 
     const SAMPLES: [f32; 4] = [0.5, -0.25, 0.125, 0.0];

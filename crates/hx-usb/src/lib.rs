@@ -240,6 +240,11 @@ pub struct Session {
     /// do on this session, and continuing to write only digs deeper - so the
     /// session refuses further work and says why.
     poisoned: Option<String>,
+    /// Notifications read off the events channel while a deferred request
+    /// was looking for its completion, kept for the next
+    /// `poll_notifications`: a stomp or a knob used on the pedal during a
+    /// preset write is still news.
+    set_aside: Vec<(i64, Value)>,
     pub profile: DeviceProfile,
 }
 
@@ -435,6 +440,7 @@ impl Session {
             interface,
             wire,
             channels: BTreeMap::new(),
+            set_aside: Vec::new(),
             poisoned: None,
             profile,
         };
@@ -787,19 +793,7 @@ impl Session {
             let before = self.rx_bytes(id);
             self.read_available(Self::REPLY_READ)?;
             let got = self.rx_bytes(id) != before;
-            let messages = self
-                .channels
-                .get_mut(&ChannelId::EVENTS.device)
-                .map(|ch| ch.reader.take_messages())
-                .transpose()
-                .map_err(|error| Error::Protocol(error.to_string()))?
-                .unwrap_or_default();
-            let mut done = false;
-            for sm in messages {
-                if let Message::Notification { args, .. } = decode_message(sm.body)? {
-                    done |= completion_matches(&args, txn);
-                }
-            }
+            let done = self.set_events_aside(Some(txn))?;
             if got {
                 self.ack_channel(id)?;
             }
@@ -893,16 +887,46 @@ impl Session {
         self.request_raw_after(id, opcode, args, |_| Ok(()))
     }
 
-    /// Everything on the events channel so far, dropped unread. Only for just
-    /// before a deferred request is sent: see `command_deferred`.
+    /// Clear the events channel just before a deferred request is sent: see
+    /// `command_deferred`. Completions waiting there are owed to earlier
+    /// requests and are dropped; anything else is kept for the next poll.
     fn forget_events(&mut self) -> Result<()> {
-        if let Some(events) = self.channels.get_mut(&ChannelId::EVENTS.device) {
-            events
-                .reader
-                .take_messages()
-                .map_err(|error| Error::Protocol(error.to_string()))?;
+        self.set_events_aside(None).map(|_| ())
+    }
+
+    /// Read the events channel on behalf of a deferred request. Returns
+    /// whether the completion of `txn` was there.
+    ///
+    /// A completion, this request's or a stale one, is consumed. Every other
+    /// notification is news from the pedal - a preset loaded, a stomp
+    /// pressed, a knob turned - and is set aside for `poll_notifications`
+    /// rather than lost because it arrived while a write was finishing.
+    fn set_events_aside(&mut self, txn: Option<i64>) -> Result<bool> {
+        /// More than any burst seen; past it the oldest go, so a caller that
+        /// never polls cannot grow this without bound.
+        const KEPT: usize = 512;
+        let messages = self
+            .channels
+            .get_mut(&ChannelId::EVENTS.device)
+            .map(|ch| ch.reader.take_messages())
+            .transpose()
+            .map_err(|error| Error::Protocol(error.to_string()))?
+            .unwrap_or_default();
+        let mut done = false;
+        for sm in messages {
+            if let Message::Notification { event, args } = decode_message(sm.body)? {
+                if args.get(rpc::key::TXN).is_some() {
+                    done |= txn.is_some_and(|txn| completion_matches(&args, txn));
+                } else {
+                    self.set_aside.push((event, args));
+                }
+            }
         }
-        Ok(())
+        if self.set_aside.len() > KEPT {
+            let excess = self.set_aside.len() - KEPT;
+            self.set_aside.drain(..excess);
+        }
+        Ok(done)
     }
 
     /// [`request_raw`](Self::request_raw), running `ready` once the device's
