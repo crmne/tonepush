@@ -321,6 +321,7 @@ impl Panel {
                             drivers: &[],
                             plain_caption: true,
                             locked: false,
+                            share: None,
                         },
                     );
                     let hover = match (tile.caption.is_empty(), tile.on) {
