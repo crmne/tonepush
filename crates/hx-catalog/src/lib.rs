@@ -803,6 +803,24 @@ pub(crate) mod tests {
         assert_eq!(nam_lite_label(&values, &irs), "NAM A2 Lite (slot 102)");
         values[NAM_LITE_MODEL_PARAM] = 129.0;
         assert_eq!(nam_lite_slot(&values), None);
+        assert_eq!(nam_lite_label(&values, &irs), "NAM A2 Lite (no capture)");
+        // Zero, a value that is not a number and a short array are no capture.
+        for none in [0.0, 0.99, f32::NAN, f32::INFINITY] {
+            values[NAM_LITE_MODEL_PARAM] = none;
+            assert_eq!(nam_lite_slot(&values), None, "{none}");
+        }
+        assert_eq!(nam_lite_slot(&values[..NAM_LITE_MODEL_PARAM]), None);
+        // Slot 1 is the pedal's IR index 0, and 128 its last.
+        values[NAM_LITE_MODEL_PARAM] = 1.0;
+        assert_eq!(nam_lite_label(&values, &[(0, "Ärger".into())]), "Ärger");
+        values[NAM_LITE_MODEL_PARAM] = 128.0;
+        assert_eq!(nam_lite_label(&values, &[(127, "Last".into())]), "Last");
+        // An IR list that is empty, or names the slot with blanks.
+        assert_eq!(nam_lite_label(&values, &[]), "NAM A2 Lite (slot 128)");
+        assert_eq!(
+            nam_lite_label(&values, &[(127, "  ".into())]),
+            "NAM A2 Lite (slot 128)"
+        );
     }
 
     #[test]
@@ -821,6 +839,18 @@ pub(crate) mod tests {
         assert_eq!(catalog.parse(param, "100"), Some(100.0));
         assert_eq!(catalog.parse(param, "100.5"), None);
         assert_eq!(param.kind.wire(100.0), hx_proto::msgpack::Value::F32(100.0));
+        // The slot is the only list here that is not a catalog menu.
+        assert!(catalog.choices(param).is_none());
+        assert_eq!(catalog.parse(param, "0"), None);
+        assert_eq!(catalog.parse(param, "129"), None);
+        let polarity = catalog.param(NAM_LITE_ID, 3).unwrap();
+        assert_eq!(catalog.format(polarity, 1.0), "Inverted");
+        assert_eq!(catalog.choices(polarity).map(<[String]>::len), Some(2));
+        let q = catalog.param(NAM_LITE_ID, 8).unwrap();
+        assert_eq!(catalog.parse(q, "2.8"), Some(2.0));
+        // The stereo variant is a different number and stays the stock model.
+        assert!(!catalog.is_nam_lite(NAM_LITE_ID + 1));
+        assert_eq!(catalog.model_number(NAM_LITE_ID + 1).unwrap().name, stock);
         assert_eq!(
             catalog.model("HD2_DistXenomorphFuzz").map(|m| &m.name),
             Some(&stock)
