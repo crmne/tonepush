@@ -358,7 +358,9 @@ impl Catalog {
                 display: display.map(str::to_owned),
             })
             .collect();
+        let donor = donor.id.clone();
         self.models.insert(model.id.clone(), model);
+        self.list_nam_lite(&donor);
         for (key, display) in [
             ("nam_knob", format::Display::numeric(10.0, "%.1f")),
             ("nam_slot", format::Display::numeric(1.0, "%.0f")),
@@ -370,6 +372,44 @@ impl Catalog {
             ("nam_q", format::Display::labels(&["0.7", "1.4", "2.8"])),
         ] {
             self.displays.insert(key.into(), display);
+        }
+    }
+
+    /// Put the NAM block where a browser finds it: on the shelf the model
+    /// whose number it took was on.
+    ///
+    /// Without this it could only be chosen as that model's card, under that
+    /// model's name and price, and a search for "NAM" found nothing. The
+    /// number is the NAM block's now, so the donor's mono shelf lists it in
+    /// the donor's place; the donor stays wherever a variant of it is still
+    /// numbered, which for the fuzz it took is the Stereo shelf.
+    fn list_nam_lite(&mut self, donor: &str) {
+        if let Some(symbol) = self.symbols.get_mut(NAM_LITE_ID as usize) {
+            symbol.model = Some(NAM_LITE_CATALOG_ID.into());
+        }
+        let donor_remains = self
+            .symbols
+            .iter()
+            .any(|s| s.model.as_deref() == Some(donor));
+        for category in self.categories.iter_mut().filter(|c| !c.paired) {
+            let Some(at) = category.models.iter().position(|id| id == donor) else {
+                continue;
+            };
+            if donor_remains {
+                category.models.insert(at, NAM_LITE_CATALOG_ID.into());
+            } else {
+                category.models[at] = NAM_LITE_CATALOG_ID.into();
+            }
+            for shelf in &mut category.subcategories {
+                let Some(at) = shelf.models.iter().position(|id| id == donor) else {
+                    continue;
+                };
+                // The donor's stereo variant keeps its own shelf.
+                if shelf.name == "Stereo" && donor_remains {
+                    continue;
+                }
+                shelf.models[at] = NAM_LITE_CATALOG_ID.into();
+            }
         }
     }
 
@@ -870,6 +910,36 @@ pub(crate) mod tests {
             catalog.model("HD2_DistXenomorphFuzz").map(|m| &m.name),
             Some(&stock)
         );
+
+        // It is listed where the fuzz whose number it took was, so a browser
+        // offers it by its own name, and the fuzz keeps its stereo shelf.
+        let home = catalog.category_of(NAM_LITE_CATALOG_ID);
+        assert_eq!(home, catalog.category_of("HD2_DistXenomorphFuzz"));
+        let shelf = |name: &str| {
+            catalog
+                .category(home.unwrap())
+                .unwrap()
+                .subcategories
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap()
+                .models
+                .clone()
+        };
+        assert!(shelf("Mono").contains(&NAM_LITE_CATALOG_ID.to_owned()));
+        assert!(!shelf("Mono").contains(&"HD2_DistXenomorphFuzz".to_owned()));
+        assert!(shelf("Stereo").contains(&"HD2_DistXenomorphFuzz".to_owned()));
+        assert!(!shelf("Stereo").contains(&NAM_LITE_CATALOG_ID.to_owned()));
+        let numbers = |id: &str| -> Vec<u32> {
+            catalog
+                .symbols()
+                .iter()
+                .filter(|s| s.model.as_deref() == Some(id))
+                .map(|s| s.number)
+                .collect()
+        };
+        assert_eq!(numbers(NAM_LITE_CATALOG_ID), [NAM_LITE_ID]);
+        assert_eq!(numbers("HD2_DistXenomorphFuzz"), [NAM_LITE_ID + 1]);
     }
 
     #[test]
