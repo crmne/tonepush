@@ -1889,6 +1889,16 @@ mod pedal_tests {
         assert_eq!(session.events_skipped(), 21);
     }
 
+    #[test]
+    fn a_session_says_whether_the_events_channel_answered() {
+        let pedal = Pedal::new();
+        assert!(fake::session(&pedal).events_answered());
+
+        let deaf = Pedal::new();
+        deaf.lock().unwrap().deaf_events = true;
+        assert!(!fake::session(&deaf).events_answered());
+    }
+
     const SAMPLES: [f32; 4] = [0.5, -0.25, 0.125, 0.0];
 
     fn sum_of(samples: &[f32]) -> u64 {

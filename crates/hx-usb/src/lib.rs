@@ -198,6 +198,8 @@ struct Channel {
     /// Events channel only: what the device sends passes through this before
     /// `reader`, which cannot recover from a frame sent out of order.
     realign: Realign,
+    /// Whether the device answered this channel's handshake.
+    answered: bool,
     txn: i64,
 }
 
@@ -214,6 +216,7 @@ impl Channel {
             acked: 0,
             reader: StreamReader::new(),
             realign: Realign::default(),
+            answered: false,
             txn: rpc::FIRST_TXN,
         }
     }
@@ -657,6 +660,9 @@ impl Session {
         let Some(ch) = self.channels.get_mut(&f.src) else {
             return;
         };
+        if hdr.msg_type == MSG_HELLO {
+            ch.answered = true;
+        }
         if hdr.has_data() && !rest.is_empty() {
             ch.rx_bytes = ch.rx_bytes.wrapping_add(rest.len() as u32);
             if f.src == ChannelId::EVENTS.device {
@@ -672,6 +678,19 @@ impl Session {
                 ch.reader.push(rest);
             }
         }
+    }
+
+    /// Whether the events channel answered its handshake. When it did not,
+    /// the session works but no notification ever arrives on it. Seen on an
+    /// HX Effects (3.80) when a session opens while the device is still
+    /// streaming notifications to the previous one, which it does for up to
+    /// half a minute after that session ends (PROTOCOL.md, "An events
+    /// handshake can go unanswered"). Nothing is retried here: whether to
+    /// open again, once the device has gone quiet, is the caller's decision.
+    pub fn events_answered(&self) -> bool {
+        self.channels
+            .get(&ChannelId::EVENTS.device)
+            .is_some_and(|c| c.answered)
     }
 
     /// Bytes stepped over on the events channel to get back onto a message

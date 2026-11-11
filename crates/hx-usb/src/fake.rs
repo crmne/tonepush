@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use hx_proto::frame::{ChannelHeader, MSG_ACK, MSG_DATA, MSG_HELLO};
+use hx_proto::frame::{ChannelHeader, FLAG_HANDSHAKE, MSG_ACK, MSG_DATA, MSG_HELLO};
 use hx_proto::msgpack::{Encoder, Value};
 use hx_proto::rpc::{key, op, Message, StreamReader};
 use hx_proto::{ChannelId, Frame};
@@ -61,6 +61,10 @@ pub struct Pedal {
     /// frame for almost every notification it receives (PROTOCOL.md). This
     /// models that: only ACK and data frames move the window.
     pub events_window: Option<u32>,
+    /// Leave the events channel's handshake unanswered, as an HX Effects did
+    /// when a session opened while it was still streaming to the previous
+    /// one (PROTOCOL.md).
+    pub deaf_events: bool,
     /// Data bytes sent on the events channel, after the channel header.
     events_sent: u32,
     /// What the host has acknowledged of them through ACK or data frames.
@@ -89,6 +93,7 @@ impl Pedal {
             transfers_in: 0,
             hellos: Vec::new(),
             events_window: None,
+            deaf_events: false,
             events_sent: 0,
             events_acked: 0,
             events_held: VecDeque::new(),
@@ -148,6 +153,12 @@ impl Pedal {
         };
         if header.msg_type == MSG_HELLO && rest.is_empty() {
             self.hellos.push(frame.dst);
+        }
+        if frame.flags == FLAG_HANDSHAKE && header.msg_type == MSG_HELLO {
+            if !(self.deaf_events && frame.dst == ChannelId::EVENTS.device) {
+                self.answer_hello(frame.dst);
+            }
+            return;
         }
         if frame.dst == ChannelId::EVENTS.device
             && (header.msg_type & MSG_ACK != 0 || header.has_data())
@@ -312,6 +323,22 @@ impl Pedal {
         self.outbox.push_back(frame);
     }
 
+    /// Answer a channel handshake the way the device does: sequence 0, type
+    /// hello, the capability bytes it sends back.
+    fn answer_hello(&mut self, node: u16) {
+        let mut payload = Vec::new();
+        ChannelHeader {
+            seq: 0,
+            msg_type: MSG_HELLO,
+            ack: 0x0100_0100,
+        }
+        .encode_into(&mut payload);
+        payload.extend_from_slice(&[0x00, 0x02, 0x00, 0x00]);
+        let mut frame = Frame::new(host_of(node), node, payload);
+        frame.flags = FLAG_HANDSHAKE;
+        self.outbox.push_back(frame.encode().unwrap());
+    }
+
     /// Queue one message for the host, on the channel `node` names.
     fn reply(&mut self, node: u16, message: &Message) {
         let body = Encoder::encode(&message.to_value());
@@ -328,11 +355,7 @@ impl Pedal {
         payload.extend_from_slice(&0u16.to_le_bytes());
         payload.extend_from_slice(&(body.len() as u32).to_le_bytes());
         payload.extend_from_slice(&body);
-        let host = ChannelId::ALL
-            .iter()
-            .find(|channel| channel.device == node)
-            .map_or(0, |channel| channel.host);
-        let frame = Frame::new(host, node, payload).encode().unwrap();
+        let frame = Frame::new(host_of(node), node, payload).encode().unwrap();
         if node != ChannelId::EVENTS.device {
             self.outbox.push_back(frame);
         } else if self.events_held.is_empty() && self.events_fit(&frame) {
@@ -341,6 +364,14 @@ impl Pedal {
             self.events_held.push_back(frame);
         }
     }
+}
+
+/// The host node that talks to device node `node`.
+fn host_of(node: u16) -> u16 {
+    ChannelId::ALL
+        .iter()
+        .find(|channel| channel.device == node)
+        .map_or(0, |channel| channel.host)
 }
 
 /// The USB cable, as far as the session can tell.

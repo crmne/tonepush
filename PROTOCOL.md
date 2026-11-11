@@ -171,6 +171,20 @@ bytes. The body check is needed: stepping through a parameter notification,
 the bytes `ca 00 00 00 00` (a float 0.0) and the key after them pass as a
 header for service 0 with a small length.
 
+**An events handshake can go unanswered. [confirmed on an HX Effects, cause
+inferred]** A session opened within a few seconds of another one ending, or of
+the pedal powering up, can get no reply to its HELLO on `0x1002`. The other
+channels answer and requests work, but no notification arrives for the whole
+session. On an HX Effects (3.80) every open 0 to 4 s after a session ended was
+like that, and every open 15 s or more after was not. A likely cause: the
+device keeps sending notifications to a session that has ended until 4 KB are
+unacknowledged, 15 to 30 s of ticks, and ignores a handshake meanwhile.
+`crates/hx-usb/tests/fixtures/session.transcript` records such a session: 42
+stale events frames before the handshake, the control and data HELLOs
+answered, the events one not, and no events frame afterwards.
+`Session::events_answered` reports it. Nothing is retried: when to open again
+is the caller's decision.
+
 **Idle channels need keep-alives during long reads. [confirmed]** A Helix Floor
 (3.80) probes a channel that has carried no traffic with keep-alive frames
 (type 0x10) at growing intervals. After four that the host leaves unanswered, it
