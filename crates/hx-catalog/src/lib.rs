@@ -34,6 +34,10 @@ pub use write::{to_hlx, to_hlx_for_device, Written};
 pub const NAM_LITE_ID: u32 = 555;
 pub const NAM_LITE_MODEL_PARAM: usize = 6;
 const NAM_LITE_CATALOG_ID: &str = "TonePush_NAMA2Lite";
+/// What a NAM A2 Lite block costs, in HX Edit's units: the `--dsp-cost 2275`
+/// its firmware build declares, where the model whose number it takes lists
+/// 10.0. Measured on an HX Stomp, as PROTOCOL.md describes.
+const NAM_LITE_LOAD: f32 = 22.75;
 
 /// The mod stores a one-based IR slot as a float and truncates it on playback.
 pub fn nam_lite_slot(values: &[f32]) -> Option<i64> {
@@ -336,6 +340,10 @@ impl Catalog {
         model.name = "NAM A2 Lite".into();
         model.stereo = false;
         model.image = None;
+        model.loads = Loads {
+            mono: Some(NAM_LITE_LOAD),
+            ..Loads::default()
+        };
         model.params = symbol
             .parameters
             .iter()
@@ -395,6 +403,9 @@ impl Catalog {
     /// mono one (3.93) fit. The IR blocks cost their `load_320`. Both
     /// measured on a Floor at firmware 3.80, as PROTOCOL.md describes.
     pub fn cost(&self, number: u32) -> Option<f32> {
+        if self.is_nam_lite(number) {
+            return self.model(NAM_LITE_CATALOG_ID)?.loads.mono;
+        }
         let symbol = self.symbol(number)?;
         let model = self.models.get(symbol.model.as_deref()?)?;
         let loads = model.loads;
@@ -827,12 +838,16 @@ pub(crate) mod tests {
     fn nam_overlay_uses_float_slots_and_preserves_the_stock_catalog() {
         let Some(mut catalog) = catalog() else { return };
         assert!(!catalog.is_nam_lite(NAM_LITE_ID));
+        assert_eq!(catalog.cost(NAM_LITE_ID), Some(10.0));
         let stock = catalog.model_number(NAM_LITE_ID).unwrap().name.clone();
         catalog.enable_nam_lite();
         assert_eq!(
             catalog.model_number(NAM_LITE_ID).unwrap().name,
             "NAM A2 Lite"
         );
+        // The block costs what its firmware declares, not what the model
+        // whose number it took did.
+        assert_eq!(catalog.cost(NAM_LITE_ID), Some(22.75));
         let param = catalog.param(NAM_LITE_ID, NAM_LITE_MODEL_PARAM).unwrap();
         assert_eq!(param.name, "Model");
         assert_eq!(catalog.format(param, 100.0), "100");

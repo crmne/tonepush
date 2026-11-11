@@ -1137,6 +1137,13 @@ refused:
 The HX Stomp's budget has not been measured. Helix LT and Rack are likely the
 same as the Floor, but neither has been tried.
 
+On the NAM Lite firmware (nocaseguy/hx-stomp-nam-lite), the NAM A2 Lite block
+that takes Xenomorph Fuzz Mono's number 555 costs **22.75**, not the 10.0
+listed for the model it replaced. That is the `--dsp-cost 2275` its build
+declares, and it measured the same on an HX Stomp, whose one path took stock
+blocks listed at 75.00 and refused 75.01: beside the NAM block, 50.50 of
+drives took 1.75 more, and 50.46 refused 1.80.
+
 One refusal wedged the Floor: a whole-document write sent straight after a
 `-306` left it on "writing, please wait" until a power cycle. Waiting about
 five seconds and reading the preset back first was safe every time.
