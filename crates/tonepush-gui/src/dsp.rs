@@ -294,6 +294,26 @@ mod tests {
         assert_eq!(cost(Some(false)), hundredths(10.0));
         assert_eq!(cost(Some(true)), hundredths(12.5));
 
+        // Changing one variant for the other carries every setting across,
+        // each to the control of the same name.
+        let (_, mono) = symbol_of("HD2_ReverbPlateaux", Some(false));
+        let (_, stereo) = symbol_of("HD2_ReverbPlateaux", Some(true));
+        let controls = catalog.symbol(mono).unwrap().parameters.len();
+        let values: Vec<f32> = (0..controls).map(|i| i as f32 / 10.0).collect();
+        let carried = crate::carried_settings(catalog, mono, stereo, &values);
+        assert_eq!(carried.len(), controls);
+        for (index, value, _) in &carried {
+            let name = &catalog.symbol(stereo).unwrap().parameters[*index as usize];
+            let from = catalog
+                .symbol(mono)
+                .unwrap()
+                .parameters
+                .iter()
+                .position(|other| other == name)
+                .unwrap();
+            assert_eq!(*value, values[from]);
+        }
+
         // A model that comes one way has one number, whatever is asked.
         let gain = app.chain[1].model;
         let id = catalog.model_number(gain).unwrap().id.clone();

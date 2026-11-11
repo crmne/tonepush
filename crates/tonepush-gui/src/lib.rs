@@ -7346,6 +7346,31 @@ fn number_of_width(catalog: &hx_catalog::Catalog, id: &str, stereo: Option<bool>
         .or_else(|| number_of(catalog, id))
 }
 
+/// A block's settings, as the model numbered `to` takes them.
+///
+/// The two variants of a model list the same controls, but the firmware
+/// numbers each list by itself, so a value is carried by its control's name
+/// and one the other variant has no control for is left behind.
+fn carried_settings(
+    catalog: &hx_catalog::Catalog,
+    from: u32,
+    to: u32,
+    values: &[f32],
+) -> Vec<(i64, f32, hx_catalog::Kind)> {
+    let (Some(old), Some(new)) = (catalog.symbol(from), catalog.symbol(to)) else {
+        return Vec::new();
+    };
+    old.parameters
+        .iter()
+        .zip(values)
+        .filter_map(|(name, value)| {
+            let index = new.parameters.iter().position(|other| other == name)?;
+            let kind = catalog.param(to, index)?.kind;
+            Some((i64::try_from(index).ok()?, *value, kind))
+        })
+        .collect()
+}
+
 /// Whether a number is a model's stereo variant, or its mono one. `None`
 /// for a model that comes only one way.
 fn stereo_variant(catalog: &hx_catalog::Catalog, number: u32) -> Option<bool> {
@@ -8496,7 +8521,8 @@ mod tests {
             Ok(Cmd::TryModel {
                 block: 1,
                 model: 7,
-                paired: None
+                paired: None,
+                ..
             })
         ));
         assert!(app.dirty);
