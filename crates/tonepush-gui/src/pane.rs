@@ -72,6 +72,12 @@ pub(crate) const CELL_TEXT: f32 = 3.0 + 17.0 + 15.0 + 4.0 + 18.0;
 pub(crate) const ROW_GAP: f32 = 8.0;
 /// The rule and the cab's name between an amp's controls and its cab's.
 const GROUP_GAP: f32 = 30.0;
+/// What an impulse response slot with nothing in it is listed as.
+const NO_IR: &str = "---";
+/// A menu control's list is never narrower than a menu, and stops growing
+/// before a long name makes it wider than the pane it opens over.
+const MENU_MIN_WIDTH: f32 = 220.0;
+const MENU_MAX_WIDTH: f32 = 360.0;
 
 /// The knob sizes a face tries at each size of window, largest first.
 pub(crate) fn knob_sizes(tier: Tier) -> &'static [f32] {
@@ -303,6 +309,29 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Every impulse response slot as a menu row, numbered from one as the
+    /// pedal's own screen numbers them: "007: Vintage 30", and dashes for a
+    /// slot with nothing in it.
+    fn ir_choices(&self) -> Vec<String> {
+        let mut names = vec![NO_IR; session::IR_SLOTS as usize];
+        for (slot, name) in &self.irs {
+            let name = name.trim();
+            if let Some(held) = usize::try_from(*slot)
+                .ok()
+                .and_then(|slot| names.get_mut(slot))
+            {
+                if !name.is_empty() {
+                    *held = name;
+                }
+            }
+        }
+        names
+            .iter()
+            .enumerate()
+            .map(|(slot, name)| format!("{:03}: {name}", slot + 1))
+            .collect()
+    }
+
     /// The face's groups: the model's controls and, on an Amp+Cab, the cab's.
     fn face_groups(&self, block: &session::Block) -> Vec<Group> {
         let Some(catalog) = self.catalog.as_ref() else {
@@ -333,34 +362,22 @@ impl App {
                             Target::Param(index as i64),
                             param.name.clone(),
                         );
-                        let is_ir = param.display.as_deref() == Some("ir_select");
-                        let (reading, choices) = if is_ir {
-                            let slot = (*value).round() as i64;
-                            let ir_name = |s: i64| {
-                                self.irs
-                                    .iter()
-                                    .find(|(index, _)| *index == s)
-                                    .map(|(_, name)| name.trim().to_owned())
-                                    .filter(|name| !name.is_empty())
+                        let (reading, choices) =
+                            if param.display.as_deref() == Some(crate::IR_SELECT) {
+                                let choices = self.ir_choices();
+                                let slot = value.round() as i64;
+                                let reading = usize::try_from(slot)
+                                    .ok()
+                                    .and_then(|slot| choices.get(slot))
+                                    .map(|choice| choice.trim_start_matches('0').to_owned())
+                                    .unwrap_or_else(|| format!("{}: {NO_IR}", slot + 1));
+                                (reading, Some(choices))
+                            } else {
+                                (
+                                    catalog.format(&param, *value),
+                                    catalog.choices(&param).map(<[String]>::to_vec),
+                                )
                             };
-                            let num = slot + 1;
-                            let reading = match ir_name(slot) {
-                                Some(name) => format!("{num}: {name}"),
-                                None => format!("{num}: ---"),
-                            };
-                            let choices: Vec<String> = (0..session::IR_SLOTS)
-                                .map(|s| match ir_name(s) {
-                                    Some(name) => format!("{:03}: {name}", s + 1),
-                                    None => format!("{:03}: ---", s + 1),
-                                })
-                                .collect();
-                            (reading, Some(choices))
-                        } else {
-                            (
-                                catalog.format(&param, *value),
-                                catalog.choices(&param).map(<[String]>::to_vec),
-                            )
-                        };
                         Some(Control {
                             index,
                             reading,
@@ -782,12 +799,6 @@ fn control_cell(
                 .max_width(width)
                 .show(&mut child)
                 .on_hover_text(tooltip);
-            let menu_width = choices
-                .iter()
-                .map(|s| s.len())
-                .max()
-                .map(|len| (len as f32 * 7.5 + 44.0).clamp(220.0, 360.0))
-                .unwrap_or(220.0);
             // Its own id: the button's default one is the right-click
             // assignment menu's too, which closes on a click and so shut the
             // list in the frame it opened.
@@ -795,7 +806,13 @@ fn control_cell(
                 .id(button.id.with("choices"))
                 .gap(4.0)
                 .show(|ui| {
-                    theme::menu_width(ui, menu_width);
+                    // As wide as its longest row, measured as drawn: an IR
+                    // name is far longer than "4:1".
+                    let widest = choices
+                        .iter()
+                        .map(|label| theme::menu_row_width(ui, label))
+                        .fold(MENU_MIN_WIDTH, f32::max);
+                    theme::menu_width(ui, widest.min(MENU_MAX_WIDTH));
                     egui::ScrollArea::vertical()
                         .max_height(320.0)
                         .show(ui, |ui| {
@@ -4067,6 +4084,33 @@ mod tests {
     /// click and takes the choice picked there. The right-click assignment
     /// menu on the same button used to close the list in the frame it
     /// opened, so nothing could be picked.
+    /// The catalog lists an IR control's choices as 128 dashes. The names are
+    /// the pedal's, in slots it counts from zero and shows from one.
+    #[test]
+    fn an_ir_control_lists_the_pedals_own_names_by_slot() {
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let (_evt_tx, evt_rx) = std::sync::mpsc::channel();
+        let mut app = App::new(&egui::Context::default(), cmd_tx, evt_rx);
+        // Out of order, padded, one blank and one past the last slot, as a
+        // pedal's list may be.
+        app.irs = vec![
+            (6, " Vintage 30 ".into()),
+            (0, "Bright Room".into()),
+            (2, "   ".into()),
+            (session::IR_SLOTS, "No such slot".into()),
+        ];
+        let choices = app.ir_choices();
+        assert_eq!(choices.len(), session::IR_SLOTS as usize);
+        assert_eq!(choices[0], "001: Bright Room");
+        assert_eq!(choices[1], "002: ---");
+        assert_eq!(choices[2], "003: ---");
+        assert_eq!(choices[6], "007: Vintage 30");
+        assert_eq!(choices[127], "128: ---");
+        assert_eq!(app.ir_name(6), Some("Vintage 30"));
+        assert_eq!(app.ir_name(2), None);
+        assert_eq!(app.ir_name(1), None);
+    }
+
     #[test]
     fn a_menu_control_opens_its_list_and_takes_the_choice() {
         use egui_kittest::Harness;

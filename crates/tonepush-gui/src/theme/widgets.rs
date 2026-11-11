@@ -14,6 +14,20 @@ fn layout(ui: &Ui, text: &str, font: egui::FontId, colour: Color32) -> Arc<Galle
     ui.painter().layout_no_wrap(text.to_owned(), font, colour)
 }
 
+/// One line of text that fits `width`, ending in an ellipsis where it had to
+/// be cut. egui does the cutting, in the one layout it would run anyway.
+fn layout_within(
+    ui: &Ui,
+    text: &str,
+    font: egui::FontId,
+    colour: Color32,
+    width: f32,
+) -> Arc<Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, colour);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width);
+    ui.painter().layout_job(job)
+}
+
 fn centred_galley(ui: &Ui, galley: Arc<Galley>, left: f32, centre_y: f32) {
     let pos = Pos2::new(left, centre_y - galley.size().y / 2.0);
     ui.painter().galley(pos, galley, Color32::PLACEHOLDER);
@@ -106,6 +120,9 @@ pub struct Button<'a> {
     max_width: Option<f32>,
 }
 
+/// The chevron or arrow after a button's label.
+const TRAILING_ICON: f32 = 12.0;
+
 impl<'a> Button<'a> {
     pub fn new(label: &'a str) -> Self {
         Self {
@@ -174,6 +191,8 @@ impl<'a> Button<'a> {
         self
     }
 
+    /// The widest the button may grow. A label that does not fit is cut
+    /// short with an ellipsis instead of pushing the button past this.
     pub fn max_width(mut self, width: f32) -> Self {
         self.max_width = Some(width);
         self
@@ -212,30 +231,24 @@ impl<'a> Button<'a> {
         let hint_galley = hint.map(|hint| layout(ui, hint, medium(11.0), alpha(ink, 0.7)));
         let text_galley = (!label.is_empty()).then(|| {
             let font = font(size.font(), weight);
-            let mut galley = layout(ui, label, font.clone(), ink);
-            if let Some(max) = max_width {
-                let non_text = size.padding() * 2.0
-                    + if icon.is_some() { icon_size + gap } else { 0.0 }
-                    + if hint.is_some() {
-                        hint_galley.as_ref().map_or(0.0, |g| g.size().x + gap)
-                    } else {
-                        0.0
+            match max_width {
+                // Everything but the label keeps its size, so the label is
+                // what gives way.
+                Some(max) => {
+                    let mut rest = size.padding() * 2.0;
+                    if icon.is_some() {
+                        rest += icon_size + gap;
                     }
-                    + if trailing.is_some() { 12.0 + gap } else { 0.0 };
-                let text_max = (max - non_text).max(10.0);
-                if galley.size().x > text_max {
-                    let chars: Vec<char> = label.chars().collect();
-                    for len in (1..chars.len()).rev() {
-                        let candidate: String = chars[..len].iter().collect::<String>() + "…";
-                        let g = layout(ui, &candidate, font.clone(), ink);
-                        if g.size().x <= text_max || len == 1 {
-                            galley = g;
-                            break;
-                        }
+                    if let Some(hint) = &hint_galley {
+                        rest += hint.size().x + gap;
                     }
+                    if trailing.is_some() {
+                        rest += TRAILING_ICON + gap;
+                    }
+                    layout_within(ui, label, font, ink, (max - rest).max(0.0))
                 }
+                None => layout(ui, label, font, ink),
             }
-            galley
         });
         let mut width = size.padding() * 2.0;
         let mut parts = 0;
@@ -252,7 +265,7 @@ impl<'a> Button<'a> {
             parts += 1;
         }
         if trailing.is_some() {
-            width += 12.0;
+            width += TRAILING_ICON;
             parts += 1;
         }
         width += gap * (parts.max(1) - 1) as f32;
@@ -273,15 +286,11 @@ impl<'a> Button<'a> {
         if !ui.is_rect_visible(rect) {
             return response;
         }
-        let painter = if max_width.is_some() {
-            ui.painter().with_clip_rect(rect)
-        } else {
-            ui.painter().clone()
-        };
+        let painter = ui.painter();
         let hovered = enabled && response.hovered();
         let pressed = enabled && response.is_pointer_button_down_on();
         match (tone, enabled) {
-            (Tone::Primary, true) => paint_primary(&painter, rect, hovered, pressed),
+            (Tone::Primary, true) => paint_primary(painter, rect, hovered, pressed),
             (Tone::Primary, false) => {
                 painter.rect(
                     rect,
@@ -1659,6 +1668,16 @@ pub fn menu_width(ui: &mut Ui, width: f32) {
     ui.spacing_mut().item_spacing.y = 0.0;
 }
 
+/// The width a menu needs for its rows to show `label` whole: the row's
+/// inset, the icon column, the text and the inset again.
+pub fn menu_row_width(ui: &Ui, label: &str) -> f32 {
+    MENU_INSET + MENU_ICON_COLUMN + layout(ui, label, regular(BODY), text()).size().x + MENU_INSET
+}
+
+const MENU_INSET: f32 = 10.0;
+/// The icon and the gap after it, kept clear whether or not a row has one.
+const MENU_ICON_COLUMN: f32 = 15.0 + 10.0;
+
 /// A menu's header: what it acts on, and a quieter aside.
 pub fn menu_header(ui: &mut Ui, title: &str, aside: Option<&str>) {
     ui.horizontal(|ui| {
@@ -1717,11 +1736,11 @@ fn menu_row(
         } else {
             (text(), text_soft())
         };
-        let mut x = rect.left() + 10.0;
+        let mut x = rect.left() + MENU_INSET;
         if let Some(icon) = icon {
             paint_icon(ui, icon, Pos2::new(x + 7.5, rect.center().y), 15.0, glyph);
         }
-        x += 15.0 + 10.0;
+        x += MENU_ICON_COLUMN;
         let galley = layout(ui, text_, regular(BODY), ink);
         centred_galley(ui, galley, x, rect.center().y);
         if let Some(hint) = hint {
@@ -2320,28 +2339,48 @@ pub fn paint_footswitch(
 mod tests {
     use super::knob_drag_delta;
 
+    /// A menu button sits in a column beside other controls, so a long name
+    /// has to shorten rather than widen the button over its neighbours.
     #[test]
-    fn button_with_max_width_does_not_exceed_limit() {
+    fn a_button_with_a_width_limit_shortens_its_label_to_fit() {
         use egui_kittest::Harness;
+        let long = "Very Long Impulse Response Name That Exceeds Width";
+        let mut checked = false;
         let mut harness = Harness::builder()
-            .with_size(egui::vec2(200.0, 100.0))
+            .with_size(egui::vec2(400.0, 100.0))
             .build_ui(|ui| {
+                // The editor's type is bound from the pass after it is
+                // installed.
                 if ui.ctx().cumulative_pass_nr() == 0 {
                     super::super::install(ui.ctx(), super::super::Appearance::Dark);
                     return;
                 }
-                let response =
-                    super::Button::new("Very Long Impulse Response Name That Exceeds Width")
+                let button = |label: &'static str| {
+                    super::Button::new(label)
                         .small()
-                        .max_width(64.0)
-                        .show(ui);
-                assert!(
-                    response.rect.width() <= 64.0,
-                    "width {} exceeds max_width 64.0",
-                    response.rect.width()
-                );
+                        .trailing(super::Icon::ChevronDown)
+                };
+                let limited = button(long).min_width(64.0).max_width(64.0).show(ui);
+                assert_eq!(limited.rect.width(), 64.0);
+                // Without a limit the same label takes the room it wants, and
+                // a label that fits is left alone by one.
+                assert!(button(long).show(ui).rect.width() > 64.0);
+                let short = button("4:1").show(ui).rect.width();
+                assert_eq!(button("4:1").max_width(200.0).show(ui).rect.width(), short);
+
+                let font = super::medium(12.0);
+                let cut = super::layout_within(ui, long, font.clone(), super::text(), 40.0);
+                assert!(cut.elided && cut.size().x <= 40.0 && cut.rows.len() == 1);
+                let last = cut.rows[0].glyphs.last().map(|glyph| glyph.chr);
+                assert_eq!(last, Some('\u{2026}'));
+                let whole = super::layout_within(ui, "4:1", font, super::text(), 40.0);
+                assert!(!whole.elided);
+                assert_eq!(whole.rows[0].glyphs.len(), 3);
+                checked = true;
             });
         harness.run_steps(2);
+        drop(harness);
+        assert!(checked, "the second pass never ran");
     }
 
     #[test]

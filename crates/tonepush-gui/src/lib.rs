@@ -1138,6 +1138,10 @@ enum Connection {
     Online,
 }
 
+/// The catalog's display key for a control that picks an impulse response
+/// slot. Its own choices are 128 dashes: the names live on the pedal.
+const IR_SELECT: &str = "ir_select";
+
 impl App {
     /// Which protocol adapter currently owns the editor surface.
     fn pro_active(&self) -> bool {
@@ -2004,26 +2008,45 @@ impl App {
             .unwrap_or_else(|| format!("model {model}"))
     }
 
+    /// The name of the impulse response the pedal holds in `slot`, counted
+    /// from zero as the pedal and an IR block's own control count them.
+    fn ir_name(&self, slot: i64) -> Option<&str> {
+        self.irs
+            .iter()
+            .find(|(held, _)| *held == slot)
+            .map(|(_, name)| name.trim())
+            .filter(|name| !name.is_empty())
+    }
+
+    /// The slot an impulse response block plays from, or `None` for any other
+    /// block. The catalog says which of its controls picks the slot, so this
+    /// does not lean on that control coming first.
+    fn ir_slot(&self, block: &session::Block) -> Option<i64> {
+        let catalog = self.catalog.as_ref()?;
+        if !catalog
+            .symbol(block.model)?
+            .symbol
+            .starts_with("HD2_ImpulseResponse")
+        {
+            return None;
+        }
+        let model = catalog.model_number(block.model)?;
+        let control = catalog
+            .ordered_params(model)
+            .iter()
+            .position(|param| param.display.as_deref() == Some(IR_SELECT))?;
+        block.values.get(control).map(|value| value.round() as i64)
+    }
+
     /// What to call a slot. Inputs and outputs have no model to name; splits
     /// and joins do - "Split Y", "Mixer" - and the real name says much more
     /// than the slot kind.
     fn slot_label(&self, block: &session::Block) -> String {
         use hx_proto::preset::Kind;
-        if let Some(catalog) = self.catalog.as_ref() {
-            if catalog
-                .symbol(block.model)
-                .is_some_and(|s| s.symbol.starts_with("HD2_ImpulseResponse"))
-            {
-                if let Some(&val) = block.values.first() {
-                    let slot = val.round() as i64;
-                    if let Some((_, name)) = self.irs.iter().find(|(s, _)| *s == slot) {
-                        let trimmed = name.trim();
-                        if !trimmed.is_empty() {
-                            return trimmed.to_owned();
-                        }
-                    }
-                }
-            }
+        // An IR block is the file it plays: "IR 1024" says nothing a tile
+        // full of them can be told apart by.
+        if let Some(name) = self.ir_slot(block).and_then(|slot| self.ir_name(slot)) {
+            return name.to_owned();
         }
         let named = |fallback: &str| {
             let name = self.model_name(block.model);
