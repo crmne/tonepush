@@ -100,6 +100,19 @@ pub struct Switch {
     pub colour: Option<i64>,
     /// What it controls. Usually one thing, sometimes several.
     pub carries: Vec<Carried>,
+    /// What it does to the preset as a whole, such as recalling a snapshot,
+    /// when it does. It acts on no block, so it is not among `carries`.
+    pub action: Option<PresetAction>,
+}
+
+/// Something a footswitch does to the preset rather than to a block.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresetAction {
+    /// What the device calls it: "Snapshot".
+    pub name: Option<String>,
+    /// The colour the device gives it, `0xRRGGBB`, which an Auto Color
+    /// switch that controls nothing else lights in.
+    pub colour: Option<i64>,
 }
 
 impl Switch {
@@ -109,13 +122,18 @@ impl Switch {
         if let Some(label) = self.label.as_deref() {
             return Some(label);
         }
-        self.carries.first().map(|c| c.name.as_str())
+        self.carries
+            .first()
+            .map(|c| c.name.as_str())
+            .or_else(|| self.action.as_ref()?.name.as_deref())
     }
 
-    /// The colour to light it: the one chosen, or the one its block wears.
+    /// The colour to light it: the one chosen, or the one its block wears,
+    /// or the one its preset action has.
     pub fn lit(&self) -> Option<i64> {
         self.colour
             .or_else(|| self.carries.first().and_then(|c| c.colour))
+            .or_else(|| self.action.as_ref()?.colour)
     }
 }
 
@@ -150,6 +168,22 @@ fn is_preset_action(item: &Value) -> bool {
     };
     kind == Some(rpc::SWITCH_KIND_PRESET_ACTION)
         && matches!(target.get(rpc::key::BLOCK), None | Some(Value::Nil))
+}
+
+/// A preset action's own name and colour, kept apart from the blocks.
+fn preset_action(item: &Value, position: usize) -> Result<PresetAction> {
+    let invalid = |field: &str| {
+        Error::Protocol(format!(
+            "footswitch preset action {position} has no valid {field}"
+        ))
+    };
+    let name = item
+        .get(rpc::key::SWITCH_TARGET)
+        .map_or(Some(None), |target| optional_string(target, rpc::key::NAME))
+        .ok_or_else(|| invalid("name"))?;
+    let colour = optional_non_negative_integer(item, rpc::key::LED_COLOUR)
+        .ok_or_else(|| invalid("colour"))?;
+    Ok(PresetAction { name, colour })
 }
 
 /// One entry of a switch's assignment list.
@@ -220,14 +254,23 @@ fn decode_switch(switch: u8, reply: &Value) -> Result<Switch> {
         .ok_or_else(|| Error::Protocol("footswitch reply has an invalid label".into()))?;
     let colour = optional_non_negative_integer(reply, rpc::key::LED_COLOUR)
         .ok_or_else(|| Error::Protocol("footswitch reply has an invalid colour".into()))?;
-    let carries = match reply.get(rpc::key::SWITCH_ASSIGNED) {
-        None | Some(Value::Nil) => Vec::new(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| !is_preset_action(item))
-            .map(|(position, item)| carried(item, position))
-            .collect::<Result<_>>()?,
+    let (carries, action) = match reply.get(rpc::key::SWITCH_ASSIGNED) {
+        None | Some(Value::Nil) => (Vec::new(), None),
+        Some(Value::Array(items)) => {
+            let carries = items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| !is_preset_action(item))
+                .map(|(position, item)| carried(item, position))
+                .collect::<Result<_>>()?;
+            let action = items
+                .iter()
+                .enumerate()
+                .find(|(_, item)| is_preset_action(item))
+                .map(|(position, item)| preset_action(item, position))
+                .transpose()?;
+            (carries, action)
+        }
         Some(_) => {
             return Err(Error::Protocol(
                 "footswitch reply has an invalid assignment list".into(),
@@ -240,6 +283,7 @@ fn decode_switch(switch: u8, reply: &Value) -> Result<Switch> {
         label,
         colour,
         carries,
+        action,
     })
 }
 
@@ -1767,6 +1811,7 @@ mod validation_tests {
                 label: None,
                 colour: None,
                 carries: Vec::new(),
+                action: None,
             }
         );
 
@@ -1842,6 +1887,17 @@ mod validation_tests {
         let alone = decode_switch(5, &reply(vec![snapshot.clone()])).unwrap();
         assert!(alone.momentary);
         assert!(alone.carries.is_empty());
+        // It is still a switch with a name and a colour of its own: the
+        // action's, where no label was typed and no colour chosen.
+        assert_eq!(
+            alone.action,
+            Some(PresetAction {
+                name: Some("Snapshot".into()),
+                colour: Some(462_860),
+            })
+        );
+        assert_eq!(alone.describes(), Some("Snapshot"));
+        assert_eq!(alone.lit(), Some(462_860));
 
         let mixed = reply(vec![
             snapshot,
@@ -1854,8 +1910,9 @@ mod validation_tests {
                 },
             },
         ]);
+        let mixed = decode_switch(5, &mixed).unwrap();
         assert_eq!(
-            decode_switch(5, &mixed).unwrap().carries,
+            mixed.carries,
             vec![Carried {
                 block: 4,
                 name: "Drive".into(),
@@ -1863,6 +1920,10 @@ mod validation_tests {
                 enabled: true,
             }],
         );
+        // A block it also carries names it first; the action's colour still
+        // lights it where the block has none.
+        assert_eq!(mixed.describes(), Some("Drive"));
+        assert_eq!(mixed.lit(), Some(462_860));
     }
 
     #[test]
