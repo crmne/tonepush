@@ -166,9 +166,9 @@ Effects' only so far), `hx-usb` passes this one channel through `realign`. The
 other devices read it as before. `realign` hands on only whole messages that
 start `00 00 04 00` (or service 0, as one captured service-open
 reply does), declare at most 4 KB (the device never has more than that
-unacknowledged, above) and have a body that decodes, as an RPC message on
-service 4. Anything else is stepped over a byte at a time, and so is a header
-whose message is still missing bytes once a whole message has arrived behind
+unacknowledged, above) and whose body is exactly one notification, or the
+bare service number that answers the service opening. Anything else is stepped over a byte at a time, and so is a header
+whose message is still missing bytes once a whole notification has arrived behind
 it. The cost is the one notification the slip cut through, and
 `Session::events_skipped` counts the bytes. The body check is needed: stepping through a parameter notification,
 the bytes `ca 00 00 00 00` (a float 0.0) and the key after them pass as a

@@ -18,9 +18,10 @@
 //! out of order) starts `00 00 04 00` (from the device, events service) and
 //! is at most 44 bytes with that header; the reply that opens the service
 //! may carry service 0. So this passes on only whole messages with that
-//! prefix and a modest length, and steps over anything else a byte at a time
-//! until the stream makes sense again. The cost of a slip is the one
-//! notification it cut through.
+//! prefix and a modest length whose body is one notification (or that
+//! reply), and steps over anything else a byte at a time until the stream
+//! makes sense again. The cost of a slip is the one notification it cut
+//! through.
 //!
 //! Only where the device's profile says so
 //! (`DeviceProfile::realigns_events`): the HX Effects' so far.
@@ -33,23 +34,9 @@
 /// on a channel that keeps sending, and nothing is held back on a quiet one.
 const MAX_MESSAGE: usize = 4 * 1024;
 
-/// Whether a whole candidate message's body is what the device sends here:
-/// for service 4 an RPC message, for service 0 (the service-open reply) any
-/// MessagePack value.
-///
-/// Stepping over an out-of-order frame a byte at a time can land on bytes
-/// inside a notification that pass the header check: a parameter
-/// notification carries floats, and `ca 00 00 00 00` (0.0) followed by a
-/// small number reads as a header for service 0 with a modest length. The
-/// stream reader then fails on the body ("not MessagePack"), which ends the
-/// session. HX Effects 3.80, Pi 4, 2026-10-15, after front-panel knob turns.
-fn plausible(service: u16, body: &[u8]) -> bool {
-    match hx_proto::msgpack::Decoder::new(body).value() {
-        Ok(value) if service == 4 => hx_proto::rpc::Message::try_from_value(value).is_ok(),
-        Ok(_) => true,
-        Err(_) => false,
-    }
-}
+/// The service notifications ride on, which is also the number the device
+/// answers its opening with.
+const EVENTS_SERVICE: u16 = 4;
 
 /// What the buffered bytes hold at one offset.
 enum At {
@@ -59,8 +46,44 @@ enum At {
     Not,
     /// A header whose message has not all arrived.
     Waiting,
-    /// A whole plausible message, ending at this offset.
-    Whole(usize),
+    /// A whole notification, ending at this offset.
+    Notification(usize),
+    /// The whole reply to the service opening, ending at this offset.
+    Opened(usize),
+}
+
+/// What a whole candidate message is, going by its body: `end` is where it
+/// ends.
+///
+/// The device sends two things here, and in the HX Edit captures (70 507
+/// messages) nothing else: a notification, and the bare service number that
+/// answers the service opening. Either fills the declared body exactly.
+/// Anything looser lets false headers through. Stepping over an
+/// out-of-order frame a byte at a time can land on bytes inside a
+/// notification that pass the header check: a parameter notification
+/// carries floats, and `ca 00 00 00 00` (0.0) followed by a small number
+/// reads as a header for service 0 with a modest length. The stream reader
+/// then fails on the body ("not MessagePack"), which ends the session (HX
+/// Effects 3.80, Pi 4, 2026-10-15, after front-panel knob turns). And a
+/// header in front of a real notification, over a body that merely begins
+/// with a value that decodes, would take that notification with it.
+fn whole(service: u16, body: &[u8], end: usize) -> At {
+    let mut decoder = hx_proto::msgpack::Decoder::new(body);
+    let Ok(value) = decoder.value() else {
+        return At::Not;
+    };
+    if decoder.remaining() != 0 {
+        return At::Not;
+    }
+    if value.as_i64() == Some(i64::from(EVENTS_SERVICE)) {
+        return At::Opened(end);
+    }
+    match hx_proto::rpc::Message::try_from_value(value) {
+        Ok(hx_proto::rpc::Message::Notification { .. }) if service == EVENTS_SERVICE => {
+            At::Notification(end)
+        }
+        _ => At::Not,
+    }
 }
 
 #[derive(Default)]
@@ -79,16 +102,18 @@ impl Realign {
         let mut pos = 0;
         loop {
             match self.at(pos) {
-                At::Whole(end) => {
+                At::Notification(end) | At::Opened(end) => {
                     out.extend_from_slice(&self.buf[pos..end]);
                     pos = end;
                 }
                 At::Short => break,
                 // The rest may still come. But the device sends a message's
-                // bytes together, in two frames at most, so a whole message
-                // already behind this one means its header was not a header:
-                // waiting on would hold back everything behind it.
-                At::Waiting if !self.whole_message_behind(pos) => break,
+                // bytes together, in two frames at most, so a whole
+                // notification already behind this one means its header was
+                // not a header: waiting on would hold back everything behind
+                // it. Only a notification counts. The nine bytes of the
+                // service-open reply can turn up inside a real body.
+                At::Waiting if !self.notification_behind(pos) => break,
                 At::Waiting | At::Not => {
                     pos += 1;
                     self.skipped += 1;
@@ -106,21 +131,19 @@ impl Realign {
         let originator = u16::from_le_bytes([header[0], header[1]]);
         let service = u16::from_le_bytes([header[2], header[3]]);
         let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
-        if originator != 0 || !matches!(service, 0 | 4) || len > MAX_MESSAGE {
+        if originator != 0 || !matches!(service, 0 | EVENTS_SERVICE) || len > MAX_MESSAGE {
             return At::Not;
         }
         let end = pos + 8 + len;
         if self.buf.len() < end {
             At::Waiting
-        } else if plausible(service, &self.buf[pos + 8..end]) {
-            At::Whole(end)
         } else {
-            At::Not
+            whole(service, &self.buf[pos + 8..end], end)
         }
     }
 
-    fn whole_message_behind(&self, pos: usize) -> bool {
-        (pos + 1..self.buf.len()).any(|later| matches!(self.at(later), At::Whole(_)))
+    fn notification_behind(&self, pos: usize) -> bool {
+        (pos + 1..self.buf.len()).any(|later| matches!(self.at(later), At::Notification(_)))
     }
 
     /// Forget a partial message, as when the channel is opened again.
@@ -255,6 +278,47 @@ mod tests {
             realign.push(&[&TICK[8..], &ticks(1)[..]].concat()),
             ticks(2)
         );
+        assert_eq!(realign.skipped(), 0);
+    }
+
+    #[test]
+    fn a_header_over_another_notification_is_not_taken_for_one() {
+        // A false header that declares 22 bytes: a MessagePack nil, then a
+        // whole tick. The nil decodes, but the tick is the message.
+        let garbage = [0x00, 0x00, 0x04, 0x00, 0x16, 0x00, 0x00, 0x00, 0xc0];
+        let mut realign = Realign::default();
+        assert_eq!(
+            realign.push(&[&garbage[..], &ticks(2)[..]].concat()),
+            ticks(2)
+        );
+        assert_eq!(realign.skipped(), 9);
+    }
+
+    #[test]
+    fn a_split_notification_is_kept_when_its_body_looks_like_a_reply() {
+        // A notification that carries the nine bytes of the service-open
+        // reply as data, cut right after them. Only a notification behind
+        // an unfinished one shows that its header was not a header.
+        use hx_proto::msgpack::{Encoder, Value};
+        use hx_proto::rpc::Message;
+        let reply = vec![0, 0, 0, 0, 1, 0, 0, 0, 4];
+        let args = hx_proto::msgmap! {
+            68 => Value::Bin(reply.clone(), 1),
+            121 => Value::Int(27),
+        };
+        let body = Encoder::encode(&Message::Notification { event: 22, args }.to_value());
+        let mut message = vec![0x00, 0x00, 0x04, 0x00];
+        message.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        message.extend_from_slice(&body);
+        let cut = message
+            .windows(reply.len())
+            .position(|bytes| bytes == reply)
+            .expect("the reply's bytes are in the body")
+            + reply.len();
+
+        let mut realign = Realign::default();
+        assert!(realign.push(&message[..cut]).is_empty());
+        assert_eq!(realign.push(&message[cut..]), message);
         assert_eq!(realign.skipped(), 0);
     }
 
