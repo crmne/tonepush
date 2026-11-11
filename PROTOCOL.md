@@ -562,6 +562,13 @@ which is what an Auto Color switch lights up as. Key 65 on the outer map is
 momentary, 109 the custom label, 66 the chosen LED colour, and both are nil when
 the switch is on its defaults.
 
+Key **68 is the entry's kind**: 1 on a block's bypass, as above. An HX Stomp on
+firmware 3.80 also reports a snapshot recall there, as
+`{59: false, 68: 3, 66: 462860, 69: {109: "Snapshot"}}`. Its target has a name
+and no block index (key 98), so it is not something the switch carries:
+TonePush leaves a kind 3 entry without a block out of the list of controlled
+blocks, and still refuses any other entry that lacks one.
+
 Keys 72 and 73 carry the ends of the controller's travel, normalised. Bypass is a switch, so
 only a footswitch or a CC can drive it - HX Edit lists expression pedals for a
 bypass and then steps over them.

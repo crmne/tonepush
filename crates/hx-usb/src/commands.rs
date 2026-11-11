@@ -100,6 +100,19 @@ pub struct Switch {
     pub colour: Option<i64>,
     /// What it controls. Usually one thing, sometimes several.
     pub carries: Vec<Carried>,
+    /// What it does to the preset as a whole, such as recalling a snapshot,
+    /// when it does. It acts on no block, so it is not among `carries`.
+    pub action: Option<PresetAction>,
+}
+
+/// Something a footswitch does to the preset rather than to a block.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresetAction {
+    /// What the device calls it: "Snapshot".
+    pub name: Option<String>,
+    /// The colour the device gives it, `0xRRGGBB`, which an Auto Color
+    /// switch that controls nothing else lights in.
+    pub colour: Option<i64>,
 }
 
 impl Switch {
@@ -109,13 +122,18 @@ impl Switch {
         if let Some(label) = self.label.as_deref() {
             return Some(label);
         }
-        self.carries.first().map(|c| c.name.as_str())
+        self.carries
+            .first()
+            .map(|c| c.name.as_str())
+            .or_else(|| self.action.as_ref()?.name.as_deref())
     }
 
-    /// The colour to light it: the one chosen, or the one its block wears.
+    /// The colour to light it: the one chosen, or the one its block wears,
+    /// or the one its preset action has.
     pub fn lit(&self) -> Option<i64> {
         self.colour
             .or_else(|| self.carries.first().and_then(|c| c.colour))
+            .or_else(|| self.action.as_ref()?.colour)
     }
 }
 
@@ -131,6 +149,41 @@ pub struct Carried {
     /// block it toggles.
     pub colour: Option<i64>,
     pub enabled: bool,
+}
+
+/// Whether an entry of a switch's assignment list acts on the preset rather
+/// than on a block, the way a snapshot recall does.
+///
+/// Such an entry has no block index, so it has no place in `Switch::carries`.
+/// The kind is what tells it apart: a block entry that merely lost its index
+/// is still malformed and still refused.
+fn is_preset_action(item: &Value) -> bool {
+    let kind = item
+        .get(rpc::key::SWITCH_ASSIGNMENT_KIND)
+        .and_then(Value::as_i64);
+    // A target that is missing or is not a map is malformed whatever the
+    // kind says, and is left for `carried` to refuse.
+    let Some(target @ Value::Map(_)) = item.get(rpc::key::SWITCH_TARGET) else {
+        return false;
+    };
+    kind == Some(rpc::SWITCH_KIND_PRESET_ACTION)
+        && matches!(target.get(rpc::key::BLOCK), None | Some(Value::Nil))
+}
+
+/// A preset action's own name and colour, kept apart from the blocks.
+fn preset_action(item: &Value, position: usize) -> Result<PresetAction> {
+    let invalid = |field: &str| {
+        Error::Protocol(format!(
+            "footswitch preset action {position} has no valid {field}"
+        ))
+    };
+    let name = item
+        .get(rpc::key::SWITCH_TARGET)
+        .map_or(Some(None), |target| optional_string(target, rpc::key::NAME))
+        .ok_or_else(|| invalid("name"))?;
+    let colour = optional_non_negative_integer(item, rpc::key::LED_COLOUR)
+        .ok_or_else(|| invalid("colour"))?;
+    Ok(PresetAction { name, colour })
 }
 
 /// One entry of a switch's assignment list.
@@ -201,13 +254,23 @@ fn decode_switch(switch: u8, reply: &Value) -> Result<Switch> {
         .ok_or_else(|| Error::Protocol("footswitch reply has an invalid label".into()))?;
     let colour = optional_non_negative_integer(reply, rpc::key::LED_COLOUR)
         .ok_or_else(|| Error::Protocol("footswitch reply has an invalid colour".into()))?;
-    let carries = match reply.get(rpc::key::SWITCH_ASSIGNED) {
-        None | Some(Value::Nil) => Vec::new(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .enumerate()
-            .map(|(position, item)| carried(item, position))
-            .collect::<Result<_>>()?,
+    let (carries, action) = match reply.get(rpc::key::SWITCH_ASSIGNED) {
+        None | Some(Value::Nil) => (Vec::new(), None),
+        Some(Value::Array(items)) => {
+            let carries = items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| !is_preset_action(item))
+                .map(|(position, item)| carried(item, position))
+                .collect::<Result<_>>()?;
+            let action = items
+                .iter()
+                .enumerate()
+                .find(|(_, item)| is_preset_action(item))
+                .map(|(position, item)| preset_action(item, position))
+                .transpose()?;
+            (carries, action)
+        }
         Some(_) => {
             return Err(Error::Protocol(
                 "footswitch reply has an invalid assignment list".into(),
@@ -220,6 +283,7 @@ fn decode_switch(switch: u8, reply: &Value) -> Result<Switch> {
         label,
         colour,
         carries,
+        action,
     })
 }
 
@@ -1747,6 +1811,7 @@ mod validation_tests {
                 label: None,
                 colour: None,
                 carries: Vec::new(),
+                action: None,
             }
         );
 
@@ -1798,6 +1863,114 @@ mod validation_tests {
             }]),
         };
         assert!(decode_switch(1, &bad_entry).is_err());
+    }
+
+    #[test]
+    fn snapshot_actions_are_not_treated_as_footswitch_block_assignments() {
+        let snapshot = hx_proto::msgmap! {
+            rpc::key::ENABLED => Value::Bool(false),
+            rpc::key::SWITCH_ASSIGNMENT_KIND => Value::Int(3),
+            rpc::key::LED_COLOUR => Value::Int(462_860),
+            rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
+                rpc::key::NAME => Value::Str("Snapshot".into()),
+            },
+        };
+        let reply = |assigned: Vec<Value>| {
+            hx_proto::msgmap! {
+                rpc::key::SWITCH => Value::Int(4),
+                rpc::key::MOMENTARY => Value::Bool(true),
+                rpc::key::SWITCH_ASSIGNED => Value::Array(assigned),
+            }
+        };
+
+        // The reply that made the editor reconnect: a snapshot and nothing else.
+        let alone = decode_switch(5, &reply(vec![snapshot.clone()])).unwrap();
+        assert!(alone.momentary);
+        assert!(alone.carries.is_empty());
+        // It is still a switch with a name and a colour of its own: the
+        // action's, where no label was typed and no colour chosen.
+        assert_eq!(
+            alone.action,
+            Some(PresetAction {
+                name: Some("Snapshot".into()),
+                colour: Some(462_860),
+            })
+        );
+        assert_eq!(alone.describes(), Some("Snapshot"));
+        assert_eq!(alone.lit(), Some(462_860));
+
+        let mixed = reply(vec![
+            snapshot,
+            hx_proto::msgmap! {
+                rpc::key::ENABLED => Value::Bool(true),
+                rpc::key::SWITCH_ASSIGNMENT_KIND => Value::Int(1),
+                rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
+                    rpc::key::NAME => Value::Str("Drive".into()),
+                    rpc::key::BLOCK => Value::Int(4),
+                },
+            },
+        ]);
+        let mixed = decode_switch(5, &mixed).unwrap();
+        assert_eq!(
+            mixed.carries,
+            vec![Carried {
+                block: 4,
+                name: "Drive".into(),
+                colour: None,
+                enabled: true,
+            }],
+        );
+        // A block it also carries names it first; the action's colour still
+        // lights it where the block has none.
+        assert_eq!(mixed.describes(), Some("Drive"));
+        assert_eq!(mixed.lit(), Some(462_860));
+    }
+
+    #[test]
+    fn only_a_preset_action_may_lack_a_block() {
+        let reply = |entry: Value| {
+            hx_proto::msgmap! {
+                rpc::key::SWITCH => Value::Int(0),
+                rpc::key::MOMENTARY => Value::Bool(false),
+                rpc::key::SWITCH_ASSIGNED => Value::Array(vec![entry]),
+            }
+        };
+        // A block assignment that lost its index is malformed, not an action.
+        let blockless = reply(hx_proto::msgmap! {
+            rpc::key::ENABLED => Value::Bool(true),
+            rpc::key::SWITCH_ASSIGNMENT_KIND => Value::Int(1),
+            rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
+                rpc::key::NAME => Value::Str("Drive".into()),
+            },
+        });
+        assert!(decode_switch(1, &blockless).is_err());
+
+        // Nor is an action whose target is missing or is not a map at all.
+        for target in [None, Some(Value::Bool(false))] {
+            let mut entry = vec![
+                (rpc::key::ENABLED, Value::Bool(false)),
+                (rpc::key::SWITCH_ASSIGNMENT_KIND, Value::Int(3)),
+            ];
+            entry.extend(target.map(|target| (rpc::key::SWITCH_TARGET, target)));
+            let entry = Value::Map(
+                entry
+                    .into_iter()
+                    .map(|(k, v)| (hx_proto::msgpack::Key::Int(k), v))
+                    .collect(),
+            );
+            assert!(decode_switch(1, &reply(entry)).is_err());
+        }
+
+        // The kind alone does not hide an entry that does name a block.
+        let with_block = reply(hx_proto::msgmap! {
+            rpc::key::ENABLED => Value::Bool(true),
+            rpc::key::SWITCH_ASSIGNMENT_KIND => Value::Int(3),
+            rpc::key::SWITCH_TARGET => hx_proto::msgmap! {
+                rpc::key::NAME => Value::Str("Drive".into()),
+                rpc::key::BLOCK => Value::Int(2),
+            },
+        });
+        assert_eq!(decode_switch(1, &with_block).unwrap().carries.len(), 1);
     }
 
     #[test]
