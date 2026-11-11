@@ -317,10 +317,14 @@ impl Session {
     /// is an empty slot; the checksum is `None` when the device leaves it out.
     pub fn ir_descriptor(&mut self, slot: i64) -> Result<Option<(String, Option<u64>)>> {
         non_negative(slot, "impulse response slot")?;
-        let descriptor = self.read_ir_part(
+        let Some(descriptor) = self.read_ir_part(
+            slot,
             rpc::op::IR_DESCRIPTOR,
             hx_proto::msgmap! { rpc::key::IR_SLOT => Value::Int(slot) },
-        )?;
+        )?
+        else {
+            return Ok(None);
+        };
         let Some(name) = descriptor.get(rpc::key::NAME).and_then(Value::as_str) else {
             return Ok(None);
         };
@@ -338,13 +342,20 @@ impl Session {
     /// returns them.
     pub fn read_ir_samples(&mut self, slot: i64) -> Result<Vec<f32>> {
         non_negative(slot, "impulse response slot")?;
-        let samples = self.read_ir_part(
+        let Some(samples) = self.read_ir_part(
+            slot,
             rpc::op::IR_SAMPLES,
             hx_proto::msgmap! {
                 rpc::key::IR_SLOT => Value::Int(slot),
                 rpc::key::ARGS => Value::Int(2),
             },
-        )?;
+        )?
+        else {
+            return Err(Error::Protocol(format!(
+                "impulse response slot {} is empty",
+                slot + 1
+            )));
+        };
         let Some(bytes) = samples.as_raw() else {
             return Err(Error::Protocol(
                 "the device returned invalid impulse response samples".into(),
@@ -354,9 +365,25 @@ impl Session {
     }
 
     /// One read of an IR slot, closed with END where the profile says so.
-    fn read_ir_part(&mut self, opcode: i64, args: Value) -> Result<Value> {
-        self.bootstrap()?;
-        let reply = self.request(ChannelId::CONTROL, opcode, args)?;
+    /// `None` is a slot the device's own list shows as empty, which is never
+    /// asked about.
+    ///
+    /// An empty slot has to be recognised from the list, because the device
+    /// does not say so itself. An HX Stomp answers the descriptor of an empty
+    /// slot with an empty name and a zero checksum, and answers a request for
+    /// its samples with a stream message declaring a negative length (-499,
+    /// a 13-byte reply around a string of -512 bytes). That reply cannot be
+    /// read, the END below is never reached, and the pedal then ignores every
+    /// new session until its power is pulled. The editor only ever reads
+    /// slots its list shows, and so do we.
+    fn read_ir_part(&mut self, slot: i64, opcode: i64, args: Value) -> Result<Option<Value>> {
+        let listed = self
+            .bootstrap_listing_irs()?
+            .iter()
+            .any(|(held, _)| *held == slot);
+        let reply = listed
+            .then(|| self.request(ChannelId::CONTROL, opcode, args))
+            .transpose()?;
         if self.profile.closes_ir_reads {
             self.command(ChannelId::CONTROL, rpc::op::END, hx_proto::msgmap! {})?;
         }
@@ -1932,6 +1959,33 @@ mod pedal_tests {
                 );
             }
         }
+    }
+
+    /// Reading an empty slot sends neither read request. An HX Stomp answers
+    /// a request for an empty slot's samples with a message declaring a
+    /// negative length, and stops answering new sessions afterwards; its
+    /// descriptor comes back with an empty name, not as nothing. Emptiness
+    /// is read off the slot list instead.
+    #[test]
+    fn an_empty_ir_slot_is_never_asked_for_its_descriptor_or_samples() {
+        let pedal = Pedal::new();
+        pedal.lock().unwrap().irs.insert(2, ("Cab".into(), 7));
+        let mut session = fake::session(&pedal);
+
+        assert_eq!(session.read_ir(8).expect("an empty slot reads"), None);
+        assert_eq!(
+            session.ir_descriptor(8).expect("and so does its name"),
+            None
+        );
+        let refused = session.read_ir_samples(8).expect_err("no samples to read");
+        assert!(refused.to_string().contains("slot 9 is empty"), "{refused}");
+
+        let opcodes = pedal.lock().unwrap().opcodes();
+        assert!(
+            !opcodes.contains(&rpc::op::IR_DESCRIPTOR) && !opcodes.contains(&rpc::op::IR_SAMPLES),
+            "an empty slot was read: {opcodes:?}"
+        );
+        assert!(session.read_ir(2).expect("a held slot reads").is_some());
     }
 
     /// A slot that is empty, or holds another name, shows the upload by
