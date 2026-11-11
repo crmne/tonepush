@@ -20,7 +20,10 @@ pub mod backup;
 #[cfg(test)]
 mod fake;
 pub mod ir;
+mod realign;
 pub mod replay;
+
+use realign::Realign;
 
 /// The claimed interface and its two bulk endpoints, ready to become a wire.
 type Endpoints = (
@@ -192,6 +195,9 @@ struct Channel {
     /// stops the device dead - including the channels nobody is waiting on.
     acked: u32,
     reader: StreamReader,
+    /// Events channel only: what the device sends passes through this before
+    /// `reader`, which cannot recover from a frame sent out of order.
+    realign: Realign,
     txn: i64,
 }
 
@@ -207,6 +213,7 @@ impl Channel {
             rx_bytes: 0,
             acked: 0,
             reader: StreamReader::new(),
+            realign: Realign::default(),
             txn: rpc::FIRST_TXN,
         }
     }
@@ -536,6 +543,7 @@ impl Session {
             ch.reader
                 .take_messages()
                 .map_err(|error| Error::Protocol(error.to_string()))?;
+            ch.realign.clear();
             ch.rx_bytes = carried;
             // HX Edit's counter jumps 0 -> 2 here. The device stops responding
             // if we send 1, so the observed numbering is reproduced.
@@ -548,6 +556,7 @@ impl Session {
             ch.reader
                 .take_messages()
                 .map_err(|error| Error::Protocol(error.to_string()))?;
+            ch.realign.clear();
         }
         self.ack_channel(id)
     }
@@ -650,8 +659,28 @@ impl Session {
         };
         if hdr.has_data() && !rest.is_empty() {
             ch.rx_bytes = ch.rx_bytes.wrapping_add(rest.len() as u32);
-            ch.reader.push(rest);
+            if f.src == ChannelId::EVENTS.device {
+                let skipped = ch.realign.skipped();
+                ch.reader.push(&ch.realign.push(rest));
+                if debug() && ch.realign.skipped() > skipped {
+                    eprintln!(
+                        "events stream out of step: skipped {} bytes",
+                        ch.realign.skipped() - skipped
+                    );
+                }
+            } else {
+                ch.reader.push(rest);
+            }
         }
+    }
+
+    /// Bytes stepped over on the events channel to get back onto a message
+    /// boundary, because the device sent a frame out of order. Each slip
+    /// costs one notification. See `realign`.
+    pub fn events_skipped(&self) -> u64 {
+        self.channels
+            .get(&ChannelId::EVENTS.device)
+            .map_or(0, |c| c.realign.skipped())
     }
 
     fn rx_bytes(&self, id: ChannelId) -> u32 {

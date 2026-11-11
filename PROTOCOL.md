@@ -141,6 +141,36 @@ untouched, three minutes of `watch`: 195 notifications and then silence before
 (195 ticks of 21 bytes is 4095 bytes), 1095 and still flowing after. The device
 tests do not cover this; `fake::Pedal::events_window` models it.
 
+**The events stream can lose its place. [confirmed on an HX Effects]** Now and
+then an HX Effects (3.80) sends one notification on channel `0x1002` with its
+first four bytes behind the rest of it:
+
+```text
+expected  00 00 04 00 | 0d 00 00 00 <13-byte body> | 00 00 04 00 0d ...
+received  0d 00 00 00 <13-byte body> | 00 00 04 00 | 00 00 04 00 0d ...
+```
+
+The frame's byte count is right, so acknowledgements stay right, but a reader
+that trusts the stream takes a body for a length. `0d 00 00 00 82 69 16 6a`
+reads as a message of 1779853698 bytes, which ended the session.
+`00 00 04 00 00 00 04 00` reads as one of 262144 bytes, which the reader waits
+for while every later notification queues behind it. How often it happens
+varies: one such frame in three days with the pedal on a port of its own, about
+3 KB of them in three minutes of an idle `watch` with the pedal behind a USB
+hub. The HX Edit captures here (HX Stomp, about 70 000 notifications) do not
+show it. There the device only splits a message across two frames, after its
+first four or eight bytes, which is in order and needs nothing.
+
+`hx-usb` passes this one channel through `realign`, which hands on only whole
+messages that start `00 00 04 00` (or service 0, as one captured service-open
+reply does), declare at most 4 KB (the device never has more than that
+unacknowledged, above) and have a body that decodes, as an RPC message on
+service 4. Anything else is stepped over a byte at a time. The cost is the one
+notification the slip cut through, and `Session::events_skipped` counts the
+bytes. The body check is needed: stepping through a parameter notification,
+the bytes `ca 00 00 00 00` (a float 0.0) and the key after them pass as a
+header for service 0 with a small length.
+
 **Idle channels need keep-alives during long reads. [confirmed]** A Helix Floor
 (3.80) probes a channel that has carried no traffic with keep-alive frames
 (type 0x10) at growing intervals. After four that the host leaves unanswered, it

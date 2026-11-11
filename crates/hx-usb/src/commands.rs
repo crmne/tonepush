@@ -1860,6 +1860,35 @@ mod pedal_tests {
         }
     }
 
+    /// The tick as the HX Effects sends it, stream header included.
+    const TICK_BYTES: [u8; 21] = [
+        0x00, 0x00, 0x04, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x82, 0x69, 0x16, 0x6a, 0x84, 0x52, 0x00,
+        0x44, 0x0a, 0x79, 0x1b, 0x6a, 0xc0,
+    ];
+
+    /// An HX Effects sent one tick with its first four bytes moved behind the
+    /// rest. That ended the session ("stream message declares 1779853698
+    /// bytes"); now it costs that tick and nothing else. See `realign`.
+    #[test]
+    fn a_frame_sent_out_of_order_costs_one_notification() {
+        let pedal = Pedal::new();
+        let mut session = fake::session(&pedal);
+        session.poll_notifications().unwrap();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.send_raw_events(&TICK_BYTES.repeat(3));
+            let rotated = [&TICK_BYTES[4..], &TICK_BYTES[..4]].concat();
+            pedal.send_raw_events(&[rotated, TICK_BYTES.repeat(4)].concat());
+            pedal.send_raw_events(&TICK_BYTES.repeat(2));
+        }
+        let mut seen = 0;
+        for _ in 0..4 {
+            seen += session.poll_notifications().unwrap().len();
+        }
+        assert_eq!(seen, 9);
+        assert_eq!(session.events_skipped(), 21);
+    }
+
     const SAMPLES: [f32; 4] = [0.5, -0.25, 0.125, 0.0];
 
     fn sum_of(samples: &[f32]) -> u64 {

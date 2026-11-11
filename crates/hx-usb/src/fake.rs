@@ -121,6 +121,24 @@ impl Pedal {
         );
     }
 
+    /// Send `bytes` on the events channel as one frame of stream data, as
+    /// they are: for streams the device gets wrong.
+    pub fn send_raw_events(&mut self, bytes: &[u8]) {
+        let node = ChannelId::EVENTS.device;
+        let seq = self.seq.entry(node).or_insert(0);
+        let mut payload = Vec::new();
+        ChannelHeader {
+            seq: *seq,
+            msg_type: MSG_DATA,
+            ack: 0x1000,
+        }
+        .encode_into(&mut payload);
+        *seq = seq.wrapping_add(1);
+        payload.extend_from_slice(bytes);
+        let frame = Frame::new(ChannelId::EVENTS.host, node, payload);
+        self.outbox.push_back(frame.encode().unwrap());
+    }
+
     fn receive(&mut self, bytes: &[u8]) {
         let Ok(frame) = Frame::decode(bytes) else {
             return;
