@@ -87,6 +87,12 @@ pub struct DeviceProfile {
     /// once the session has gone, at the next preset switch, until power
     /// cycled. On an HX Stomp it kept the next session from opening.
     pub closes_sessions: bool,
+    /// Whether the events channel's stream is put back on message boundaries
+    /// before it is read. An HX Effects (3.80) now and then sends a
+    /// notification with the first four bytes of its header behind its body,
+    /// which ended the session or held up every later notification. The
+    /// other devices' events channels are read as they arrive.
+    pub realigns_events: bool,
 }
 
 impl DeviceProfile {
@@ -113,6 +119,7 @@ pub const HX_STOMP: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: true,
     closes_sessions: false,
+    realigns_events: false,
 };
 pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     product_id: 0x4253,
@@ -126,6 +133,7 @@ pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
     closes_sessions: false,
+    realigns_events: false,
 };
 pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     product_id: 0x4248,
@@ -146,6 +154,7 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Helix,
     closes_ir_reads: false,
     closes_sessions: true,
+    realigns_events: false,
 };
 pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     product_id: 0x4249,
@@ -159,6 +168,7 @@ pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
     closes_sessions: false,
+    realigns_events: false,
 };
 pub const HELIX_LT: DeviceProfile = DeviceProfile {
     product_id: 0x424A,
@@ -172,6 +182,7 @@ pub const HELIX_LT: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
     closes_sessions: false,
+    realigns_events: false,
 };
 pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     product_id: 0x4245,
@@ -185,6 +196,7 @@ pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
     closes_sessions: false,
+    realigns_events: true,
 };
 
 /// Every device profile we recognise.

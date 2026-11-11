@@ -21,6 +21,9 @@
 //! prefix and a modest length, and steps over anything else a byte at a time
 //! until the stream makes sense again. The cost of a slip is the one
 //! notification it cut through.
+//!
+//! Only where the device's profile says so
+//! (`DeviceProfile::realigns_events`): the HX Effects' so far.
 
 /// Largest notification taken as genuine. Real ones are tens of bytes; the
 /// device never has more than 4 KB unacknowledged on this channel

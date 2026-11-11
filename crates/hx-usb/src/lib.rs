@@ -195,8 +195,9 @@ struct Channel {
     /// stops the device dead - including the channels nobody is waiting on.
     acked: u32,
     reader: StreamReader,
-    /// Events channel only: what the device sends passes through this before
-    /// `reader`, which cannot recover from a frame sent out of order.
+    /// Events channel only, and only where the device's profile realigns
+    /// it: what the device sends passes through this before `reader`, which
+    /// cannot recover from a frame sent out of order.
     realign: Realign,
     /// Whether the device answered this channel's handshake.
     answered: bool,
@@ -657,6 +658,7 @@ impl Session {
         let Some((hdr, rest)) = ChannelHeader::decode(&f.payload) else {
             return;
         };
+        let realigns = self.profile.realigns_events;
         let Some(ch) = self.channels.get_mut(&f.src) else {
             return;
         };
@@ -665,7 +667,7 @@ impl Session {
         }
         if hdr.has_data() && !rest.is_empty() {
             ch.rx_bytes = ch.rx_bytes.wrapping_add(rest.len() as u32);
-            if f.src == ChannelId::EVENTS.device {
+            if realigns && f.src == ChannelId::EVENTS.device {
                 let skipped = ch.realign.skipped();
                 ch.reader.push(&ch.realign.push(rest));
                 if debug() && ch.realign.skipped() > skipped {

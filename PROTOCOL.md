@@ -161,8 +161,10 @@ hub. The HX Edit captures here (HX Stomp, about 70 000 notifications) do not
 show it. There the device only splits a message across two frames, after its
 first four or eight bytes, which is in order and needs nothing.
 
-`hx-usb` passes this one channel through `realign`, which hands on only whole
-messages that start `00 00 04 00` (or service 0, as one captured service-open
+Where the device's profile says so (`DeviceProfile::realigns_events`, the HX
+Effects' only so far), `hx-usb` passes this one channel through `realign`. The
+other devices read it as before. `realign` hands on only whole messages that
+start `00 00 04 00` (or service 0, as one captured service-open
 reply does), declare at most 4 KB (the device never has more than that
 unacknowledged, above) and have a body that decodes, as an RPC message on
 service 4. Anything else is stepped over a byte at a time. The cost is the one

@@ -1872,7 +1872,7 @@ mod pedal_tests {
     #[test]
     fn a_frame_sent_out_of_order_costs_one_notification() {
         let pedal = Pedal::new();
-        let mut session = fake::session(&pedal);
+        let mut session = fake::session_as(&pedal, hx_proto::HX_EFFECTS);
         session.poll_notifications().unwrap();
         {
             let mut pedal = pedal.lock().unwrap();
@@ -1887,6 +1887,23 @@ mod pedal_tests {
         }
         assert_eq!(seen, 9);
         assert_eq!(session.events_skipped(), 21);
+    }
+
+    /// A device whose profile does not realign reads the events channel as
+    /// before: there the same frame is still reported.
+    #[test]
+    fn an_hx_stomp_still_reports_a_frame_sent_out_of_order() {
+        let pedal = Pedal::new();
+        let mut session = fake::session(&pedal);
+        session.poll_notifications().unwrap();
+        let rotated = [&TICK_BYTES[4..], &TICK_BYTES[..4]].concat();
+        pedal.lock().unwrap().send_raw_events(&rotated);
+        let outcome = (0..2).find_map(|_| session.poll_notifications().err());
+        assert!(
+            matches!(outcome, Some(crate::Error::Protocol(_))),
+            "{outcome:?}"
+        );
+        assert_eq!(session.events_skipped(), 0);
     }
 
     #[test]
