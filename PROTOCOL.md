@@ -864,7 +864,10 @@ when any frame arrives, a keep-alive on another channel included, so two
 256-byte chunks could go out with no acknowledgement between them and a third
 followed before a busy pedal had caught up. A restore of 77 impulse responses
 stopped with "write timed out" at the eighth upload, and a second run at the
-fourth. `send_chunks` now waits for room before every frame.
+fourth. `send_chunks` now waits for room before every frame, on a device whose
+profile gives a window (`send_window`). Only the HX Stomp's does: every capture
+and recording behind this is from one, and the others are sent to as before
+until theirs is measured.
 
 **File dialogs are sheets, not windows. [method]** HX Edit's Import opens a
 sheet attached to its main window, so `windows` shows one and the dialog looks

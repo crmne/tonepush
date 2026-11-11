@@ -2348,7 +2348,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
 
-        use hx_proto::frame::{ChannelHeader, MSG_DATA};
+        use hx_proto::frame::{ChannelHeader, FLAG_HANDSHAKE, MSG_ACK, MSG_DATA};
         use hx_proto::msgpack::{Encoder, Value};
         use hx_proto::rpc::{key, op, Message, StreamReader};
         use hx_proto::{ChannelId, Frame};
@@ -2359,6 +2359,32 @@ mod tests {
             outbox: VecDeque<Vec<u8>>,
             inbox: BTreeMap<u16, StreamReader>,
             seq: BTreeMap<u16, u16>,
+            /// Stream bytes taken on each channel since it was opened.
+            taken: BTreeMap<u16, u32>,
+        }
+
+        impl Pedal {
+            /// Queue one frame for the host. Its acknowledgement is what an
+            /// HX Stomp sends: the stream bytes taken plus 0x200.
+            fn send(&mut self, node: u16, msg_type: u16, stream: &[u8]) {
+                let ack = 0x200u32.wrapping_add(self.taken.get(&node).copied().unwrap_or(0));
+                let seq = self.seq.entry(node).or_insert(0);
+                let mut payload = Vec::new();
+                ChannelHeader {
+                    seq: *seq,
+                    msg_type,
+                    ack,
+                }
+                .encode_into(&mut payload);
+                *seq = seq.wrapping_add(1);
+                payload.extend_from_slice(stream);
+                let host = ChannelId::ALL
+                    .iter()
+                    .find(|channel| channel.device == node)
+                    .map_or(0, |channel| channel.host);
+                let frame = Frame::new(host, node, payload).encode().unwrap();
+                self.outbox.push_back(frame);
+            }
         }
 
         pub struct Cable(pub Arc<Mutex<Pedal>>);
@@ -2372,13 +2398,23 @@ mod tests {
                 let Some((header, rest)) = ChannelHeader::decode(&frame.payload) else {
                     return Ok(());
                 };
+                if frame.flags == FLAG_HANDSHAKE {
+                    pedal.taken.insert(frame.dst, 0);
+                }
                 if !header.has_data() || rest.is_empty() {
                     return Ok(());
                 }
                 let node = frame.dst;
+                let taken = pedal.taken.entry(node).or_insert(0);
+                *taken = taken.wrapping_add(rest.len() as u32);
                 let reader = pedal.inbox.entry(node).or_default();
                 reader.push(rest);
-                for message in reader.take_messages().unwrap_or_default() {
+                let messages = reader.take_messages().unwrap_or_default();
+                if messages.is_empty() {
+                    // Part of a message: acknowledged on its own.
+                    pedal.send(node, MSG_ACK, &[]);
+                }
+                for message in messages {
                     let Ok(Message::Request { txn, opcode, args }) =
                         Message::try_from_value(message.body)
                     else {
@@ -2401,24 +2437,10 @@ mod tests {
                         }
                         .to_value(),
                     );
-                    let seq = pedal.seq.entry(node).or_insert(0);
-                    let mut payload = Vec::new();
-                    ChannelHeader {
-                        seq: *seq,
-                        msg_type: MSG_DATA,
-                        ack: 0x1000,
-                    }
-                    .encode_into(&mut payload);
-                    *seq = seq.wrapping_add(1);
-                    payload.extend_from_slice(&[0, 0, 0, 0]);
-                    payload.extend_from_slice(&(body.len() as u32).to_le_bytes());
-                    payload.extend_from_slice(&body);
-                    let host = ChannelId::ALL
-                        .iter()
-                        .find(|channel| channel.device == node)
-                        .map_or(0, |channel| channel.host);
-                    let frame = Frame::new(host, node, payload).encode().unwrap();
-                    pedal.outbox.push_back(frame);
+                    let mut stream = vec![0; 4];
+                    stream.extend_from_slice(&(body.len() as u32).to_le_bytes());
+                    stream.extend_from_slice(&body);
+                    pedal.send(node, MSG_DATA, &stream);
                 }
                 Ok(())
             }

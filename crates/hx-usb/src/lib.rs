@@ -196,7 +196,8 @@ struct Channel {
     /// Stream bytes sent to the device on this channel since it was opened.
     tx_bytes: u32,
     /// How far the device has said `tx_bytes` may go: the acknowledgement in
-    /// the last frame it sent on this channel. See [`Channel::PEER_WINDOW`].
+    /// the last frame it sent on this channel. See
+    /// [`DeviceProfile::send_window`](hx_proto::DeviceProfile::send_window).
     peer_limit: u32,
 }
 
@@ -206,17 +207,16 @@ impl Channel {
     /// makes the device stop responding.
     const ACK_BASE: u32 = 0x1000;
 
-    /// The device's side of the same arrangement, and much the smaller: its
-    /// acknowledgement is the stream bytes it has taken plus 0x200, so the
-    /// host may have 512 bytes outstanding and no more. Every device frame
-    /// in a recorded session carries exactly bytes-sent plus 512, and the
-    /// device's answering HELLO ends in the same 0x200 where ours ends in
-    /// 0x1000. HX Edit sends an impulse response 512 bytes at a time and
-    /// waits for the acknowledgement that moves this on before sending
-    /// another byte; in three captures it never once sends past it.
-    const PEER_WINDOW: u32 = 0x200;
-
-    fn new() -> Self {
+    /// A channel just opened. `window` is the device's side of the same
+    /// arrangement, and much the smaller on an HX Stomp: its acknowledgement
+    /// is the stream bytes it has taken plus 0x200, so the host may have 512
+    /// bytes outstanding and no more. Every device frame in a recorded
+    /// session carries exactly bytes-sent plus 512, and the device's
+    /// answering HELLO ends in the same 0x200 where ours ends in 0x1000. HX
+    /// Edit sends an impulse response 512 bytes at a time and waits for the
+    /// acknowledgement that moves this on before sending another byte; in
+    /// three captures it never once sends past it.
+    fn new(window: u32) -> Self {
         Channel {
             seq: 0,
             rx_bytes: 0,
@@ -224,7 +224,7 @@ impl Channel {
             reader: StreamReader::new(),
             txn: rpc::FIRST_TXN,
             tx_bytes: 0,
-            peer_limit: Self::PEER_WINDOW,
+            peer_limit: window,
         }
     }
 
@@ -539,7 +539,8 @@ impl Session {
         } else {
             self.channels.get(&id.device).map_or(0, |c| c.rx_bytes)
         };
-        self.channels.insert(id.device, Channel::new());
+        let window = self.profile.send_window.unwrap_or(0);
+        self.channels.insert(id.device, Channel::new(window));
 
         let mut payload = Vec::new();
         ChannelHeader {
@@ -809,7 +810,13 @@ impl Session {
     /// up; it then stops taking writes altogether, and the upload ends in
     /// "write timed out" with the pedal needing its power pulled. A run of
     /// uploads failed that way at the eighth, and again at the fourth.
+    ///
+    /// Only where the profile gives a window. A device whose window was
+    /// never measured is sent to as before.
     fn wait_for_window(&mut self, id: ChannelId, len: usize) -> Result<()> {
+        if self.profile.send_window.is_none() {
+            return Ok(());
+        }
         let deadline = Instant::now() + Self::WINDOW_BUDGET;
         loop {
             let room = self
@@ -1471,7 +1478,7 @@ mod tests {
     /// arithmetic that matters most in the crate.
     #[test]
     fn acknowledgements_advance_from_a_base() {
-        let mut channel = Channel::new();
+        let mut channel = Channel::new(0);
         assert_eq!(channel.ack(), Channel::ACK_BASE);
 
         channel.rx_bytes += 256;
@@ -1489,7 +1496,7 @@ mod tests {
 
     #[test]
     fn transactions_start_at_the_observed_value_and_count_up() {
-        let mut channel = Channel::new();
+        let mut channel = Channel::new(0);
         assert_eq!(channel.next_txn(), rpc::FIRST_TXN);
         assert_eq!(channel.next_txn(), rpc::FIRST_TXN + 1);
     }
