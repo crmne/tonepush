@@ -50,10 +50,7 @@ pub enum Cmd {
         Sender<tonepush_cli::bridge::Reply>,
     ),
     #[cfg(unix)]
-    CliWatch(
-        mpsc::SyncSender<String>,
-        Sender<tonepush_cli::bridge::Reply>,
-    ),
+    CliWatch(Sender<String>, Sender<tonepush_cli::bridge::Reply>),
     Connect,
     Disconnect,
     /// Let the pedal go and stop, once everything sent before this has run.
@@ -574,7 +571,11 @@ pub fn spawn_repainting() -> (
 
 struct Worker {
     #[cfg(unix)]
-    cli_watchers: Vec<mpsc::SyncSender<String>>,
+    /// Where device notifications are copied for `tonepush watch`. Unbounded
+    /// on purpose: a full queue would drop a notification the watcher was
+    /// started to see. A watcher that stops reading has its socket time out,
+    /// which closes its end and takes it off this list.
+    cli_watchers: Vec<Sender<String>>,
     cmds: Receiver<Cmd>,
     events: Events,
     device: Option<hx_usb::Session>,
@@ -2283,30 +2284,65 @@ impl Worker {
         if changes.lost {
             self.let_go();
         } else {
-            if changes.buffer {
-                self.forget_history();
-            }
-            if changes.buffer || changes.switched || changes.presets {
-                let follow = self.setlist == self.shown.setlist;
-                self.reload_with_dirty(changes.dirty);
-                if follow && self.setlist != self.shown.setlist {
-                    self.show_setlist(self.shown.setlist);
-                } else if changes.presets {
-                    self.show_setlist(self.setlist);
-                }
-            }
-            if changes.irs {
-                self.handle(Cmd::ListIrs);
-            }
-            if changes.settings {
-                if let Some(hx_proto::msgpack::Value::Bool(on)) =
-                    self.try_optional_on_device(|device| device.object(203))
-                {
-                    self.send(Evt::Settings { global_eq: on });
-                }
-            }
+            self.follow_cli(&changes);
         }
         let _ = reply.send(result);
+    }
+
+    /// Bring the editor, and the automatic backup, in step with what a CLI
+    /// request did, the way each of the editor's own commands does for
+    /// itself.
+    #[cfg(unix)]
+    fn follow_cli(&mut self, changes: &tonepush_cli::bridge::Changes) {
+        // The copy on disk follows a save here as it does a save from the
+        // window, and before the editor is told, since it reads that copy to
+        // say what the pedal holds.
+        if changes.restored {
+            self.refresh_automatic(&Why::Restore);
+        } else {
+            for &(setlist, index) in &changes.saved {
+                self.back_up_one(setlist, index);
+            }
+        }
+        // The history records the buffer it was made on. A preset loaded
+        // again is a different buffer even under the same name, and redo
+        // would write the abandoned one over it.
+        if changes.buffer || changes.selected {
+            self.forget_history();
+        }
+        let saved = !changes.saved.is_empty();
+        if changes.buffer || changes.selected || changes.snapshot || changes.presets || saved {
+            let follow = self.setlist == self.shown.setlist;
+            self.reload_with_dirty(changes.dirty);
+            if follow && self.setlist != self.shown.setlist {
+                self.show_setlist(self.shown.setlist);
+            } else if changes.presets || changes.renamed || saved {
+                self.show_setlist(self.setlist);
+            }
+            if saved && self.device.is_some() {
+                self.send(Evt::Saved);
+            }
+        } else if changes.renamed {
+            // Names only. `rename_preset` paces its flash commit and must not
+            // be followed by a document read, so the list is all that is read
+            // again, as after a rename from the window.
+            if let Some((_, _, name)) = self.try_on_device(|device| device.preset_info()) {
+                self.shown.name = name;
+            }
+            self.show_setlist(self.setlist);
+        }
+        if changes.irs {
+            self.handle(Cmd::ListIrs);
+        }
+        if changes.settings {
+            if let Some(hx_proto::msgpack::Value::Bool(on)) =
+                self.try_optional_on_device(|device| device.object(203))
+            {
+                self.send(Evt::Settings { global_eq: on });
+            }
+            // The Pedal page shows the values it was last sent.
+            self.handle(Cmd::ReadSettings);
+        }
     }
 
     fn reload(&mut self) {
@@ -2424,7 +2460,7 @@ impl Worker {
                 let line = format!("event {event}: {args:?}");
                 #[cfg(unix)]
                 self.cli_watchers
-                    .retain(|watcher| watcher.try_send(line.clone()).is_ok());
+                    .retain(|watcher| watcher.send(line.clone()).is_ok());
                 self.events.send(Evt::Activity(line));
                 match notice(*event, args) {
                     Notice::Preset | Notice::Unknown => look = true,
@@ -3761,6 +3797,75 @@ mod tests {
         let before = reads(&pedal);
         worker.handle(Cmd::ClearPreset(2));
         assert_eq!(reads(&pedal), before, "the loaded preset was not emptied");
+    }
+
+    #[cfg(unix)]
+    fn cli(worker: &mut Worker, words: &[&str]) -> Option<String> {
+        let request = tonepush_cli::bridge::Request::command(
+            "/".into(),
+            words.iter().map(std::ffi::OsString::from),
+        )
+        .unwrap();
+        let (reply, answered) = mpsc::channel();
+        worker.run_cli(request, reply);
+        let mut stream = std::os::unix::net::UnixStream::pair().unwrap();
+        answered.recv().unwrap().write(&mut stream.0).unwrap();
+        drop(stream.0);
+        let line = std::io::read_to_string(stream.1).unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+        reply["error"].as_str().map(str::to_owned)
+    }
+
+    /// A rename is a flash write the pedal has to be left alone to commit.
+    /// One from the CLI reads the names again and never the document, the
+    /// same as one from the window.
+    #[cfg(unix)]
+    #[test]
+    fn a_rename_from_the_cli_reads_the_names_and_not_the_document() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        let count = |opcode: i64| {
+            let pedal = pedal.lock().unwrap();
+            pedal.opcodes().iter().filter(|op| **op == opcode).count()
+        };
+        let (reads, renames) = (count(op::READ_PRESET), count(op::RENAME_PRESET));
+
+        assert_eq!(cli(&mut worker, &["rename", "2", "From the CLI"]), None);
+        assert_eq!(count(op::RENAME_PRESET), renames + 1);
+        assert_eq!(count(op::READ_PRESET), reads, "a rename read the document");
+        assert!(events.try_iter().any(|e| matches!(e, Evt::Presets(_))));
+    }
+
+    /// Loading a preset from the CLI leaves the old buffer behind, even when
+    /// it is the same preset loaded again. Its history goes with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_select_from_the_cli_drops_the_history() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.history.push(document(150.0));
+        worker.future.push(document(160.0));
+        let loaded = worker.shown.index.to_string();
+
+        assert_eq!(cli(&mut worker, &["select", &loaded]), None);
+        assert!(worker.history.is_empty() && worker.future.is_empty());
+        assert!(events
+            .try_iter()
+            .any(|e| matches!(e, Evt::History { undo: 0, redo: 0 })));
+    }
+
+    /// A save from the CLI is a save: the editor is told, so its copy of
+    /// what the pedal holds is read again.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_from_the_cli_is_announced_as_one() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.dirty = true;
+
+        assert_eq!(cli(&mut worker, &["save"]), None);
+        assert!(!worker.dirty);
+        assert!(events.try_iter().any(|e| matches!(e, Evt::Saved)));
     }
 
     /// The pedal changing setlist by itself takes a list showing its old

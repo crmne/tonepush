@@ -1,7 +1,7 @@
 //! Local transport for running HX commands in the editor's USB worker.
 
-use crate::{BatchStep, Cli, Cmd, OUTPUT, parse_batch, run_on};
-use anyhow::{Context, Result, bail};
+use crate::{parse_batch, run_on, BatchStep, Cli, Cmd, OUTPUT};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -20,7 +20,9 @@ enum Input {
 
 #[derive(Serialize, Deserialize)]
 struct Message {
-    cwd: PathBuf,
+    /// The caller's working directory. As an `OsString`, like the arguments,
+    /// so a directory whose name is not UTF-8 still crosses the socket.
+    cwd: OsString,
     input: Input,
 }
 
@@ -63,7 +65,7 @@ fn request(socket: &OsStr, input: Input) -> Result<()> {
     serde_json::to_writer(
         &mut stream,
         &Message {
-            cwd: std::env::current_dir()?,
+            cwd: std::env::current_dir()?.into_os_string(),
             input,
         },
     )?;
@@ -105,6 +107,59 @@ pub fn private_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a connection from any account but the one running the editor.
+///
+/// The private directory keeps other accounts from reaching the socket at
+/// all. This asks the kernel who actually connected, so a directory that was
+/// swapped or loosened after it was checked still lets nobody else in.
+pub fn same_user(stream: &UnixStream) -> Result<()> {
+    // SAFETY: geteuid has no arguments and always returns the effective UID.
+    let own = unsafe { libc::geteuid() };
+    if peer_uid(stream)? != own {
+        bail!("TonePush only takes commands from the account running it");
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_uid(stream: &UnixStream) -> Result<libc::uid_t> {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` and `len` are valid for writes of the sizes passed, and
+    // the descriptor is open for as long as `stream` is borrowed.
+    let status = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast(),
+            &raw mut len,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error()).context("identifying the TonePush client");
+    }
+    Ok(cred.uid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn peer_uid(stream: &UnixStream) -> Result<libc::uid_t> {
+    use std::os::fd::AsRawFd;
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: both pointers are valid for one write each, and the descriptor
+    // is open for as long as `stream` is borrowed.
+    let status = unsafe { libc::getpeereid(stream.as_raw_fd(), &raw mut uid, &raw mut gid) };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error()).context("identifying the TonePush client");
+    }
+    Ok(uid)
+}
+
 pub fn forward(socket: &OsStr, args: Vec<OsString>) -> Result<()> {
     request(socket, Input::Command(args))
 }
@@ -119,13 +174,25 @@ pub struct Request {
     batch: bool,
 }
 
+/// What a request did to the pedal, for the editor to catch up on.
 #[derive(Default)]
 pub struct Changes {
+    /// The edit buffer was written.
     pub buffer: bool,
+    /// Another preset was loaded, or the loaded one loaded again.
+    pub selected: bool,
+    /// Another snapshot was recalled.
+    pub snapshot: bool,
+    /// The preset list may have changed in ways `saved` does not name.
     pub presets: bool,
+    /// Every preset was written over, as a restore of everything does.
+    pub restored: bool,
+    /// Slots saved to, as `(setlist, index)`.
+    pub saved: Vec<(i64, i64)>,
+    /// A preset's name changed and nothing else about it.
+    pub renamed: bool,
     pub irs: bool,
     pub settings: bool,
-    pub switched: bool,
     pub dirty: Option<bool>,
     pub lost: bool,
 }
@@ -139,25 +206,36 @@ impl Request {
             bail!("TonePush request is too large");
         }
         let Message { cwd, input } = serde_json::from_slice(&data)?;
+        match input {
+            Input::Command(args) => Self::command(cwd.into(), args),
+            Input::Batch(text) => Self::batch(cwd.into(), &text),
+        }
+    }
+
+    /// One command, as its arguments after the program's name, with relative
+    /// paths in it read from `cwd`.
+    pub fn command(cwd: PathBuf, args: impl IntoIterator<Item = OsString>) -> Result<Self> {
+        let cmd = Cli::try_parse_from(std::iter::once(OsString::from("tonepush")).chain(args))?.cmd;
+        Self::new(
+            cwd,
+            vec![BatchStep::Run {
+                line: 1,
+                text: String::new(),
+                cmd: Box::new(cmd),
+            }],
+            false,
+        )
+    }
+
+    /// A batch file's text.
+    pub fn batch(cwd: PathBuf, text: &str) -> Result<Self> {
+        Self::new(cwd, parse_batch(text)?, true)
+    }
+
+    fn new(cwd: PathBuf, steps: Vec<BatchStep>, batch: bool) -> Result<Self> {
         if !cwd.is_absolute() {
             bail!("invalid command working directory");
         }
-        let (steps, batch) = match input {
-            Input::Command(args) => {
-                let cmd =
-                    Cli::try_parse_from(std::iter::once(OsString::from("tonepush")).chain(args))?
-                        .cmd;
-                (
-                    vec![BatchStep::Run {
-                        line: 1,
-                        text: String::new(),
-                        cmd: Box::new(cmd),
-                    }],
-                    false,
-                )
-            }
-            Input::Batch(text) => (parse_batch(&text)?, true),
-        };
         Ok(Self { cwd, steps, batch })
     }
 
@@ -173,7 +251,13 @@ impl Request {
         let mut error = None;
         for step in self.steps {
             match step {
-                BatchStep::Sleep(pause) => std::thread::sleep(pause),
+                BatchStep::Sleep(pause) => {
+                    if let Err(err) = rest(session, pause) {
+                        changes.lost = true;
+                        error = Some(format!("{err:#}"));
+                        break;
+                    }
+                }
                 BatchStep::Run {
                     line,
                     text,
@@ -182,28 +266,38 @@ impl Request {
                     commands += 1;
                     resolve_paths(&mut cmd, &self.cwd);
                     let before = session.channel_stats();
-                    let result = run_on(session, &cmd);
-                    changes.record(&cmd, result.is_ok(), before != session.channel_stats());
-                    if let Err(err) = result {
-                        failures += 1;
-                        let detail = format!("{err:#}");
-                        changes.lost = err.downcast_ref::<hx_usb::Error>().is_some_and(|e| {
-                            e.loses_session()
-                                && !(matches!(e, hx_usb::Error::Protocol(_))
-                                    && before == session.channel_stats())
-                        });
-                        if self.batch {
-                            eprintln!("line {line}: {text}: {detail}");
-                        }
-                        error = Some(detail);
-                        if changes.lost {
-                            break;
+                    // Asked first: afterwards the loaded preset may be the
+                    // one just saved to, which says nothing of where from.
+                    let (saving, result) = match save_slot(session, &cmd) {
+                        Ok(slot) => (slot, run_on(session, &cmd)),
+                        Err(err) => (None, Err(err)),
+                    };
+                    let sent = before != session.channel_stats();
+                    changes.record(&cmd, result.is_ok(), sent);
+                    match result {
+                        Ok(()) => changes.saved.extend(saving),
+                        Err(err) => {
+                            failures += 1;
+                            let detail = format!("{err:#}");
+                            // A protocol error with nothing sent is this
+                            // program refusing its own arguments.
+                            changes.lost = err.downcast_ref::<hx_usb::Error>().is_some_and(|e| {
+                                e.loses_session()
+                                    && (sent || !matches!(e, hx_usb::Error::Protocol(_)))
+                            });
+                            if self.batch {
+                                eprintln!("line {line}: {text}: {detail}");
+                            }
+                            error = Some(detail);
+                            if changes.lost {
+                                break;
+                            }
                         }
                     }
                 }
             }
         }
-        if self.batch && failures != 0 {
+        if self.batch && failures != 0 && !changes.lost {
             error = Some(format!(
                 "{failures} of {commands} attempted commands failed"
             ));
@@ -227,27 +321,32 @@ impl Changes {
         }
         match cmd {
             Cmd::Select { .. } => {
-                self.switched = true;
+                self.selected = true;
                 if succeeded {
                     self.dirty = Some(false);
                 }
             }
+            // A save that failed after it was sent may have landed all the
+            // same. Which slot is not known then, so the editor reads again.
             Cmd::Save { .. } => {
-                self.presets = true;
                 if succeeded {
                     self.dirty = Some(false);
+                } else {
+                    self.presets = true;
                 }
             }
-            Cmd::Rename { .. } => self.presets = true,
+            Cmd::Rename { .. } => self.renamed = true,
             Cmd::IrLoad { .. } | Cmd::IrClear { .. } => self.irs = true,
             Cmd::SetSetting { .. } => self.settings = true,
             Cmd::RestoreAll { .. } => {
                 self.buffer = true;
+                self.selected = true;
                 self.presets = true;
+                self.restored = true;
                 self.irs = true;
                 self.settings = true;
             }
-            Cmd::Snapshot { .. } => self.switched = true,
+            Cmd::Snapshot { .. } => self.snapshot = true,
             Cmd::Set { .. }
             | Cmd::Enable { .. }
             | Cmd::Model { .. }
@@ -274,6 +373,50 @@ impl Changes {
     }
 }
 
+/// Wait out a batch's `sleep` without letting the session go quiet.
+///
+/// The editor's worker is the only thing that keeps the pedal's channels
+/// alive, and it is busy here for as long as the batch runs. A pause longer
+/// than a keep-alive's interval is taken in pieces with one between them, the
+/// way `watch` paces its own; a shorter one is the plain sleep it always was.
+fn rest(session: &mut hx_usb::Session, pause: std::time::Duration) -> hx_usb::Result<()> {
+    rest_every(session, pause, KEEPALIVE_EVERY)
+}
+
+fn rest_every(
+    session: &mut hx_usb::Session,
+    pause: std::time::Duration,
+    every: std::time::Duration,
+) -> hx_usb::Result<()> {
+    let mut left = pause;
+    while left > every {
+        std::thread::sleep(every);
+        left -= every;
+        session.keepalive()?;
+    }
+    std::thread::sleep(left);
+    Ok(())
+}
+
+const KEEPALIVE_EVERY: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// The slot a `save` is about to write, or `None` for any other command.
+fn save_slot(session: &mut hx_usb::Session, cmd: &Cmd) -> Result<Option<(i64, i64)>> {
+    let Cmd::Save { index, setlist, .. } = cmd else {
+        return Ok(None);
+    };
+    let (loaded_setlist, loaded, _) = session.preset_info()?;
+    let index = index
+        .as_deref()
+        .map(|text| crate::slot(&session.profile, text))
+        .transpose()?;
+    Ok(Some(crate::save_target(
+        (loaded_setlist, loaded),
+        *setlist,
+        index,
+    )))
+}
+
 fn resolve_paths(cmd: &mut Cmd, cwd: &Path) {
     let absolute = |path: &mut PathBuf| {
         if path.is_relative() {
@@ -285,11 +428,23 @@ fn resolve_paths(cmd: &mut Cmd, cwd: &Path) {
         | Cmd::Export { file }
         | Cmd::Backup { file }
         | Cmd::Restore { file }
-        | Cmd::Import { file, .. } => absolute(file),
+        | Cmd::Import { file, .. }
+        | Cmd::Inspect { file }
+        | Cmd::IrInfo { file }
+        | Cmd::Decode { log: file } => absolute(file),
         Cmd::BackupAll { directory, .. }
         | Cmd::BackUp { directory }
         | Cmd::RestoreAll { directory, .. } => absolute(directory),
-        Cmd::BundleToPresets { file, output } => {
+        Cmd::BundleToPresets { file, output }
+        | Cmd::ExtractBackup { file, output }
+        | Cmd::ExportHlx {
+            input: file,
+            output,
+        }
+        | Cmd::ExportHxb {
+            bundle: file,
+            output,
+        } => {
             absolute(file);
             absolute(output);
         }
@@ -309,35 +464,184 @@ pub fn event(line: String) -> Reply {
 mod tests {
     use super::*;
 
+    use crate::tests::pedal::{Cable, Pedal};
+    use std::os::unix::ffi::OsStringExt;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    fn session(pedal: &Arc<Mutex<Pedal>>) -> hx_usb::Session {
+        hx_usb::Session::replaying(Box::new(Cable(pedal.clone())), hx_proto::HX_STOMP).unwrap()
+    }
+
+    fn args(words: &[&str]) -> Vec<OsString> {
+        words.iter().map(OsString::from).collect()
+    }
+
+    fn text(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    /// Arguments keep their boundaries across the socket, and so does a
+    /// working directory whose name is not UTF-8.
     #[test]
-    fn socket_preserves_argument_boundaries_and_resolves_paths_at_the_client() {
+    fn the_socket_carries_arguments_and_the_working_directory_whole() {
+        let cwd = OsString::from_vec(b"/client/caf\xe9".to_vec());
         let (mut client, server) = UnixStream::pair().unwrap();
         serde_json::to_writer(
             &mut client,
             &Message {
-                cwd: "/client".into(),
-                input: Input::Command(
-                    ["ir-load", "104", "model with spaces.wav"]
-                        .into_iter()
-                        .map(OsString::from)
-                        .collect(),
-                ),
+                cwd: cwd.clone(),
+                input: Input::Command(args(&["ir-load", "104", "model with spaces.wav"])),
             },
         )
         .unwrap();
         client.shutdown(Shutdown::Write).unwrap();
 
         let request = Request::read(&server).unwrap();
+        assert_eq!(request.cwd, Path::new(&cwd));
         let [BatchStep::Run { cmd, .. }] = request.steps.as_slice() else {
             panic!("expected exactly one command");
         };
-        let mut cmd = *cmd.clone();
-        resolve_paths(&mut cmd, &request.cwd);
-        let Cmd::IrLoad { slot, file } = cmd else {
+        let Cmd::IrLoad { slot, file } = &**cmd else {
             panic!("expected ir-load");
         };
-        assert_eq!(slot, 104);
-        assert_eq!(file, Path::new("/client/model with spaces.wav"));
+        assert_eq!(*slot, 104);
+        assert_eq!(file, Path::new("model with spaces.wav"));
+    }
+
+    /// The editor runs in its own directory. A relative file a command names
+    /// is the caller's, wherever in a request it appears.
+    #[test]
+    fn a_forwarded_command_reads_its_files_from_the_callers_directory() {
+        let pedal = Arc::new(Mutex::new(Pedal::default()));
+        let cwd = PathBuf::from("/no-such-tonepush-client");
+        let single = Request::command(cwd.clone(), args(&["ir-load", "104", "cab.wav"])).unwrap();
+        let (reply, _) = single.run(&mut session(&pedal));
+        let error = reply.error.expect("the file does not exist");
+        assert!(
+            error.contains("/no-such-tonepush-client/cab.wav"),
+            "{error}"
+        );
+
+        let batch = Request::batch(cwd, "ir-load 104 cab.wav\n").unwrap();
+        let (reply, _) = batch.run(&mut session(&pedal));
+        let stderr = text(&reply.stderr);
+        assert!(
+            stderr.contains("/no-such-tonepush-client/cab.wav"),
+            "{stderr}"
+        );
+
+        // The commands that need no pedal can sit in a batch too.
+        let resolved = |line: &str| {
+            let mut cmd = Cli::try_parse_from(std::iter::once("tonepush").chain(line.split(' ')))
+                .unwrap()
+                .cmd;
+            resolve_paths(&mut cmd, Path::new("/c"));
+            cmd
+        };
+        assert!(matches!(
+            resolved("inspect a.hlx"),
+            Cmd::Inspect { file } if file == Path::new("/c/a.hlx")
+        ));
+        assert!(matches!(
+            resolved("ir-info a.wav"),
+            Cmd::IrInfo { file } if file == Path::new("/c/a.wav")
+        ));
+        assert!(matches!(
+            resolved("export-hlx a.json /abs/b.hlx"),
+            Cmd::ExportHlx { input, output }
+                if input == Path::new("/c/a.json") && output == Path::new("/abs/b.hlx")
+        ));
+    }
+
+    /// What a failing line of a batch said goes back to whoever ran it, not
+    /// to the editor's own standard error.
+    #[test]
+    fn a_forwarded_batch_reports_each_failure_in_its_reply() {
+        let pedal = Arc::new(Mutex::new(Pedal::default()));
+        let batch = Request::batch("/c".into(), "enable 3 on\nselect nowhere\n").unwrap();
+        let (reply, changes) = batch.run(&mut session(&pedal));
+        let stderr = text(&reply.stderr);
+        assert!(stderr.contains("line 2: select nowhere:"), "{stderr}");
+        assert_eq!(
+            reply.error.as_deref(),
+            Some("1 of 2 attempted commands failed")
+        );
+        assert!(changes.buffer && !changes.lost);
+    }
+
+    /// A save names the slot it wrote, which is what the editor's backup has
+    /// to copy again. A rename asks for the list and nothing else.
+    #[test]
+    fn a_save_names_its_slot_and_a_rename_asks_for_no_reload() {
+        let pedal = Arc::new(Mutex::new(Pedal::default()));
+        let saves = "save\nsave 3 --setlist 2\n";
+        let (reply, changes) = Request::batch("/c".into(), saves)
+            .unwrap()
+            .run(&mut session(&pedal));
+        assert_eq!(reply.error, None, "{}", text(&reply.stderr));
+        assert_eq!(changes.saved, [(0, 0), (2, 3)]);
+        assert_eq!(changes.dirty, Some(false));
+        assert!(!changes.presets && !changes.buffer);
+
+        let (reply, changes) = Request::command("/c".into(), args(&["rename", "3", "Lead"]))
+            .unwrap()
+            .run(&mut session(&pedal));
+        assert_eq!(reply.error, None);
+        assert!(changes.renamed);
+        assert!(!changes.presets && !changes.selected && !changes.buffer);
+        assert!(changes.saved.is_empty());
+    }
+
+    /// A long `sleep` in a batch holds the editor's worker, which is what
+    /// keeps the pedal's channels alive. A short one is left as it was.
+    #[test]
+    fn a_long_pause_keeps_the_session_alive() {
+        struct Counted(Cable, Arc<Mutex<usize>>);
+        impl hx_usb::Wire for Counted {
+            fn send(&mut self, bytes: &[u8]) -> hx_usb::Result<()> {
+                *self.1.lock().unwrap() += 1;
+                self.0.send(bytes)
+            }
+            fn recv(&mut self, timeout: Duration) -> hx_usb::Result<Vec<u8>> {
+                self.0.recv(timeout)
+            }
+        }
+        let sent = Arc::new(Mutex::new(0));
+        let pedal = Arc::new(Mutex::new(Pedal::default()));
+        let mut session = hx_usb::Session::replaying(
+            Box::new(Counted(Cable(pedal), sent.clone())),
+            hx_proto::HX_STOMP,
+        )
+        .unwrap();
+        let frames = || *sent.lock().unwrap();
+
+        let before = frames();
+        rest_every(
+            &mut session,
+            Duration::from_millis(4),
+            Duration::from_millis(5),
+        )
+        .unwrap();
+        assert_eq!(frames(), before, "a short pause sends nothing");
+
+        rest_every(
+            &mut session,
+            Duration::from_millis(11),
+            Duration::from_millis(5),
+        )
+        .unwrap();
+        let channels = hx_proto::ChannelId::ALL.len();
+        assert_eq!(frames() - before, 2 * channels, "two keep-alives a channel");
+    }
+
+    #[test]
+    fn only_the_account_running_the_editor_is_served() {
+        let (client, server) = UnixStream::pair().unwrap();
+        same_user(&server).unwrap();
+        same_user(&client).unwrap();
+        // SAFETY: geteuid has no arguments and always returns the effective UID.
+        assert_eq!(peer_uid(&server).unwrap(), unsafe { libc::geteuid() });
     }
 
     #[test]

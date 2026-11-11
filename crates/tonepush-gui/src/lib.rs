@@ -15,6 +15,8 @@ mod audition;
 mod backups;
 mod board;
 mod browser;
+#[cfg(unix)]
+pub mod cli_bridge;
 pub mod cloud;
 mod config;
 mod connect;
@@ -36,8 +38,6 @@ mod publish;
 mod put;
 #[cfg(test)]
 mod screenshots;
-#[cfg(unix)]
-pub mod cli_bridge;
 mod session;
 mod shell;
 mod table;
