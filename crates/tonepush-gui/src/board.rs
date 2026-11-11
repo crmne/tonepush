@@ -455,6 +455,8 @@ pub(crate) struct TileLook<'a> {
     pub plain_caption: bool,
     /// A lock on the left of the top edge: the block cannot move.
     pub locked: bool,
+    /// Its share of the path's DSP, in the corner beside the drawing.
+    pub share: Option<&'a str>,
 }
 
 /// One tile: the category's wash and border, its drawing, name and caption,
@@ -585,6 +587,26 @@ pub(crate) fn paint_tile(ui: &Ui, rect: Rect, look: &TileLook) {
             Vec2::splat(glyph),
         );
         drawing.paint(ui, area, ink_drawing);
+    }
+    if let Some(share) = look.share {
+        let share = shell::galley(
+            ui,
+            share.to_owned(),
+            theme::semibold(if look.large { 10.5 } else { 9.5 }),
+            if look.on {
+                theme::muted()
+            } else {
+                theme::faint()
+            },
+        );
+        painter.galley(
+            Pos2::new(
+                rect.left() + 8.0,
+                rect.top() + pad_top + glyph / 2.0 - share.size().y / 2.0,
+            ),
+            share,
+            Color32::PLACEHOLDER,
+        );
     }
     let mut bottom = rect.bottom() - pad_bottom;
     if !look.compact && !look.caption.is_empty() {
@@ -846,6 +868,7 @@ struct TileFacts {
     drivers: Vec<(String, Option<Color32>)>,
     hover: String,
     effect: bool,
+    share: Option<String>,
 }
 
 impl App {
@@ -856,6 +879,10 @@ impl App {
         let mut snapshot = false;
         let mut drivers: Vec<(String, Option<Color32>)> = Vec::new();
         let mut hover = Vec::new();
+        let share = self.block_share(block);
+        if let Some(share) = &share {
+            hover.push(format!("Uses {share} of its path's DSP"));
+        }
         if let Some(marks) = self.control_marks().get(&block.position) {
             for (source, what) in marks {
                 hover.push(match what.as_str() {
@@ -892,6 +919,7 @@ impl App {
             drivers,
             hover: hover.join("\n"),
             effect: self.is_effect(block),
+            share,
         }
     }
 
@@ -1405,6 +1433,7 @@ impl App {
                     drivers: &facts.drivers,
                     plain_caption: false,
                     locked: false,
+                    share: facts.share.as_deref(),
                 },
             );
             if !live {

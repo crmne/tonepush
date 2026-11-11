@@ -1662,6 +1662,9 @@ impl App {
         if let Some(cab) = block.paired.and_then(|m| catalog.model_number(m)) {
             parts.push((cab.name.clone(), false));
         }
+        if let Some(share) = self.block_share(block) {
+            parts.push((format!("{share} DSP"), false));
+        }
         parts
     }
 

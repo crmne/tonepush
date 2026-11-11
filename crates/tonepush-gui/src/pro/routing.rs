@@ -849,6 +849,7 @@ impl Panel {
                             drivers: &[],
                             plain_caption: true,
                             locked: pinned,
+                            share: None,
                         },
                     );
                     if carried {
