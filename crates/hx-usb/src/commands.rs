@@ -143,10 +143,13 @@ fn is_preset_action(item: &Value) -> bool {
     let kind = item
         .get(rpc::key::SWITCH_ASSIGNMENT_KIND)
         .and_then(Value::as_i64);
-    let block = item
-        .get(rpc::key::SWITCH_TARGET)
-        .and_then(|target| target.get(rpc::key::BLOCK));
-    kind == Some(rpc::SWITCH_KIND_PRESET_ACTION) && matches!(block, None | Some(Value::Nil))
+    // A target that is missing or is not a map is malformed whatever the
+    // kind says, and is left for `carried` to refuse.
+    let Some(target @ Value::Map(_)) = item.get(rpc::key::SWITCH_TARGET) else {
+        return false;
+    };
+    kind == Some(rpc::SWITCH_KIND_PRESET_ACTION)
+        && matches!(target.get(rpc::key::BLOCK), None | Some(Value::Nil))
 }
 
 /// One entry of a switch's assignment list.
@@ -1880,6 +1883,22 @@ mod validation_tests {
             },
         });
         assert!(decode_switch(1, &blockless).is_err());
+
+        // Nor is an action whose target is missing or is not a map at all.
+        for target in [None, Some(Value::Bool(false))] {
+            let mut entry = vec![
+                (rpc::key::ENABLED, Value::Bool(false)),
+                (rpc::key::SWITCH_ASSIGNMENT_KIND, Value::Int(3)),
+            ];
+            entry.extend(target.map(|target| (rpc::key::SWITCH_TARGET, target)));
+            let entry = Value::Map(
+                entry
+                    .into_iter()
+                    .map(|(k, v)| (hx_proto::msgpack::Key::Int(k), v))
+                    .collect(),
+            );
+            assert!(decode_switch(1, &reply(entry)).is_err());
+        }
 
         // The kind alone does not hide an entry that does name a block.
         let with_block = reply(hx_proto::msgmap! {
