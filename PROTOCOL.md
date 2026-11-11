@@ -843,12 +843,28 @@ that our upload hung the device; the cause was the control-channel
 misconfiguration described above, not the message. The remaining hazard is the
 declared-length rule: see keys 114/115 below.
 
-**A message this large must be chunked, and paced. [confirmed]** The device
-accepts 256 bytes of stream data per frame and paces the sender with
-acknowledgements. Writing all 33 frames back to back fills its receive window and
-stalls the endpoint: the transfer times out, and afterwards the interface will
-not re-claim until the device is power-cycled. Read between chunks, as HX Edit
-does.
+**A message this large must be chunked, and kept inside the device's receive
+window. [confirmed]** The acknowledgement in every frame the device sends is
+the stream bytes it has taken on that channel plus 0x200: the host may have
+512 bytes outstanding and no more. It is the mirror of our own
+`0x1000 + bytes received`, and the device's answering HELLO ends in
+`00 02 00 00` where ours ends in `00 10 00 00`. In 487 device frames recorded
+from an HX Stomp at 3.80 the field is exactly bytes-sent plus 512, every time.
+
+HX Edit sends an impulse response as one 496-byte frame and one 16-byte frame,
+512 bytes, then waits for the ACK that moves the limit on before sending
+another byte. Across `07-ir-upload.log`, `mac-ir-capture.log` and
+`mac-restore-capture.log` (979 large frames) it never sends past the limit,
+and the device took up to 173 ms to reopen the window.
+
+Sending past it is what stalls the endpoint: the transfer times out, and
+afterwards the interface will not re-claim until the device is power-cycled.
+Reading between chunks for a fixed 80 ms was not enough. That read ends early
+when any frame arrives, a keep-alive on another channel included, so two
+256-byte chunks could go out with no acknowledgement between them and a third
+followed before a busy pedal had caught up. A restore of 77 impulse responses
+stopped with "write timed out" at the eighth upload, and a second run at the
+fourth. `send_chunks` now waits for room before every frame.
 
 **File dialogs are sheets, not windows. [method]** HX Edit's Import opens a
 sheet attached to its main window, so `windows` shows one and the dialog looks
