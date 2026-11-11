@@ -1318,7 +1318,16 @@ impl Session {
     /// the events channel, so
     /// this cannot land mid-transaction.
     pub fn poll_notifications(&mut self) -> Result<Vec<(i64, Value)>> {
-        self.read_available(Duration::from_millis(20))?;
+        // Everything waiting, not one transfer: a knob turned on the pedal is
+        // an announcement per step, and at one transfer per poll the screen
+        // trailed the hand by seconds. Bounded, so a pedal that never stops
+        // talking cannot keep the caller here.
+        let give_up = Instant::now() + Duration::from_millis(150);
+        while self.read_available(Duration::from_millis(20))?.is_some() {
+            if Instant::now() >= give_up {
+                break;
+            }
+        }
         let behind = self
             .channels
             .get(&ChannelId::EVENTS.device)
