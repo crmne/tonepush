@@ -87,6 +87,13 @@ pub struct DeviceProfile {
     /// once the session has gone, at the next preset switch, until power
     /// cycled. On an HX Stomp it kept the next session from opening.
     pub closes_sessions: bool,
+    /// How many stream bytes the device lets the host have outstanding on a
+    /// channel: its acknowledgement is the bytes it has taken plus this, and
+    /// a large send waits for room rather than go past it. 0x200 on an HX
+    /// Stomp (3.80), where sending past it stops the pedal taking writes
+    /// until its power is pulled. `None` where it was never measured: such a
+    /// device is sent to as before, paced by reading between chunks.
+    pub send_window: Option<u32>,
 }
 
 impl DeviceProfile {
@@ -113,6 +120,7 @@ pub const HX_STOMP: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: true,
     closes_sessions: false,
+    send_window: Some(0x200),
 };
 pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     product_id: 0x4253,
@@ -126,6 +134,7 @@ pub const HX_STOMP_XL: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
     closes_sessions: false,
+    send_window: None,
 };
 pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     product_id: 0x4248,
@@ -146,6 +155,7 @@ pub const HELIX_FLOOR: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Helix,
     closes_ir_reads: false,
     closes_sessions: true,
+    send_window: None,
 };
 pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     product_id: 0x4249,
@@ -159,6 +169,7 @@ pub const HELIX_RACK: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
     closes_sessions: false,
+    send_window: None,
 };
 pub const HELIX_LT: DeviceProfile = DeviceProfile {
     product_id: 0x424A,
@@ -172,6 +183,7 @@ pub const HELIX_LT: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
     closes_sessions: false,
+    send_window: None,
 };
 pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     product_id: 0x4245,
@@ -185,6 +197,7 @@ pub const HX_EFFECTS: DeviceProfile = DeviceProfile {
     controls: rpc::ControlLayout::Stomp,
     closes_ir_reads: false,
     closes_sessions: false,
+    send_window: None,
 };
 
 /// Every device profile we recognise.

@@ -1934,6 +1934,29 @@ mod pedal_tests {
         }
     }
 
+    /// An upload is 33 frames, and the pedal lets only 512 bytes of them be
+    /// outstanding. A pedal slow to acknowledge - it is busy writing the
+    /// last impulse response to flash - must be waited for, not sent past:
+    /// one that is sent past stops taking writes until its power is pulled.
+    #[test]
+    fn an_ir_upload_waits_for_a_slow_pedal_to_make_room() {
+        for ack_delay in [0, 3] {
+            let pedal = Pedal::new();
+            let mut session = fake::session(&pedal);
+            pedal.lock().unwrap().ack_delay = ack_delay;
+
+            // The longest the pedal stores: 8 KB, 33 frames.
+            let samples: Vec<f32> = (0..2048).map(|i| i as f32 / 4096.0).collect();
+            session
+                .upload_ir(3, "Cab", &samples)
+                .expect("the upload lands");
+
+            let pedal = pedal.lock().unwrap();
+            assert_eq!(pedal.overrun, 0, "sent past the window at {ack_delay}");
+            assert_eq!(pedal.irs[&3], ("Cab".into(), sum_of(&samples)));
+        }
+    }
+
     /// A slot that is empty, or holds another name, shows the upload by
     /// changing, so it needs no clearing first.
     #[test]

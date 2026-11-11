@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use hx_proto::frame::{ChannelHeader, MSG_ACK, MSG_DATA, MSG_HELLO};
+use hx_proto::frame::{ChannelHeader, FLAG_HANDSHAKE, MSG_ACK, MSG_DATA, MSG_HELLO};
 use hx_proto::msgpack::{Encoder, Value};
 use hx_proto::rpc::{key, op, Message, StreamReader};
 use hx_proto::{ChannelId, Frame};
@@ -68,6 +68,18 @@ pub struct Pedal {
     /// Notifications waiting for the window to open.
     events_held: VecDeque<Vec<u8>>,
     inbox: BTreeMap<u16, StreamReader>,
+    /// Stream bytes taken on each channel since it was opened.
+    taken: BTreeMap<u16, u32>,
+    /// How far each channel's last acknowledgement let the host send.
+    allowed: BTreeMap<u16, u32>,
+    /// Host reads that find nothing before an acknowledgement owed for part
+    /// of a message is sent: a pedal slow to reopen its receive window.
+    pub ack_delay: usize,
+    /// Acknowledgements waiting out `ack_delay`, with the reads left.
+    slow_acks: VecDeque<(usize, Vec<u8>)>,
+    /// Stream bytes the host sent past what it had been allowed. A real
+    /// pedal stops taking writes when this happens.
+    pub overrun: u32,
     seq: BTreeMap<u16, u16>,
 }
 
@@ -93,6 +105,11 @@ impl Pedal {
             events_acked: 0,
             events_held: VecDeque::new(),
             inbox: BTreeMap::new(),
+            taken: BTreeMap::new(),
+            allowed: BTreeMap::new(),
+            ack_delay: 0,
+            slow_acks: VecDeque::new(),
+            overrun: 0,
             seq: BTreeMap::new(),
         }))
     }
@@ -131,6 +148,11 @@ impl Pedal {
         if header.msg_type == MSG_HELLO && rest.is_empty() {
             self.hellos.push(frame.dst);
         }
+        if frame.flags == FLAG_HANDSHAKE {
+            // Opening a channel starts its byte count again.
+            self.taken.insert(frame.dst, 0);
+            self.allowed.insert(frame.dst, Self::WINDOW);
+        }
         if frame.dst == ChannelId::EVENTS.device
             && (header.msg_type & MSG_ACK != 0 || header.has_data())
         {
@@ -150,9 +172,20 @@ impl Pedal {
             self.failing_reads = Some(why);
         }
         let node = frame.dst;
+        let taken = self.taken.entry(node).or_insert(0);
+        *taken = taken.wrapping_add(rest.len() as u32);
+        let allowed = *self.allowed.entry(node).or_insert(Self::WINDOW);
+        self.overrun += (taken.wrapping_sub(allowed) as i32).max(0) as u32;
+        let answered = self.outbox.len() + self.events_held.len();
         let reader = self.inbox.entry(node).or_default();
         reader.push(rest);
         let messages = reader.take_messages().unwrap_or_default();
+        if messages.is_empty() {
+            // Part of a message, or one that gets no reply: the bytes are
+            // acknowledged on their own, which is what reopens the window.
+            debug_assert_eq!(answered, self.outbox.len() + self.events_held.len());
+            self.acknowledge(node);
+        }
         for message in messages {
             if let Ok(Message::Request { txn, opcode, args }) =
                 Message::try_from_value(message.body)
@@ -294,15 +327,56 @@ impl Pedal {
         self.outbox.push_back(frame);
     }
 
+    /// Stream bytes the host may have outstanding on a channel, as an HX
+    /// Stomp allows: its acknowledgement is what it has taken plus this.
+    const WINDOW: u32 = 0x200;
+
+    /// The acknowledgement a frame on `node` carries now, which is also how
+    /// far the host may send from here on.
+    fn allow(&mut self, node: u16) -> u32 {
+        let ack = Self::WINDOW.wrapping_add(self.taken.get(&node).copied().unwrap_or(0));
+        self.allowed.insert(node, ack);
+        ack
+    }
+
+    /// Acknowledge the bytes taken on `node` with a bare ACK frame, after
+    /// `ack_delay` empty reads if the pedal is being slow about it.
+    fn acknowledge(&mut self, node: u16) {
+        // The host learns of the room when it reads the frame, not before;
+        // until then it is held to what it was last told.
+        let ack = Self::WINDOW.wrapping_add(self.taken.get(&node).copied().unwrap_or(0));
+        let seq = self.seq.entry(node).or_insert(0);
+        let mut payload = Vec::new();
+        ChannelHeader {
+            seq: *seq,
+            msg_type: MSG_ACK,
+            ack,
+        }
+        .encode_into(&mut payload);
+        *seq = seq.wrapping_add(1);
+        let host = ChannelId::ALL
+            .iter()
+            .find(|channel| channel.device == node)
+            .map_or(0, |channel| channel.host);
+        let frame = Frame::new(host, node, payload).encode().unwrap();
+        if self.ack_delay == 0 {
+            self.allowed.insert(node, ack);
+            self.outbox.push_back(frame);
+        } else {
+            self.slow_acks.push_back((self.ack_delay, frame));
+        }
+    }
+
     /// Queue one message for the host, on the channel `node` names.
     fn reply(&mut self, node: u16, message: &Message) {
         let body = Encoder::encode(&message.to_value());
+        let ack = self.allow(node);
         let seq = self.seq.entry(node).or_insert(0);
         let mut payload = Vec::new();
         ChannelHeader {
             seq: *seq,
             msg_type: MSG_DATA,
-            ack: 0x1000,
+            ack,
         }
         .encode_into(&mut payload);
         *seq = seq.wrapping_add(1);
@@ -350,10 +424,24 @@ impl Wire for Cable {
         if let Some(why) = &pedal.failing_reads {
             return Err(Error::Usb(why.clone()));
         }
-        pedal
-            .outbox
-            .pop_front()
-            .ok_or_else(|| Error::Usb("read timed out".into()))
+        if let Some(frame) = pedal.outbox.pop_front() {
+            return Ok(frame);
+        }
+        // Nothing else to say: a slow acknowledgement comes one read closer,
+        // and is sent, and its room granted, once its wait is over.
+        if let Some((wait, _)) = pedal.slow_acks.front_mut() {
+            if *wait > 0 {
+                *wait -= 1;
+            } else if let Some((_, frame)) = pedal.slow_acks.pop_front() {
+                if let Ok(decoded) = Frame::decode(&frame) {
+                    if let Some((header, _)) = ChannelHeader::decode(&decoded.payload) {
+                        pedal.allowed.insert(decoded.src, header.ack);
+                    }
+                }
+                return Ok(frame);
+            }
+        }
+        Err(Error::Usb("read timed out".into()))
     }
 }
 

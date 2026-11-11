@@ -2689,7 +2689,7 @@ fn ends_audition(cmd: &Cmd) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hx_proto::frame::{ChannelHeader, MSG_DATA};
+    use hx_proto::frame::{ChannelHeader, FLAG_HANDSHAKE, MSG_ACK, MSG_DATA};
     use hx_proto::msgpack::{Encoder, Value};
     use hx_proto::rpc::{key, op, Message, StreamReader};
     use hx_proto::{ChannelId, Frame};
@@ -2768,6 +2768,9 @@ mod tests {
         outbox: VecDeque<Vec<u8>>,
         /// Stream bytes from the host that are not yet a whole message.
         inbox: BTreeMap<u16, StreamReader>,
+        /// Stream bytes taken on each channel since it was opened: what the
+        /// pedal's acknowledgements count, and how a send knows it has room.
+        taken: BTreeMap<u16, u32>,
         /// The next sequence number on each channel.
         seq: BTreeMap<u16, u16>,
     }
@@ -2823,6 +2826,7 @@ mod tests {
                 requests: Vec::new(),
                 outbox: VecDeque::new(),
                 inbox: BTreeMap::new(),
+                taken: BTreeMap::new(),
                 seq: BTreeMap::new(),
             }))
         }
@@ -2880,13 +2884,23 @@ mod tests {
             let Some((header, rest)) = ChannelHeader::decode(&frame.payload) else {
                 return;
             };
+            if frame.flags == FLAG_HANDSHAKE {
+                self.taken.insert(frame.dst, 0);
+            }
             if !header.has_data() || rest.is_empty() {
                 return;
             }
             let node = frame.dst;
+            let taken = self.taken.entry(node).or_insert(0);
+            *taken = taken.wrapping_add(rest.len() as u32);
             let reader = self.inbox.entry(node).or_default();
             reader.push(rest);
             let messages = reader.take_messages().unwrap_or_default();
+            if messages.is_empty() {
+                // Part of a message: acknowledged on its own, which is what
+                // lets the rest of it be sent.
+                self.send(node, MSG_ACK, &[]);
+            }
             for message in messages {
                 if let Ok(Message::Request { txn, opcode, args }) =
                     Message::try_from_value(message.body)
@@ -3004,20 +3018,27 @@ mod tests {
         /// Queue one message for the host, on the channel `node` names.
         fn reply(&mut self, node: u16, message: &Message) {
             let body = Encoder::encode(&message.to_value());
+            // From the device, on a service nothing reads, and its length.
+            let mut stream = vec![0; 4];
+            stream.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            stream.extend_from_slice(&body);
+            self.send(node, MSG_DATA, &stream);
+        }
+
+        /// Queue one frame for the host. Its acknowledgement is what an HX
+        /// Stomp sends: the stream bytes taken on the channel plus 0x200.
+        fn send(&mut self, node: u16, msg_type: u16, stream: &[u8]) {
+            let ack = 0x200u32.wrapping_add(self.taken.get(&node).copied().unwrap_or(0));
             let seq = self.seq.entry(node).or_insert(0);
             let mut payload = Vec::new();
             ChannelHeader {
                 seq: *seq,
-                msg_type: MSG_DATA,
-                ack: 0x1000,
+                msg_type,
+                ack,
             }
             .encode_into(&mut payload);
             *seq = seq.wrapping_add(1);
-            // From the device, on a service nothing reads, and its length.
-            payload.extend_from_slice(&0u16.to_le_bytes());
-            payload.extend_from_slice(&0u16.to_le_bytes());
-            payload.extend_from_slice(&(body.len() as u32).to_le_bytes());
-            payload.extend_from_slice(&body);
+            payload.extend_from_slice(stream);
             let host = ChannelId::ALL
                 .iter()
                 .find(|channel| channel.device == node)
