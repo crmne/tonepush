@@ -547,6 +547,9 @@ impl Session {
             ch.reader
                 .take_messages()
                 .map_err(|error| Error::Protocol(error.to_string()))?;
+            // Whatever the events channel sent before its handshake was
+            // for the session before, and a message cut short there is
+            // never finished: the stream starts again on a fresh header.
             ch.realign.clear();
             ch.rx_bytes = carried;
             // HX Edit's counter jumps 0 -> 2 here. The device stops responding
@@ -560,7 +563,6 @@ impl Session {
             ch.reader
                 .take_messages()
                 .map_err(|error| Error::Protocol(error.to_string()))?;
-            ch.realign.clear();
         }
         self.ack_channel(id)
     }

@@ -1906,6 +1906,23 @@ mod pedal_tests {
         assert_eq!(session.events_skipped(), 0);
     }
 
+    /// The device splits a notification across two frames after its first
+    /// four bytes. When the first of them arrives while the events service
+    /// is still being opened, the notification is kept all the same.
+    #[test]
+    fn a_notification_split_across_the_service_opening_is_kept() {
+        let pedal = Pedal::new();
+        pedal.lock().unwrap().events_at_open = Some(TICK_BYTES[..4].to_vec());
+        let mut session = fake::session_as(&pedal, hx_proto::HX_EFFECTS);
+        pedal.lock().unwrap().send_raw_events(&TICK_BYTES[4..]);
+        let mut seen = 0;
+        for _ in 0..2 {
+            seen += session.poll_notifications().unwrap().len();
+        }
+        assert_eq!(seen, 1);
+        assert_eq!(session.events_skipped(), 0);
+    }
+
     #[test]
     fn a_session_says_whether_the_events_channel_answered() {
         let pedal = Pedal::new();
