@@ -68,7 +68,12 @@ enum At {
 /// Effects 3.80, Pi 4, 2026-10-15, after front-panel knob turns). And a
 /// header in front of a real notification, over a body that merely begins
 /// with a value that decodes, would take that notification with it.
-fn whole(service: u16, body: &[u8], end: usize) -> At {
+///
+/// The service number in the header is not held against a notification. In
+/// the captures it is always 4 there, but the stream reader trusts only the
+/// length of a header, and with reason: on some replies the device leaves
+/// the field uninitialised.
+fn whole(body: &[u8], end: usize) -> At {
     let mut decoder = hx_proto::msgpack::Decoder::new(body);
     let Ok(value) = decoder.value() else {
         return At::Not;
@@ -80,9 +85,7 @@ fn whole(service: u16, body: &[u8], end: usize) -> At {
         return At::Opened(end);
     }
     match hx_proto::rpc::Message::try_from_value(value) {
-        Ok(hx_proto::rpc::Message::Notification { .. }) if service == EVENTS_SERVICE => {
-            At::Notification(end)
-        }
+        Ok(hx_proto::rpc::Message::Notification { .. }) => At::Notification(end),
         _ => At::Not,
     }
 }
@@ -156,7 +159,7 @@ impl Realign {
         if self.buf.len() < end {
             At::Waiting
         } else {
-            whole(service, &self.buf[pos + 8..end], end)
+            whole(&self.buf[pos + 8..end], end)
         }
     }
 
@@ -381,6 +384,18 @@ mod tests {
         let mut realign = Realign::default();
         assert!(realign.push(&message[..cut]).is_empty());
         assert_eq!(realign.push(&message[cut..]), message);
+        assert_eq!(realign.skipped(), 0);
+    }
+
+    #[test]
+    fn a_notification_passes_under_either_service_number() {
+        // The header's service field is not held against a notification:
+        // the stream reader trusts only the length, and the pretend pedal
+        // writes 0 there.
+        let mut under_zero = TICK.to_vec();
+        under_zero[2] = 0;
+        let mut realign = Realign::default();
+        assert_eq!(realign.push(&under_zero), under_zero);
         assert_eq!(realign.skipped(), 0);
     }
 

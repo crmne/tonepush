@@ -1860,6 +1860,23 @@ mod pedal_tests {
         }
     }
 
+    /// An HX Effects session, whose events channel goes through the
+    /// realigner, still hears what the pretend pedal says. The pretend pedal
+    /// writes 0 where the device writes the service number.
+    #[test]
+    fn an_hx_effects_session_hears_the_pedal() {
+        let pedal = Pedal::new();
+        let mut session = fake::session_as(&pedal, hx_proto::HX_EFFECTS);
+        session.poll_notifications().unwrap();
+        pedal.lock().unwrap().notify(22, tick());
+        let mut seen = 0;
+        for _ in 0..2 {
+            seen += session.poll_notifications().unwrap().len();
+        }
+        assert_eq!(seen, 1);
+        assert_eq!(session.events_skipped(), 0);
+    }
+
     /// The tick as the HX Effects sends it, stream header included.
     const TICK_BYTES: [u8; 21] = [
         0x00, 0x00, 0x04, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x82, 0x69, 0x16, 0x6a, 0x84, 0x52, 0x00,
