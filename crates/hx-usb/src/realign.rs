@@ -119,9 +119,9 @@ impl Realign {
                 // The rest may still come, so wait for it. Two things
                 // together show that it will not, and that this header was
                 // not a header: it has already waited through a whole frame
-                // (the device sends a message in two frames at most), and a
-                // whole notification has arrived behind it. Neither is
-                // enough alone. A long message may take more frames, and
+                // (no message has been seen in more than two), and a whole
+                // notification has arrived behind it. Neither is enough
+                // alone. A long message may take more frames, and
                 // what lies behind an unfinished header is inside its
                 // declared body, where the bytes of a notification can turn
                 // up as data. Waiting on regardless would hold back

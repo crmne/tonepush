@@ -169,8 +169,10 @@ declare at most 4 KB (the device never has more than that unacknowledged,
 above) and whose body is exactly one notification, or the bare service number
 that answers the service opening. Anything else is stepped over a byte at a
 time. So is a header whose message is still missing bytes a frame later, once a
-whole notification has arrived behind it: the device sends a message in two
-frames at most. The cost is the one notification the slip cut through, and
+whole notification has arrived behind it. No message has been seen in more than
+two frames, but nothing establishes that as a limit, so a notification that
+took three and carried another one's bytes as data would lose its header. The
+cost is the one notification the slip cut through, and
 `Session::events_skipped` counts the bytes. The body check is needed: stepping
 through a parameter notification, the bytes `ca 00 00 00 00` (a float 0.0) and
 the key after them pass as a header for service 0 with a small length.
