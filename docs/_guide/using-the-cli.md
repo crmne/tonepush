@@ -96,4 +96,4 @@ tonepush models           # browse the catalog; needs no hardware
 tonepush decode capture.log   # decode a USB capture; needs no hardware
 ```
 
-`watch` prints what the device reports as you touch the front panel, which is also the fastest way to discover what an unlabelled control actually sends. `decode` replays the captures the protocol documentation was reconstructed from; the [opcode dictionary](/opcodes/) is the map.
+`watch` prints what the device reports as you touch the front panel, which is also the fastest way to discover what an unlabelled control actually sends. Started too soon after another session, it can find the device silent on its events channel; it then says so, and running it again half a minute later works. `decode` replays the captures the protocol documentation was reconstructed from; the [opcode dictionary](/opcodes/) is the map.

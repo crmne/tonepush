@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use hx_proto::frame::{ChannelHeader, MSG_ACK, MSG_DATA, MSG_HELLO};
+use hx_proto::frame::{ChannelHeader, FLAG_HANDSHAKE, MSG_ACK, MSG_DATA, MSG_HELLO};
 use hx_proto::msgpack::{Encoder, Value};
 use hx_proto::rpc::{key, op, Message, StreamReader};
 use hx_proto::{ChannelId, Frame};
@@ -61,12 +61,19 @@ pub struct Pedal {
     /// frame for almost every notification it receives (PROTOCOL.md). This
     /// models that: only ACK and data frames move the window.
     pub events_window: Option<u32>,
+    /// Leave the events channel's handshake unanswered, as an HX Effects did
+    /// when a session opened while it was still streaming to the previous
+    /// one (PROTOCOL.md).
+    pub deaf_events: bool,
     /// Data bytes sent on the events channel, after the channel header.
     events_sent: u32,
     /// What the host has acknowledged of them through ACK or data frames.
     events_acked: u32,
     /// Notifications waiting for the window to open.
     events_held: VecDeque<Vec<u8>>,
+    /// Stream bytes to send on the events channel, as they are, the moment
+    /// its service is opened: what the device has to say first.
+    pub events_at_open: Option<Vec<u8>>,
     inbox: BTreeMap<u16, StreamReader>,
     seq: BTreeMap<u16, u16>,
 }
@@ -89,9 +96,11 @@ impl Pedal {
             transfers_in: 0,
             hellos: Vec::new(),
             events_window: None,
+            deaf_events: false,
             events_sent: 0,
             events_acked: 0,
             events_held: VecDeque::new(),
+            events_at_open: None,
             inbox: BTreeMap::new(),
             seq: BTreeMap::new(),
         }))
@@ -121,6 +130,24 @@ impl Pedal {
         );
     }
 
+    /// Send `bytes` on the events channel as one frame of stream data, as
+    /// they are: for streams the device gets wrong.
+    pub fn send_raw_events(&mut self, bytes: &[u8]) {
+        let node = ChannelId::EVENTS.device;
+        let seq = self.seq.entry(node).or_insert(0);
+        let mut payload = Vec::new();
+        ChannelHeader {
+            seq: *seq,
+            msg_type: MSG_DATA,
+            ack: 0x1000,
+        }
+        .encode_into(&mut payload);
+        *seq = seq.wrapping_add(1);
+        payload.extend_from_slice(bytes);
+        let frame = Frame::new(ChannelId::EVENTS.host, node, payload);
+        self.outbox.push_back(frame.encode().unwrap());
+    }
+
     fn receive(&mut self, bytes: &[u8]) {
         let Ok(frame) = Frame::decode(bytes) else {
             return;
@@ -130,6 +157,12 @@ impl Pedal {
         };
         if header.msg_type == MSG_HELLO && rest.is_empty() {
             self.hellos.push(frame.dst);
+        }
+        if frame.flags == FLAG_HANDSHAKE && header.msg_type == MSG_HELLO {
+            if !(self.deaf_events && frame.dst == ChannelId::EVENTS.device) {
+                self.answer_hello(frame.dst);
+            }
+            return;
         }
         if frame.dst == ChannelId::EVENTS.device
             && (header.msg_type & MSG_ACK != 0 || header.has_data())
@@ -150,6 +183,11 @@ impl Pedal {
             self.failing_reads = Some(why);
         }
         let node = frame.dst;
+        if node == ChannelId::EVENTS.device {
+            if let Some(bytes) = self.events_at_open.take() {
+                self.send_raw_events(&bytes);
+            }
+        }
         let reader = self.inbox.entry(node).or_default();
         reader.push(rest);
         let messages = reader.take_messages().unwrap_or_default();
@@ -294,6 +332,22 @@ impl Pedal {
         self.outbox.push_back(frame);
     }
 
+    /// Answer a channel handshake the way the device does: sequence 0, type
+    /// hello, the capability bytes it sends back.
+    fn answer_hello(&mut self, node: u16) {
+        let mut payload = Vec::new();
+        ChannelHeader {
+            seq: 0,
+            msg_type: MSG_HELLO,
+            ack: 0x0100_0100,
+        }
+        .encode_into(&mut payload);
+        payload.extend_from_slice(&[0x00, 0x02, 0x00, 0x00]);
+        let mut frame = Frame::new(host_of(node), node, payload);
+        frame.flags = FLAG_HANDSHAKE;
+        self.outbox.push_back(frame.encode().unwrap());
+    }
+
     /// Queue one message for the host, on the channel `node` names.
     fn reply(&mut self, node: u16, message: &Message) {
         let body = Encoder::encode(&message.to_value());
@@ -310,11 +364,7 @@ impl Pedal {
         payload.extend_from_slice(&0u16.to_le_bytes());
         payload.extend_from_slice(&(body.len() as u32).to_le_bytes());
         payload.extend_from_slice(&body);
-        let host = ChannelId::ALL
-            .iter()
-            .find(|channel| channel.device == node)
-            .map_or(0, |channel| channel.host);
-        let frame = Frame::new(host, node, payload).encode().unwrap();
+        let frame = Frame::new(host_of(node), node, payload).encode().unwrap();
         if node != ChannelId::EVENTS.device {
             self.outbox.push_back(frame);
         } else if self.events_held.is_empty() && self.events_fit(&frame) {
@@ -323,6 +373,14 @@ impl Pedal {
             self.events_held.push_back(frame);
         }
     }
+}
+
+/// The host node that talks to device node `node`.
+fn host_of(node: u16) -> u16 {
+    ChannelId::ALL
+        .iter()
+        .find(|channel| channel.device == node)
+        .map_or(0, |channel| channel.host)
 }
 
 /// The USB cable, as far as the session can tell.

@@ -20,7 +20,10 @@ pub mod backup;
 #[cfg(test)]
 mod fake;
 pub mod ir;
+mod realign;
 pub mod replay;
+
+use realign::Realign;
 
 /// The claimed interface and its two bulk endpoints, ready to become a wire.
 type Endpoints = (
@@ -192,6 +195,12 @@ struct Channel {
     /// stops the device dead - including the channels nobody is waiting on.
     acked: u32,
     reader: StreamReader,
+    /// Events channel only, and only where the device's profile realigns
+    /// it: what the device sends passes through this before `reader`, which
+    /// cannot recover from a frame sent out of order.
+    realign: Realign,
+    /// Whether the device answered this channel's handshake.
+    answered: bool,
     txn: i64,
 }
 
@@ -207,6 +216,8 @@ impl Channel {
             rx_bytes: 0,
             acked: 0,
             reader: StreamReader::new(),
+            realign: Realign::default(),
+            answered: false,
             txn: rpc::FIRST_TXN,
         }
     }
@@ -536,6 +547,10 @@ impl Session {
             ch.reader
                 .take_messages()
                 .map_err(|error| Error::Protocol(error.to_string()))?;
+            // Whatever the events channel sent before its handshake was
+            // for the session before, and a message cut short there is
+            // never finished: the stream starts again on a fresh header.
+            ch.realign.clear();
             ch.rx_bytes = carried;
             // HX Edit's counter jumps 0 -> 2 here. The device stops responding
             // if we send 1, so the observed numbering is reproduced.
@@ -645,13 +660,50 @@ impl Session {
         let Some((hdr, rest)) = ChannelHeader::decode(&f.payload) else {
             return;
         };
+        let realigns = self.profile.realigns_events;
         let Some(ch) = self.channels.get_mut(&f.src) else {
             return;
         };
+        if hdr.msg_type == MSG_HELLO {
+            ch.answered = true;
+        }
         if hdr.has_data() && !rest.is_empty() {
             ch.rx_bytes = ch.rx_bytes.wrapping_add(rest.len() as u32);
-            ch.reader.push(rest);
+            if realigns && f.src == ChannelId::EVENTS.device {
+                let skipped = ch.realign.skipped();
+                ch.reader.push(&ch.realign.push(rest));
+                if debug() && ch.realign.skipped() > skipped {
+                    eprintln!(
+                        "events stream out of step: skipped {} bytes",
+                        ch.realign.skipped() - skipped
+                    );
+                }
+            } else {
+                ch.reader.push(rest);
+            }
         }
+    }
+
+    /// Whether the events channel answered its handshake. When it did not,
+    /// the session works but no notification ever arrives on it. Seen on an
+    /// HX Effects (3.80) when a session opens while the device is still
+    /// streaming notifications to the previous one, which it does for up to
+    /// half a minute after that session ends (PROTOCOL.md, "An events
+    /// handshake can go unanswered"). Nothing is retried here: whether to
+    /// open again, once the device has gone quiet, is the caller's decision.
+    pub fn events_answered(&self) -> bool {
+        self.channels
+            .get(&ChannelId::EVENTS.device)
+            .is_some_and(|c| c.answered)
+    }
+
+    /// Bytes stepped over on the events channel to get back onto a message
+    /// boundary, because the device sent a frame out of order. Each slip
+    /// costs one notification. See `realign`.
+    pub fn events_skipped(&self) -> u64 {
+        self.channels
+            .get(&ChannelId::EVENTS.device)
+            .map_or(0, |c| c.realign.skipped())
     }
 
     fn rx_bytes(&self, id: ChannelId) -> u32 {

@@ -141,6 +141,56 @@ untouched, three minutes of `watch`: 195 notifications and then silence before
 (195 ticks of 21 bytes is 4095 bytes), 1095 and still flowing after. The device
 tests do not cover this; `fake::Pedal::events_window` models it.
 
+**The events stream can lose its place. [confirmed on an HX Effects]** Now and
+then an HX Effects (3.80) sends one notification on channel `0x1002` with its
+first four bytes behind the rest of it:
+
+```text
+expected  00 00 04 00 | 0d 00 00 00 <13-byte body> | 00 00 04 00 0d ...
+received  0d 00 00 00 <13-byte body> | 00 00 04 00 | 00 00 04 00 0d ...
+```
+
+The frame's byte count is right, so acknowledgements stay right, but a reader
+that trusts the stream takes a body for a length. `0d 00 00 00 82 69 16 6a`
+reads as a message of 1779853698 bytes, which ended the session.
+`00 00 04 00 00 00 04 00` reads as one of 262144 bytes, which the reader waits
+for while every later notification queues behind it. How often it happens
+varies: one such frame in three days with the pedal on a port of its own, about
+3 KB of them in three minutes of an idle `watch` with the pedal behind a USB
+hub. The HX Edit captures here (HX Stomp, about 70 000 notifications) do not
+show it. There the device only splits a message across two frames, after its
+first four or eight bytes, which is in order and needs nothing.
+
+Where the device's profile says so (`DeviceProfile::realigns_events`, the HX
+Effects' only so far), `hx-usb` passes this one channel through `realign`. The
+other devices read it as before. `realign` hands on only whole messages that
+start `00 00 04 00` (or service 0, as one captured service-open reply does),
+declare at most 4 KB (the device never has more than that unacknowledged,
+above) and whose body is exactly one notification, or the bare service number
+that answers the service opening. Anything else is stepped over a byte at a
+time. So is a header whose message is still missing bytes a frame later, once a
+whole notification has arrived behind it. No message has been seen in more than
+two frames, but nothing establishes that as a limit, so a notification that
+took three and carried another one's bytes as data would lose its header. The
+cost is the one notification the slip cut through, and
+`Session::events_skipped` counts the bytes. The body check is needed: stepping
+through a parameter notification, the bytes `ca 00 00 00 00` (a float 0.0) and
+the key after them pass as a header for service 0 with a small length.
+
+**An events handshake can go unanswered. [confirmed on an HX Effects, cause
+inferred]** A session opened within a few seconds of another one ending, or of
+the pedal powering up, can get no reply to its HELLO on `0x1002`. The other
+channels answer and requests work, but no notification arrives for the whole
+session. On an HX Effects (3.80) every open 0 to 4 s after a session ended was
+like that, and every open 15 s or more after was not. A likely cause: the
+device keeps sending notifications to a session that has ended until 4 KB are
+unacknowledged, 15 to 30 s of ticks, and ignores a handshake meanwhile.
+`crates/hx-usb/tests/fixtures/session.transcript` records such a session: 42
+stale events frames before the handshake, the control and data HELLOs
+answered, the events one not, and no events frame afterwards.
+`Session::events_answered` reports it. Nothing is retried: when to open again
+is the caller's decision.
+
 **Idle channels need keep-alives during long reads. [confirmed]** A Helix Floor
 (3.80) probes a channel that has carried no traffic with keep-alive frames
 (type 0x10) at growing intervals. After four that the host leaves unanswered, it
