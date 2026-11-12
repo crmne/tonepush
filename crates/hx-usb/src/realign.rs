@@ -30,8 +30,9 @@
 /// device never has more than 4 KB unacknowledged on this channel
 /// (PROTOCOL.md, "The events channel needs ACK frames"), so 4 KB leaves room
 /// for any not captured yet. A false header with a length under this is
-/// waited on until a whole message arrives behind it, so the wait is short
-/// on a channel that keeps sending, and nothing is held back on a quiet one.
+/// waited on for one more frame, and then only until a whole notification
+/// has arrived behind it, so the wait is short on a channel that keeps
+/// sending, and nothing is held back on a quiet one.
 const MAX_MESSAGE: usize = 4 * 1024;
 
 /// The service notifications ride on, which is also the number the device
@@ -89,17 +90,22 @@ fn whole(service: u16, body: &[u8], end: usize) -> At {
 #[derive(Default)]
 pub(crate) struct Realign {
     buf: Vec<u8>,
+    /// Whether the header at the front of `buf` was already waiting for
+    /// the rest of its message when the frame before this one ended.
+    front_waited: bool,
     /// Bytes stepped over to find a message boundary, over the session.
     skipped: u64,
 }
 
 impl Realign {
-    /// Take bytes from the wire and return those that form whole, plausible
-    /// messages, in order. A message cut across frames waits for the rest.
+    /// Take one frame's bytes from the wire and return those that form
+    /// whole, plausible messages, in order. A message cut across frames
+    /// waits for the rest.
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Vec<u8> {
         self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
         let mut pos = 0;
+        let mut waiting = false;
         loop {
             match self.at(pos) {
                 At::Notification(end) | At::Opened(end) => {
@@ -107,20 +113,32 @@ impl Realign {
                     pos = end;
                 }
                 At::Short => break,
-                // The rest may still come. But the device sends a message's
-                // bytes together, in two frames at most, so a whole
-                // notification already behind this one means its header was
-                // not a header: waiting on would hold back everything behind
-                // it. Only a notification counts. The nine bytes of the
-                // service-open reply can turn up inside a real body.
-                At::Waiting if !self.notification_behind(pos) => break,
-                At::Waiting | At::Not => {
+                // The rest may still come, so wait for it. Two things
+                // together show that it will not, and that this header was
+                // not a header: it has already waited through a whole frame
+                // (the device sends a message in two frames at most), and a
+                // whole notification has arrived behind it. Neither is
+                // enough alone. A long message may take more frames, and
+                // what lies behind an unfinished header is inside its
+                // declared body, where the bytes of a notification can turn
+                // up as data. Waiting on regardless would hold back
+                // everything behind a false header.
+                At::Waiting if pos == 0 && self.front_waited && self.notification_behind(pos) => {
+                    pos += 1;
+                    self.skipped += 1;
+                }
+                At::Waiting => {
+                    waiting = true;
+                    break;
+                }
+                At::Not => {
                     pos += 1;
                     self.skipped += 1;
                 }
             }
         }
         self.buf.drain(..pos);
+        self.front_waited = waiting;
         out
     }
 
@@ -149,6 +167,7 @@ impl Realign {
     /// Forget a partial message, as when the channel is opened again.
     pub(crate) fn clear(&mut self) {
         self.buf.clear();
+        self.front_waited = false;
     }
 
     pub(crate) fn skipped(&self) -> u64 {
@@ -261,11 +280,54 @@ mod tests {
     #[test]
     fn a_false_header_does_not_hold_back_what_follows() {
         // A plausible header that declares 4096 bytes which never come. The
-        // whole ticks behind it show that it was not a header.
+        // whole ticks behind it, a frame later, show that it was not a
+        // header.
         let garbage = [0x00, 0x00, 0x04, 0x00, 0x00, 0x10, 0x00, 0x00];
         let mut realign = Realign::default();
         assert_eq!(messages(&mut realign, &[garbage.to_vec(), ticks(2)]), 2);
         assert_eq!(realign.skipped(), 8);
+    }
+
+    #[test]
+    fn a_false_header_is_given_one_more_frame() {
+        // The same header and the ticks behind it in one frame: the rest of
+        // a real message could still be in the next frame, so it waits for
+        // that frame and no longer.
+        let garbage = [0x00, 0x00, 0x04, 0x00, 0x00, 0x10, 0x00, 0x00];
+        let mut realign = Realign::default();
+        assert!(realign
+            .push(&[&garbage[..], &ticks(2)[..]].concat())
+            .is_empty());
+        assert_eq!(realign.push(&ticks(1)), ticks(3));
+        assert_eq!(realign.skipped(), 8);
+    }
+
+    #[test]
+    fn a_split_notification_is_kept_when_its_body_holds_a_notification() {
+        // A notification that carries a whole tick, stream header and all,
+        // as data, cut right after it. What is behind an unfinished header
+        // cannot show on its own that the header was false: these bytes are
+        // inside the message. The rest arriving in the next frame can.
+        use hx_proto::msgpack::{Encoder, Value};
+        use hx_proto::rpc::Message;
+        let args = hx_proto::msgmap! {
+            68 => Value::Bin(TICK.to_vec(), 1),
+            121 => Value::Int(27),
+        };
+        let body = Encoder::encode(&Message::Notification { event: 22, args }.to_value());
+        let mut message = vec![0x00, 0x00, 0x04, 0x00];
+        message.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        message.extend_from_slice(&body);
+        let cut = message
+            .windows(TICK.len())
+            .position(|bytes| bytes == TICK)
+            .expect("the tick is in the body")
+            + TICK.len();
+
+        let mut realign = Realign::default();
+        assert!(realign.push(&message[..cut]).is_empty());
+        assert_eq!(realign.push(&message[cut..]), message);
+        assert_eq!(realign.skipped(), 0);
     }
 
     #[test]
