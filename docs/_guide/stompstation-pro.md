@@ -1,5 +1,7 @@
 ---
 title: StompStation PRO
+seo:
+  title: Sonulab StompStation PRO editor
 description: Use TonePush’s full editor, library, Cloud, NAM, IR, and verified backup workflows with the Sonulab StompStation PRO.
 nav_order: 3
 ---

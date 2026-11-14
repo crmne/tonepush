@@ -1,7 +1,9 @@
 ---
 layout: home
 title: TonePush Editor
-description: One open-source editor and tone library for Line 6 HX pedals and the StompStation PRO.
+description: An open-source alternative to HX Edit for the HX Stomp and other Line 6 HX pedals, and an editor for the Sonulab StompStation PRO, on Linux, macOS and Windows.
+seo:
+  title: Open-source HX Edit alternative
 permalink: /
 hero:
   name: TonePush
