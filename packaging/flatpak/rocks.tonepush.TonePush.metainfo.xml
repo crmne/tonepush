@@ -38,6 +38,9 @@
     <control>keyboard</control>
   </supports>
   <releases>
+    <release version="0.12.2" date="2026-11-14">
+      <url>https://github.com/crmne/tonepush/releases/tag/v0.12.2</url>
+    </release>
     <release version="0.12.1" date="2026-11-05">
       <url>https://github.com/crmne/tonepush/releases/tag/v0.12.1</url>
     </release>
