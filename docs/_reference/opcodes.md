@@ -307,6 +307,21 @@ perfectly stable across all three captures. **[confirmed]**
 individually is **[open]**; the tuple behaves like a `(class, interface, method)`
 tag from whatever RPC framework Line 6 use internally.
 
+### 3.0 The pedal's own controls announce the same events
+
+Watched on an HX Stomp at 3.80 while its controls were used, with no host
+request in flight **[confirmed on that device]**:
+
+- a preset footswitch: 8, then 22 for objects 16, 15 and 28, then 4, as for a
+  load the host asked for;
+- a snapshot footswitch: `42 {92: index}`, a 49/17 for each block whose bypass
+  the snapshot changes, `23 {23: 0}`, then `46 {92: index}`;
+- a stomp switch: `41 {70: switch, 63: pressed, 66: n}` for the press and again
+  for the release, each followed by 39 and a 49/17 with the block and its new
+  state. What key 66 holds is **[open]**;
+- a turned knob: one 30 per step, with the block, the parameter index and the
+  value.
+
 ### 3.1 Notifications echo the host's own writes
 
 Every notification in the sweep was caused by a *host* request, and the device still
