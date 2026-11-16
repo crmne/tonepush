@@ -843,6 +843,21 @@ that our upload hung the device; the cause was the control-channel
 misconfiguration described above, not the message. The remaining hazard is the
 declared-length rule: see keys 114/115 below.
 
+**Never read an empty IR slot. [confirmed on an HX Stomp]** The slot list
+(opcode 8) is the only way to tell that a slot is empty. Opcode 12 on an empty
+slot answers status 0 with an empty name and a zero checksum, not with nothing.
+Opcode 11 on an empty slot answers a 13-byte reply whose result is a `str32`
+declaring 0xFFFFFE00 (-512) bytes, in a stream message whose prefix declares
+0xFFFFFE0D (-499):
+
+    00 00 ff fe  0d fe ff ff  83 66 cd 03 f7 67 00 68  db ff ff fe 00
+
+The reply cannot be read, and the pedal then ignores every new session until
+its power is pulled. HX Edit only reads slots its list shows, and `read_ir`,
+`ir_descriptor` and `read_ir_samples` now check the list first and send
+neither opcode for an empty slot. Measured on an HX Stomp at 3.80 (a NAM Lite
+build), twice, with the transfers recorded.
+
 **A message this large must be chunked, and paced. [confirmed]** The device
 accepts 256 bytes of stream data per frame and paces the sender with
 acknowledgements. Writing all 33 frames back to back fills its receive window and

@@ -243,7 +243,16 @@ impl Pedal {
                         key::NAME => Value::Str(name.clone()),
                     },
                 ),
-                None => (0, Value::Nil),
+                // What an HX Stomp answers for an empty slot: a descriptor
+                // with an empty name, not the absence of one.
+                None => (
+                    0,
+                    hx_proto::msgmap! {
+                        key::IR_SLOT => Value::Int(number(key::IR_SLOT)),
+                        key::IR_CHECKSUM => Value::UInt(0),
+                        key::NAME => Value::Str(String::new()),
+                    },
+                ),
             },
             op::IR_SAMPLES => {
                 // A recognisable impulse: its checksum as the first sample.

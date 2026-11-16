@@ -938,6 +938,25 @@ mod tests {
         assert_eq!(msgs[0].body.get(key::TXN).unwrap().as_i64(), Some(3));
     }
 
+    /// Captured from an HX Stomp asked for the samples of an empty impulse
+    /// response slot: a reply to transaction 1015 whose result is a string
+    /// of -512 bytes, in a message declaring -499. It is refused as it
+    /// stands; the command layer's part is never to ask.
+    #[test]
+    fn a_negative_length_from_an_empty_ir_slot_is_refused() {
+        let captured = [
+            0x00, 0x00, 0xff, 0xfe, 0x0d, 0xfe, 0xff, 0xff, // prefix: length -499
+            0x83, 0x66, 0xcd, 0x03, 0xf7, 0x67, 0x00, 0x68, // txn 1015, status 0
+            0xdb, 0xff, 0xff, 0xfe, 0x00, // result: str32 of -512 bytes
+        ];
+        let mut r = StreamReader::new();
+        r.push(&captured);
+        assert_eq!(
+            r.take_messages().map(|m| m.len()),
+            Err(StreamError::TooLarge(4_294_966_797))
+        );
+    }
+
     #[test]
     fn an_untrustworthy_length_keeps_the_messages_before_it() {
         let mut r = StreamReader::new();
