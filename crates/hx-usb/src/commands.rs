@@ -1318,7 +1318,25 @@ impl Session {
     /// the events channel, so
     /// this cannot land mid-transaction.
     pub fn poll_notifications(&mut self) -> Result<Vec<(i64, Value)>> {
-        self.read_available(Duration::from_millis(20))?;
+        // Drain what is waiting rather than one frame per call. Moving an
+        // expression pedal pushes notifications far faster than a caller
+        // polls: a sweep sends a steady run of SET_PARAM, and taking one
+        // frame per poll leaves the rest queued on the endpoint until it
+        // wraps. The bytes lost mid-message then put the length-prefixed
+        // stream out of step, so the next header is read from inside a body
+        // and declares a nonsense length. Seen on hardware, an HX Effects on
+        // firmware 3.80: `tonepush watch` died with "stream message declares
+        // 343475780 bytes" after five events of one sweep.
+        //
+        // Queued frames come back without waiting, so the timeout is only
+        // paid once, when nothing is left. The bound keeps a pedal held mid
+        // sweep from stalling the caller indefinitely.
+        const BURST: usize = 256;
+        for _ in 0..BURST {
+            if self.read_available(Duration::from_millis(20))?.is_none() {
+                break;
+            }
+        }
         let behind = self
             .channels
             .get(&ChannelId::EVENTS.device)
@@ -1858,6 +1876,29 @@ mod pedal_tests {
             session.keepalive().unwrap();
             assert_eq!(seen, 6 * (round + 1), "stalled after {seen} notifications");
         }
+    }
+
+    /// A sweep of an expression pedal, which pushes notifications faster
+    /// than any caller polls. One poll takes the burst, so nothing waits on
+    /// the endpoint long enough for it to wrap and lose a message's bytes:
+    /// an HX Effects on firmware 3.80 put the stream out of step that way,
+    /// and the header read next from inside a body declared 343475780 bytes.
+    #[test]
+    fn one_poll_drains_a_burst_of_notifications() {
+        let pedal = Pedal::new();
+        let mut session = fake::session(&pedal);
+        session.poll_notifications().unwrap();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            for _ in 0..64 {
+                pedal.notify(30, tick());
+            }
+        }
+        assert_eq!(
+            session.poll_notifications().unwrap().len(),
+            64,
+            "a burst should come back from one poll, not one frame of it"
+        );
     }
 
     const SAMPLES: [f32; 4] = [0.5, -0.25, 0.125, 0.0];
