@@ -193,6 +193,12 @@ struct Channel {
     acked: u32,
     reader: StreamReader,
     txn: i64,
+    /// Stream bytes sent to the device on this channel since it was opened.
+    tx_bytes: u32,
+    /// How far the device has said `tx_bytes` may go: the acknowledgement in
+    /// the last frame it sent on this channel. See
+    /// [`DeviceProfile::send_window`](hx_proto::DeviceProfile::send_window).
+    peer_limit: u32,
 }
 
 impl Channel {
@@ -201,14 +207,31 @@ impl Channel {
     /// makes the device stop responding.
     const ACK_BASE: u32 = 0x1000;
 
-    fn new() -> Self {
+    /// A channel just opened. `window` is the device's side of the same
+    /// arrangement, and much the smaller on an HX Stomp: its acknowledgement
+    /// is the stream bytes it has taken plus 0x200, so the host may have 512
+    /// bytes outstanding and no more. Every device frame in a recorded
+    /// session carries exactly bytes-sent plus 512, and the device's
+    /// answering HELLO ends in the same 0x200 where ours ends in 0x1000. HX
+    /// Edit sends an impulse response 512 bytes at a time and waits for the
+    /// acknowledgement that moves this on before sending another byte; in
+    /// three captures it never once sends past it.
+    fn new(window: u32) -> Self {
         Channel {
             seq: 0,
             rx_bytes: 0,
             acked: 0,
             reader: StreamReader::new(),
             txn: rpc::FIRST_TXN,
+            tx_bytes: 0,
+            peer_limit: window,
         }
+    }
+
+    /// Stream bytes the device has room for right now.
+    fn room(&self) -> u32 {
+        let room = self.peer_limit.wrapping_sub(self.tx_bytes) as i32;
+        room.max(0) as u32
     }
 
     fn ack(&self) -> u32 {
@@ -516,7 +539,8 @@ impl Session {
         } else {
             self.channels.get(&id.device).map_or(0, |c| c.rx_bytes)
         };
-        self.channels.insert(id.device, Channel::new());
+        let window = self.profile.send_window.unwrap_or(0);
+        self.channels.insert(id.device, Channel::new(window));
 
         let mut payload = Vec::new();
         ChannelHeader {
@@ -648,6 +672,12 @@ impl Session {
         let Some(ch) = self.channels.get_mut(&f.src) else {
             return;
         };
+        // Every frame but a HELLO says how far our own stream may go. It only
+        // ever moves forward: a frame left over from before the channel was
+        // opened must not take room away.
+        if hdr.msg_type != MSG_HELLO && (hdr.ack.wrapping_sub(ch.peer_limit) as i32) > 0 {
+            ch.peer_limit = hdr.ack;
+        }
         if hdr.has_data() && !rest.is_empty() {
             ch.rx_bytes = ch.rx_bytes.wrapping_add(rest.len() as u32);
             ch.reader.push(rest);
@@ -691,6 +721,10 @@ impl Session {
     /// Pause between chunks of a large send, letting the device's
     /// acknowledgements through so its receive window reopens.
     const BETWEEN_CHUNKS: Duration = Duration::from_millis(80);
+    /// How long the device may take to reopen its receive window before a
+    /// send gives up. It answers within a few milliseconds when idle and
+    /// took 173 ms at its slowest in a captured restore.
+    const WINDOW_BUDGET: Duration = Duration::from_secs(5);
 
     /// Bytes of stream data per frame.
     ///
@@ -736,6 +770,7 @@ impl Session {
     /// as the first of them is on the wire.
     fn send_chunks(&mut self, id: ChannelId, chunks: &[&[u8]], started: &mut bool) -> Result<()> {
         for (n, chunk) in chunks.iter().enumerate() {
+            self.wait_for_window(id, chunk.len())?;
             let (seq, ack) = self.tick(id)?;
             let mut payload = Vec::with_capacity(ChannelHeader::SIZE + chunk.len());
             ChannelHeader {
@@ -748,6 +783,9 @@ impl Session {
             self.write(&Frame::new(id.device, id.host, payload))?;
             *started = true;
             self.mark_acknowledged(id);
+            if let Some(channel) = self.channels.get_mut(&id.device) {
+                channel.tx_bytes = channel.tx_bytes.wrapping_add(chunk.len() as u32);
+            }
 
             // Read between chunks on a long send. The device paces us with
             // acknowledgements, and writing a whole impulse response blind
@@ -759,6 +797,44 @@ impl Session {
             }
         }
         Ok(())
+    }
+
+    /// Wait until the device has room for `len` more stream bytes.
+    ///
+    /// The pause between chunks is not enough on its own. It is a fixed
+    /// 80 ms, and it ends early when any frame arrives, a keep-alive on
+    /// another channel included, so two chunks can go out with no
+    /// acknowledgement between them. That fills the window exactly, and a
+    /// third sent before the device has caught up goes past it. A pedal busy
+    /// committing the previous impulse response to flash is slow to catch
+    /// up; it then stops taking writes altogether, and the upload ends in
+    /// "write timed out" with the pedal needing its power pulled. A run of
+    /// uploads failed that way at the eighth, and again at the fourth.
+    ///
+    /// Only where the profile gives a window. A device whose window was
+    /// never measured is sent to as before.
+    fn wait_for_window(&mut self, id: ChannelId, len: usize) -> Result<()> {
+        if self.profile.send_window.is_none() {
+            return Ok(());
+        }
+        let deadline = Instant::now() + Self::WINDOW_BUDGET;
+        loop {
+            let room = self
+                .channels
+                .get(&id.device)
+                .ok_or_else(|| Error::Protocol(format!("channel {:#06x} not open", id.device)))?
+                .room();
+            if room as usize >= len {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::Protocol(format!(
+                    "the device did not make room for {len} more bytes on channel {:#06x}",
+                    id.device
+                )));
+            }
+            self.read_available(Self::REPLY_READ)?;
+        }
     }
 
     /// Send a deferred request and wait for the device to finish it.
@@ -1402,7 +1478,7 @@ mod tests {
     /// arithmetic that matters most in the crate.
     #[test]
     fn acknowledgements_advance_from_a_base() {
-        let mut channel = Channel::new();
+        let mut channel = Channel::new(0);
         assert_eq!(channel.ack(), Channel::ACK_BASE);
 
         channel.rx_bytes += 256;
@@ -1420,7 +1496,7 @@ mod tests {
 
     #[test]
     fn transactions_start_at_the_observed_value_and_count_up() {
-        let mut channel = Channel::new();
+        let mut channel = Channel::new(0);
         assert_eq!(channel.next_txn(), rpc::FIRST_TXN);
         assert_eq!(channel.next_txn(), rpc::FIRST_TXN + 1);
     }
