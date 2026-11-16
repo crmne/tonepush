@@ -84,6 +84,17 @@ fn main() -> eframe::Result<()> {
     std::thread::spawn(fastframe_emoji::warm_up);
 
     let (tx, rx, repaint, worker) = tonepush_gui::spawn_repainting();
+    #[cfg(unix)]
+    let _cli_bridge = match std::env::var_os(tonepush_cli::bridge::ENV) {
+        Some(path) => match tonepush_gui::cli_bridge::listen(path.into(), tx.clone()) {
+            Ok(bridge) => Some(bridge),
+            Err(error) => {
+                eprintln!("could not start TonePush CLI bridge: {error:#}");
+                None
+            }
+        },
+        None => None,
+    };
     // Closing the window must let the device go cleanly. A process that just
     // disappears leaves the device mid-conversation, and it then refuses new
     // sessions until its power is pulled.

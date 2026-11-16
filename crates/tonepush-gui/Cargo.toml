@@ -67,6 +67,9 @@ atomic-write-file = "0.3.1"
 # Human-readable, sortable timestamps in the local library index.
 jiff = "0.2"
 
+[target.'cfg(unix)'.dependencies]
+tonepush-cli = { path = "../tonepush-cli" }
+
 [dev-dependencies]
 # Renders the editor offscreen on the GPU for the design screenshots (see
 # `src/screenshots.rs`); never part of the shipped program.
