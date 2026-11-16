@@ -1860,6 +1860,96 @@ mod pedal_tests {
         }
     }
 
+    /// An HX Effects session, whose events channel goes through the
+    /// realigner, still hears what the pretend pedal says. The pretend pedal
+    /// writes 0 where the device writes the service number.
+    #[test]
+    fn an_hx_effects_session_hears_the_pedal() {
+        let pedal = Pedal::new();
+        let mut session = fake::session_as(&pedal, hx_proto::HX_EFFECTS);
+        session.poll_notifications().unwrap();
+        pedal.lock().unwrap().notify(22, tick());
+        let mut seen = 0;
+        for _ in 0..2 {
+            seen += session.poll_notifications().unwrap().len();
+        }
+        assert_eq!(seen, 1);
+        assert_eq!(session.events_skipped(), 0);
+    }
+
+    /// The tick as the HX Effects sends it, stream header included.
+    const TICK_BYTES: [u8; 21] = [
+        0x00, 0x00, 0x04, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x82, 0x69, 0x16, 0x6a, 0x84, 0x52, 0x00,
+        0x44, 0x0a, 0x79, 0x1b, 0x6a, 0xc0,
+    ];
+
+    /// An HX Effects sent one tick with its first four bytes moved behind the
+    /// rest. That ended the session ("stream message declares 1779853698
+    /// bytes"); now it costs that tick and nothing else. See `realign`.
+    #[test]
+    fn a_frame_sent_out_of_order_costs_one_notification() {
+        let pedal = Pedal::new();
+        let mut session = fake::session_as(&pedal, hx_proto::HX_EFFECTS);
+        session.poll_notifications().unwrap();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.send_raw_events(&TICK_BYTES.repeat(3));
+            let rotated = [&TICK_BYTES[4..], &TICK_BYTES[..4]].concat();
+            pedal.send_raw_events(&[rotated, TICK_BYTES.repeat(4)].concat());
+            pedal.send_raw_events(&TICK_BYTES.repeat(2));
+        }
+        let mut seen = 0;
+        for _ in 0..4 {
+            seen += session.poll_notifications().unwrap().len();
+        }
+        assert_eq!(seen, 9);
+        assert_eq!(session.events_skipped(), 21);
+    }
+
+    /// A device whose profile does not realign reads the events channel as
+    /// before: there the same frame is still reported.
+    #[test]
+    fn an_hx_stomp_still_reports_a_frame_sent_out_of_order() {
+        let pedal = Pedal::new();
+        let mut session = fake::session(&pedal);
+        session.poll_notifications().unwrap();
+        let rotated = [&TICK_BYTES[4..], &TICK_BYTES[..4]].concat();
+        pedal.lock().unwrap().send_raw_events(&rotated);
+        let outcome = (0..2).find_map(|_| session.poll_notifications().err());
+        assert!(
+            matches!(outcome, Some(crate::Error::Protocol(_))),
+            "{outcome:?}"
+        );
+        assert_eq!(session.events_skipped(), 0);
+    }
+
+    /// The device splits a notification across two frames after its first
+    /// four bytes. When the first of them arrives while the events service
+    /// is still being opened, the notification is kept all the same.
+    #[test]
+    fn a_notification_split_across_the_service_opening_is_kept() {
+        let pedal = Pedal::new();
+        pedal.lock().unwrap().events_at_open = Some(TICK_BYTES[..4].to_vec());
+        let mut session = fake::session_as(&pedal, hx_proto::HX_EFFECTS);
+        pedal.lock().unwrap().send_raw_events(&TICK_BYTES[4..]);
+        let mut seen = 0;
+        for _ in 0..2 {
+            seen += session.poll_notifications().unwrap().len();
+        }
+        assert_eq!(seen, 1);
+        assert_eq!(session.events_skipped(), 0);
+    }
+
+    #[test]
+    fn a_session_says_whether_the_events_channel_answered() {
+        let pedal = Pedal::new();
+        assert!(fake::session(&pedal).events_answered());
+
+        let deaf = Pedal::new();
+        deaf.lock().unwrap().deaf_events = true;
+        assert!(!fake::session(&deaf).events_answered());
+    }
+
     const SAMPLES: [f32; 4] = [0.5, -0.25, 0.125, 0.0];
 
     fn sum_of(samples: &[f32]) -> u64 {
