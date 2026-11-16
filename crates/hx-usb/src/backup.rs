@@ -1027,6 +1027,36 @@ pub fn capture_one(session: &mut Session, dir: &Path, index: i64) -> Result<()> 
 
 /// [`capture_one`] for a slot in any setlist the bundle holds.
 pub fn capture_one_in(session: &mut Session, dir: &Path, setlist: i64, index: i64) -> Result<()> {
+    capture_slots_in(session, dir, setlist, &[index])
+}
+
+/// [`capture_one_in`] for several slots of one setlist: what keeps a bundle
+/// current after a run of slot writes without reading the whole pedal again.
+/// The setlist's names are read once, not once a slot.
+pub fn capture_slots_in(
+    session: &mut Session,
+    dir: &Path,
+    setlist: i64,
+    slots: &[i64],
+) -> Result<()> {
+    if slots.is_empty() {
+        return Ok(());
+    }
+    let names = session.presets(setlist)?;
+    for &index in slots {
+        capture_slot(session, dir, setlist, index, &names)?;
+    }
+    Ok(())
+}
+
+/// One slot of [`capture_slots_in`], with the setlist's names already read.
+fn capture_slot(
+    session: &mut Session,
+    dir: &Path,
+    setlist: i64,
+    index: i64,
+    names: &[String],
+) -> Result<()> {
     let mut manifest = open(dir)?;
     let setlist_index = usize::try_from(setlist)
         .map_err(|_| Error::Protocol("setlist cannot be negative".into()))?;
@@ -1041,7 +1071,6 @@ pub fn capture_one_in(session: &mut Session, dir: &Path, setlist: i64, index: i6
             "the backup manifest has fewer preset slots than the device".into(),
         ));
     }
-    let names = session.presets(setlist)?;
     let mut name = names
         .get(slot)
         .cloned()
@@ -1092,7 +1121,7 @@ pub fn capture_one_in(session: &mut Session, dir: &Path, setlist: i64, index: i6
         .and_then(|bytes| serde_json::from_slice::<Vec<Vec<String>>>(&bytes).ok())
     {
         if let Some(held) = listed.get_mut(setlist_index) {
-            *held = names;
+            *held = names.to_vec();
             atomic_write(&lists, serde_json::to_vec(&listed).map_err(json_err)?)
                 .map_err(io("writing the preset lists"))?;
         }
@@ -1961,6 +1990,56 @@ mod tests {
         remove_other_slot_files(&dir, 1, Some(OsStr::new("001 New.hxpreset"))).unwrap();
         assert!(!dir.join("001 Keep.hxpreset").exists());
         assert!(dir.join("001 New.hxpreset").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// After a run of slot writes, only those slots are read again: each one
+    /// a document, an empty slot an empty name, and the setlist's names read
+    /// once for all of them.
+    #[test]
+    fn written_slots_are_refreshed_without_reading_the_whole_pedal() {
+        const PRESET: &[u8] = include_bytes!("../../hx-proto/tests/preset.bin");
+        let root = scratch("refresh-slots");
+        let bundle = root.join("bundle.hxbundle");
+        let mut saved = manifest();
+        saved.presets = vec!["Old".to_owned(); 126];
+        std::fs::write(
+            bundle.join("manifest.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+        let pedal = crate::fake::Pedal::new();
+        {
+            let mut pedal = pedal.lock().unwrap();
+            let mut directory: Vec<(i64, String)> =
+                (0..126).map(|slot| (slot, "Old".to_owned())).collect();
+            directory[1].1 = "Copied".into();
+            directory[2].1 = "New Preset".into();
+            pedal.directories.insert(0, directory);
+            pedal.slots.insert((0, 1), PRESET.to_vec());
+        }
+        let mut session = crate::fake::session(&pedal);
+
+        capture_slots_in(&mut session, &bundle, 0, &[1, 2]).unwrap();
+
+        let refreshed = open(&bundle).unwrap();
+        assert_eq!(refreshed.presets[1], "Copied");
+        assert_eq!(refreshed.presets[2], "", "an empty slot");
+        assert_eq!(refreshed.presets[3], "Old", "a slot not written");
+        assert!(bundle.join("presets/001 Copied.hxpreset").is_file());
+        let pedal = pedal.lock().unwrap();
+        let listed = pedal
+            .opcodes()
+            .iter()
+            .filter(|&&o| o == hx_proto::rpc::op::LIST_PRESETS)
+            .count();
+        assert_eq!(listed, 1, "the names once, not once a slot");
+        let read = pedal
+            .opcodes()
+            .iter()
+            .filter(|&&o| o == hx_proto::rpc::op::FETCH_PRESET)
+            .count();
+        assert_eq!(read, 2, "the slots written, and no others");
         let _ = std::fs::remove_dir_all(root);
     }
 
