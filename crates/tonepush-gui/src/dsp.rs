@@ -125,6 +125,17 @@ impl App {
         Some(Room { path, budget, used })
     }
 
+    /// The share of its path's DSP a block uses, where the device's budget
+    /// and the block's cost are known.
+    pub(crate) fn block_share(&self, block: &session::Block) -> Option<String> {
+        if !matches!(block.kind, Kind::Block | Kind::Looper) {
+            return None;
+        }
+        let budget = self.dsp_budget()?;
+        let cost = block_cost(self.catalog.as_ref()?, block.model, block.paired)?;
+        Some(percent(cost, budget))
+    }
+
     /// The room a block going into `slot` has: everything its path holds
     /// except the block there now, which it replaces.
     pub(crate) fn room_at(&self, slot: usize) -> Option<Room> {
@@ -249,6 +260,29 @@ mod tests {
         // A gap on a path has that path's whole room.
         assert_eq!(app.room_at(5).unwrap().used, 765);
         assert_eq!(app.room_at(25).unwrap().path, 1);
+    }
+
+    /// Each block says its own share of its path: 0.51, 7.14 and 2.5 of 75.
+    #[test]
+    fn a_block_says_its_share_of_its_path() {
+        let Some(mut app) = floor() else { return };
+        let shares: Vec<_> = app.chain.iter().map(|b| app.block_share(b)).collect();
+        let share = |text: &str| Some(text.to_owned());
+        assert_eq!(
+            shares,
+            [
+                None,
+                share("1%"),
+                share("10%"),
+                None,
+                None,
+                share("3%"),
+                None
+            ]
+        );
+        // Nothing where the device's budget was never measured.
+        app.device = "HX Stomp XL".into();
+        assert_eq!(app.block_share(&app.chain[1]), None);
     }
 
     #[test]
