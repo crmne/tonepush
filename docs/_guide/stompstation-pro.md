@@ -204,7 +204,8 @@ pedal instead, and **Back up to a file…** there puts one where you choose. A
 bundle contains:
 
 - exact fixed-size bytes for all occupied presets, IRs, NAM amps, and NAM
-  drives;
+  drives, and on firmware that has them (2.4) the Parametric NAM amps and
+  drives and the VxAmp models;
 - every empty slot and library constraint;
 - the device schema and safe global settings;
 - a SHA-256, size, and manifest record for every file.
@@ -212,10 +213,13 @@ bundle contains:
 The completed directory is published atomically and with private filesystem
 permissions. Load it as the current rollback once; persistent actions become
 available only after identity, firmware, live names, slot contents, and safe
-settings agree. A backup goes into a new folder or replaces an earlier bundle;
-TonePush refuses a folder that already holds anything else rather than replace
-it. Restore preflights the source before its first write and keeps
-the original armed rollback available if the transport fails.
+settings agree. A bundle has to hold every library the pedal has, so one that
+lacks a library the pedal now has, such as a backup made before an update added
+Parametric NAM, is not accepted as a rollback: take a new backup. A backup goes
+into a new folder or replaces an earlier bundle; TonePush refuses a folder that
+already holds anything else rather than replace it. Restore preflights the
+source before its first write and keeps the original armed rollback available
+if the transport fails.
 
 ## Command line
 

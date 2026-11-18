@@ -13,17 +13,52 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use voidx_proto::{NodeDescription, NodePath, Preset};
+use voidx_proto::{NodeDescription, NodeKind, NodePath, NodeTree, Preset};
 
 use crate::{BlobList, Device, Error, Identity, Link, Result, UploadStep};
 
 pub const FORMAT_VERSION: u32 = 1;
+
+/// The libraries every StompStation PRO has and every bundle must hold.
+/// Newer firmware adds more (2.4 has Parametric NAM and VxAmp libraries);
+/// those are discovered from the connected pedal, see [`library_paths`].
 pub const LIBRARY_PATHS: [&str; 4] = [
     "root\\presets",
     "root\\ir_list",
     "root\\nam_amp",
     "root\\nam_drive",
 ];
+
+/// Every library on the connected pedal: the fixed set first, then any other
+/// list the firmware advertises directly under `root`, sorted by path.
+///
+/// The fixed set is never dropped when a firmware does not advertise it, so a
+/// pedal that already worked keeps working and a missing one still fails in
+/// [`Device::list_info`] with the device's own words.
+pub fn library_paths(root: &NodeTree) -> Vec<String> {
+    let mut extra = root
+        .nodes()
+        .iter()
+        .filter(|(path, node)| {
+            matches!(node.kind, Some(NodeKind::List)) && is_library_path(path.as_str())
+        })
+        .map(|(path, _)| path.to_string())
+        .filter(|path| !LIBRARY_PATHS.contains(&path.as_str()))
+        .collect::<Vec<_>>();
+    extra.sort();
+    extra.dedup();
+    LIBRARY_PATHS
+        .iter()
+        .map(|path| (*path).to_owned())
+        .chain(extra)
+        .collect()
+}
+
+/// A library lives directly under `root`: `root\<name>`.
+fn is_library_path(path: &str) -> bool {
+    path.strip_prefix("root\\")
+        .is_some_and(|name| !name.is_empty() && !name.contains('\\'))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRecord {
@@ -230,6 +265,39 @@ impl VerifiedBundle {
                 "backup identity {:?} does not exactly match connected identity {:?}",
                 self.manifest.identity,
                 device.identity()
+            )));
+        }
+        // A bundle that lacks a library the pedal has could not roll that
+        // library back, so it must not unlock writes. This is what keeps a
+        // bundle taken before Parametric NAM and VxAmp existed from arming
+        // a 2.4 pedal.
+        let root = device.browse(NodePath::new("root")?)?;
+        let present = library_paths(&root);
+        let uncovered = present
+            .iter()
+            .filter(|path| self.list(path).is_none())
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if !uncovered.is_empty() {
+            return Err(Error::Backup(format!(
+                "this backup does not hold {} on the connected {}; take a new backup",
+                uncovered.join(", "),
+                device.identity().name,
+            )));
+        }
+        let absent = self
+            .manifest
+            .lists
+            .iter()
+            .filter(|saved| !present.contains(&saved.path))
+            .filter(|saved| !LIBRARY_PATHS.contains(&saved.path.as_str()))
+            .map(|saved| saved.path.as_str())
+            .collect::<Vec<_>>();
+        if !absent.is_empty() {
+            return Err(Error::Backup(format!(
+                "this backup holds {}, which the connected {} does not have",
+                absent.join(", "),
+                device.identity().name,
             )));
         }
         let mut lists = Vec::with_capacity(self.manifest.lists.len());
@@ -625,8 +693,10 @@ pub fn capture_reusing<L: Link>(
     let schema_bytes = pretty_json(&schema)?;
     let schema_record = write_record(&staging.path, "schema.json", &schema_bytes)?;
 
-    let mut lists = Vec::with_capacity(LIBRARY_PATHS.len());
-    for path in LIBRARY_PATHS {
+    let paths = library_paths(&root);
+    let mut lists = Vec::with_capacity(paths.len());
+    for path in &paths {
+        let path = path.as_str();
         let info = device.list_info(NodePath::new(path)?)?;
         progress(Step::List {
             path: path.to_owned(),
@@ -864,12 +934,18 @@ fn validate_manifest_shape(manifest: &Manifest) -> Result<()> {
         }
     }
     // Restore and arming walk every library; a bundle missing one could unlock
-    // writes it cannot roll back.
-    if paths.len() != LIBRARY_PATHS.len() || LIBRARY_PATHS.iter().any(|path| !paths.contains(*path))
-    {
+    // writes it cannot roll back. Libraries beyond the fixed set belong to
+    // newer firmware and are checked against the connected pedal by
+    // `VerifiedBundle::preflight`.
+    if LIBRARY_PATHS.iter().any(|path| !paths.contains(*path)) {
         return Err(Error::Backup(format!(
-            "a bundle must hold exactly the libraries {}",
+            "a bundle must hold at least the libraries {}",
             LIBRARY_PATHS.join(", ")
+        )));
+    }
+    if let Some(path) = paths.iter().find(|path| !is_library_path(path)) {
+        return Err(Error::Backup(format!(
+            "{path} is not a library directly under root"
         )));
     }
     Ok(())
@@ -1400,12 +1476,22 @@ mod tests {
         }
     }
 
-    fn scripted_device(chunks: &[(usize, &str)]) -> Device<Scripted> {
+    /// A 1.5.12 pedal that answers the identity reads and then `replies`
+    /// verbatim, one NUL-terminated response after another.
+    fn device_replying(replies: &str) -> Device<Scripted> {
         let mut frames = b"root\\sys\\_name:{\"value\":\"StompStation PRO\"}\0\
             root\\sys\\_ver:{\"value\":\"1.5.12\"}\0\
             root\\sys\\_arch:{\"value\":\"CM4\"}\0\
             root\\sys\\_license:{\"value\":\"sspro\"}\0"
             .to_vec();
+        frames.extend_from_slice(replies.as_bytes());
+        Device::connect(Scripted {
+            input: std::io::Cursor::new(frames),
+        })
+        .unwrap()
+    }
+
+    fn scripted_device(chunks: &[(usize, &str)]) -> Device<Scripted> {
         let batch = chunks
             .iter()
             .map(|(chunk, hex)| {
@@ -1413,12 +1499,127 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\r\n");
-        frames.extend_from_slice(batch.as_bytes());
-        frames.push(0);
-        Device::connect(Scripted {
-            input: std::io::Cursor::new(frames),
-        })
-        .unwrap()
+        device_replying(&format!("{batch}\0"))
+    }
+
+    /// The reply to browsing `root` on a pedal that advertises these lists.
+    fn root_listing(lists: &[&str]) -> String {
+        let nodes = lists
+            .iter()
+            .map(|path| {
+                format!("{path}:{{\"type\":\"list\",\"size\":64,\"count\":1,\"chunk\":64}}")
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        format!("root:{{\"type\":\"item\"}}\r\n{nodes}\0")
+    }
+
+    fn with_extra_library(dir: &Path, mut manifest: Manifest, path: &str) {
+        manifest.lists.push(ListRecord {
+            path: path.into(),
+            description: None,
+            size: 64,
+            count: 1,
+            chunk_size: 64,
+            group: None,
+            gzip: true,
+            movable: true,
+            item_type: Some("pnam".into()),
+            slots: vec![SlotRecord {
+                index: 0,
+                name: None,
+                blob: None,
+            }],
+        });
+        atomic_write(dir.join("manifest.json"), &pretty_json(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn libraries_are_the_fixed_set_then_any_list_the_firmware_adds() {
+        let mut device = device_replying(&root_listing(&[
+            "root\\presets",
+            "root\\vxamp_list",
+            "root\\pnam_list",
+            "root\\nam_amp",
+            "root\\app\\nested_list",
+        ]));
+        let root = device.browse(NodePath::new("root").unwrap()).unwrap();
+        assert_eq!(
+            library_paths(&root),
+            [
+                "root\\presets",
+                "root\\ir_list",
+                "root\\nam_amp",
+                "root\\nam_drive",
+                "root\\pnam_list",
+                "root\\vxamp_list",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pedal_without_new_libraries_keeps_the_fixed_four() {
+        let mut device = device_replying(&root_listing(&[]));
+        let root = device.browse(NodePath::new("root").unwrap()).unwrap();
+        assert_eq!(library_paths(&root), LIBRARY_PATHS);
+    }
+
+    #[test]
+    fn a_bundle_may_hold_libraries_beyond_the_fixed_four() {
+        let dir = scratch("extra-library");
+        let manifest = fixture(&dir);
+        with_extra_library(&dir, manifest, "root\\pnam_list");
+        let bundle = open_verified(&dir).unwrap();
+        assert!(bundle.list("root\\pnam_list").is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_extra_library_must_sit_directly_under_root() {
+        let dir = scratch("nested-library");
+        let manifest = fixture(&dir);
+        with_extra_library(&dir, manifest, "root\\app\\pnam_list");
+        assert!(open_verified(&dir).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_bundle_from_before_a_new_library_cannot_arm_a_pedal_that_has_it() {
+        let dir = scratch("uncovered");
+        fixture(&dir);
+        let bundle = open_verified(&dir).unwrap();
+        let mut device = device_replying(&root_listing(&[
+            "root\\presets",
+            "root\\ir_list",
+            "root\\nam_amp",
+            "root\\nam_drive",
+            "root\\pnam_list",
+            "root\\vxamp_list",
+        ]));
+        let error = bundle.preflight(&mut device).unwrap_err().to_string();
+        assert!(
+            error.contains("root\\pnam_list, root\\vxamp_list"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_bundle_with_a_library_the_pedal_lacks_is_refused() {
+        let dir = scratch("absent");
+        let manifest = fixture(&dir);
+        with_extra_library(&dir, manifest, "root\\pnam_list");
+        let bundle = open_verified(&dir).unwrap();
+        let mut device = device_replying(&root_listing(&[
+            "root\\presets",
+            "root\\ir_list",
+            "root\\nam_amp",
+            "root\\nam_drive",
+        ]));
+        let error = bundle.preflight(&mut device).unwrap_err().to_string();
+        assert!(error.contains("root\\pnam_list"), "{error}");
+        assert!(error.contains("does not have"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn preset_list(size: usize, chunk_size: usize) -> BlobList {
