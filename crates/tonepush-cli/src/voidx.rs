@@ -144,7 +144,8 @@ pub(crate) enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Capture presets, stereo IRs, NAM amps/drives, and node schema.
+    /// Capture every library (presets, stereo IRs, NAM and Parametric NAM
+    /// amps and drives, VxAmp models) and the node schema.
     Backup { directory: PathBuf },
     /// Verify every file and hash in a backup without opening hardware.
     VerifyBackup { directory: PathBuf },
