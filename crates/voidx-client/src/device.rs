@@ -12,10 +12,10 @@ use crate::{values_equivalent, Error, Link, Notification, Result};
 /// Firmware release lines (major.minor) on which every persistent write
 /// TonePush makes was checked on a pedal, by reading each result back:
 /// saving, renaming, moving, clearing, preset, IR, stereo IR and NAM
-/// uploads, global settings and restore. Checked on 1.5.12, 2.0.10 and 2.2.6
-/// (paced, after the computer had used the pedal's USB audio); patch releases
-/// within a line are treated alike.
-pub const VERIFIED_FIRMWARE: &[&str] = &["1.5", "2.0", "2.2"];
+/// uploads, global settings and restore. Checked on 1.5.12, 2.0.10, 2.2.6 and
+/// 2.4.4 (paced, after the computer had used the pedal's USB audio); patch
+/// releases within a line are treated alike.
+pub const VERIFIED_FIRMWARE: &[&str] = &["1.5", "2.0", "2.2", "2.4"];
 
 /// 2.0's NAM player caches models by slot and is not told when slots are
 /// swapped, so a preset can keep playing the model that used to be there
@@ -1248,6 +1248,9 @@ mod tests {
             ("2.0.8", true),
             ("2.2.6", true),
             ("2.3.0", false),
+            ("2.3.6", false),
+            ("2.4.4", true),
+            ("2.5.0", false),
             ("1.4.2", false),
         ] {
             let identity = Identity {
@@ -1269,6 +1272,7 @@ mod tests {
         assert!(!needs_pacing("1.5.12"));
         assert!(!needs_pacing("2.0.10"));
         assert!(needs_pacing("2.2.6"));
+        assert!(needs_pacing("2.4.4"));
         assert!(needs_pacing("3.0.0"));
         assert!(!needs_pacing("Update Mode"));
     }
