@@ -541,11 +541,22 @@ struct SettingRestore {
     changed: bool,
 }
 
+/// A node whose name starts with an underscore is a live readout, such as
+/// `_connected1` (a jack sensor), `_clvl` (the expression pedal position) or
+/// `_freq` (the tuner). It changes by itself, is not a setting, and a backup
+/// must neither compare nor write it.
+fn is_status_node(path: &str) -> bool {
+    path.rsplit('\\')
+        .next()
+        .is_some_and(|name| name.starts_with('_'))
+}
+
 fn restorable_settings(bundle: &VerifiedBundle) -> BTreeMap<&str, &serde_json::Value> {
     bundle
         .schema
         .iter()
         .filter(|node| node.path.starts_with("root\\settings\\"))
+        .filter(|node| !is_status_node(&node.path))
         .filter_map(|node| {
             let value = node
                 .description
@@ -1400,6 +1411,34 @@ mod tests {
         manifest.lists.pop();
         atomic_write(dir.join("manifest.json"), &pretty_json(&manifest).unwrap()).unwrap();
         assert!(open_verified(&dir).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_readouts_are_not_settings_to_compare_or_restore() {
+        let dir = scratch("readouts");
+        fixture(&dir);
+        let mut bundle = open_verified(&dir).unwrap();
+        let node = |path: &str, value: serde_json::Value| NodeSnapshot {
+            path: path.into(),
+            description: serde_json::from_value(serde_json::json!({
+                "type": "float", "min": 0.0, "max": 100.0, "value": value,
+            }))
+            .unwrap(),
+        };
+        bundle.schema = vec![
+            node("root\\settings\\ctrl\\tev", serde_json::json!(100.0)),
+            node("root\\settings\\ctrl\\_clvl", serde_json::json!(0.121242)),
+            node("root\\settings\\input\\_connected1", serde_json::json!(1.0)),
+            node(
+                "root\\settings\\tuner\\tuner\\_freq",
+                serde_json::json!(0.0),
+            ),
+        ];
+        let kept: Vec<&str> = restorable_settings(&bundle).into_keys().collect();
+        assert_eq!(kept, ["root\\settings\\ctrl\\tev"]);
+        assert!(is_status_node("root\\settings\\misc\\ctl3\\_st"));
+        assert!(!is_status_node("root\\settings\\misc\\ctl3\\st_"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
