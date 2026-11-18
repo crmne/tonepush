@@ -35,6 +35,14 @@ const OFFICIAL: &[(&str, &str)] = &[
         "2.2.6",
         "63d9b8047ae47a0c9a22b6be7c7de6540cc8d2b2c4dabb756a842b14043083c9",
     ),
+    (
+        "2.3.6",
+        "6cb8952f056417c12d79a5f7c1d9f0a236b88895ac4c43b408a93924534be8d7",
+    ),
+    (
+        "2.4.4",
+        "6fbe7aee2658686057b6a0ab51165950ed5d9f7a534e165d24d68acb5c936fa9",
+    ),
 ];
 
 /// Images are a few megabytes; anything far outside that is not one.
@@ -382,6 +390,21 @@ mod tests {
         x86[18] = 0x3e;
         assert!(Image::from_bytes("s_pro_2_3_4.upd", x86).is_err());
         assert!(Image::from_bytes("s_pro_2_3_4.upd", b"\x7fELF".to_vec()).is_err());
+    }
+
+    #[test]
+    fn the_official_table_lists_each_release_and_hash_once() {
+        for (index, (version, hash)) in OFFICIAL.iter().enumerate() {
+            assert_eq!(hash.len(), 64, "{version}");
+            assert!(
+                hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                "{version}"
+            );
+            for (other_version, other_hash) in &OFFICIAL[index + 1..] {
+                assert_ne!(version, other_version);
+                assert_ne!(hash, other_hash);
+            }
+        }
     }
 
     #[test]
