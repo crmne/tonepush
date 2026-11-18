@@ -450,22 +450,43 @@ fn restore_preflighted<L: Link>(
         let previous = rollback
             .list(current.path.as_str())
             .expect("rollback preflight matched every manifest list");
+        let differs: Vec<bool> = (0..current.count)
+            .map(|index| {
+                let target = &wanted.slots[index];
+                let before = &previous.slots[index];
+                let same = if force_current {
+                    target.name.is_none() && current.names[index].is_none()
+                } else {
+                    target.name == before.name
+                        && match (&target.blob, &before.blob) {
+                            (None, None) => true,
+                            (Some(_), Some(_)) => {
+                                source.blob(&wanted.path, index)
+                                    == rollback.blob(&previous.path, index)
+                            }
+                            _ => false,
+                        }
+                };
+                !same
+            })
+            .collect();
+        let wanted_names = wanted
+            .slots
+            .iter()
+            .map(|slot| slot.name.clone())
+            .collect::<Vec<_>>();
+        let mut emptied = vec![false; current.count];
+        for index in slots_to_empty_first(&current.names, &wanted_names, &differs) {
+            progress(RestoreStep::Clearing {
+                path: current.path.to_string(),
+                index,
+            });
+            device.clear_slot(&current, index)?;
+            emptied[index] = true;
+        }
         for index in 0..current.count {
             let target = &wanted.slots[index];
-            let before = &previous.slots[index];
-            let same = if force_current {
-                target.name.is_none() && current.names[index].is_none()
-            } else {
-                target.name == before.name
-                    && match (&target.blob, &before.blob) {
-                        (None, None) => true,
-                        (Some(_), Some(_)) => {
-                            source.blob(&wanted.path, index) == rollback.blob(&previous.path, index)
-                        }
-                        _ => false,
-                    }
-            };
-            if same {
+            if !differs[index] {
                 report.unchanged += 1;
                 continue;
             }
@@ -482,22 +503,19 @@ fn restore_preflighted<L: Link>(
                     report.written += 1;
                 }
                 (None, None) => {
-                    progress(RestoreStep::Clearing {
-                        path: current.path.to_string(),
-                        index,
-                    });
-                    device.clear_slot(&current, index)?;
+                    if !emptied[index] {
+                        progress(RestoreStep::Clearing {
+                            path: current.path.to_string(),
+                            index,
+                        });
+                        device.clear_slot(&current, index)?;
+                    }
                     report.cleared += 1;
                 }
                 _ => unreachable!("VerifiedBundle enforces name/blob pairs"),
             }
         }
         let final_list = device.list_info(current.path.clone())?;
-        let wanted_names = wanted
-            .slots
-            .iter()
-            .map(|slot| slot.name.clone())
-            .collect::<Vec<_>>();
         if final_list.names != wanted_names {
             return Err(Error::InvalidResponse {
                 subject: current.path.to_string(),
@@ -532,6 +550,28 @@ fn restore_preflighted<L: Link>(
     }
     progress(RestoreStep::Done);
     Ok(report)
+}
+
+/// Slots to empty before a restore writes the others. The pedal ignores an
+/// upload under a name another slot holds, so a slot that is about to change
+/// and whose name is wanted by a different slot has to go first: after a move,
+/// restoring the old order writes a name into one slot while the other still
+/// has it.
+fn slots_to_empty_first(
+    current: &[Option<String>],
+    wanted: &[Option<String>],
+    differs: &[bool],
+) -> Vec<usize> {
+    (0..current.len())
+        .filter(|&index| differs[index])
+        .filter(|&index| {
+            current[index].as_ref().is_some_and(|held| {
+                (0..wanted.len()).any(|other| {
+                    other != index && differs[other] && wanted[other].as_ref() == Some(held)
+                })
+            })
+        })
+        .collect()
 }
 
 struct SettingRestore {
@@ -1412,6 +1452,36 @@ mod tests {
         atomic_write(dir.join("manifest.json"), &pretty_json(&manifest).unwrap()).unwrap();
         assert!(open_verified(&dir).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn restoring_a_moved_name_empties_its_new_slot_first() {
+        let names = |slots: &[&str]| -> Vec<Option<String>> {
+            slots
+                .iter()
+                .map(|name| (!name.is_empty()).then(|| (*name).to_owned()))
+                .collect()
+        };
+        // Slot 2 was moved to slot 3: restoring writes "Origin" into slot 2
+        // while slot 3 still has it, so slot 3 goes first.
+        let current = names(&["Cab", "", "Origin", ""]);
+        let wanted = names(&["Cab", "Origin", "", ""]);
+        let differs = [false, true, true, false];
+        assert_eq!(slots_to_empty_first(&current, &wanted, &differs), [2]);
+
+        // Two names that swapped places each block the other's write.
+        let current = names(&["B", "A"]);
+        let wanted = names(&["A", "B"]);
+        assert_eq!(
+            slots_to_empty_first(&current, &wanted, &[true, true]),
+            [0, 1]
+        );
+
+        // A name that is simply replaced, or not wanted anywhere else, is
+        // written in place.
+        let current = names(&["Old", "Keep"]);
+        let wanted = names(&["New", "Keep"]);
+        assert!(slots_to_empty_first(&current, &wanted, &[true, false]).is_empty());
     }
 
     #[test]
