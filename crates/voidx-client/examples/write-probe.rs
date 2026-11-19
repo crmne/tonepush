@@ -22,13 +22,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("expected one StompStation PRO, found {}", found.len()).into());
     }
     let mut device = Device::connect(found[0].open()?)?;
-    device.enable_writes()?;
-    clear_leftovers(&mut device)?;
+    // Everything up to enable_writes only reads: the backup must fit this
+    // pedal, and the loaded preset must have no unsaved edits, since the save
+    // probe loads other presets and the pedal drops such edits.
     let current = bundle.preflight(&mut device)?;
     let presets = current
         .into_iter()
         .find(|list| list.path.as_str() == "root\\presets")
         .ok_or("backup preflight did not return the preset list")?;
+    refuse_unsaved_edits(&mut device, &presets)?;
+    device.enable_writes()?;
+    clear_leftovers(&mut device, &bundle)?;
+    let presets = device.list_info(presets.path.clone())?;
     let empty = presets
         .names
         .windows(2)
@@ -153,18 +158,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Refuse to run while the loaded preset differs from what is stored for it:
+/// the pedal discards unsaved edits when another preset is loaded.
+fn refuse_unsaved_edits(
+    device: &mut Device<voidx_client::SerialLink>,
+    presets: &voidx_client::BlobList,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let active = device.read_value(NodePath::new("root\\app\\preset")?)?;
+    let index = presets
+        .names
+        .iter()
+        .position(|name| name.as_deref() == active.as_str())
+        .ok_or("the active preset is not named in the preset list")?;
+    let stored = voidx_proto::preset::Preset::parse(&device.read_blob(presets, index)?)?;
+    let live = device.browse(NodePath::new("root\\app")?)?;
+    for record in stored.records() {
+        if record
+            .subject()
+            .rsplit('\\')
+            .next()
+            .is_some_and(|name| name.starts_with('_'))
+        {
+            continue;
+        }
+        let Ok(path) = NodePath::new(record.subject()) else {
+            continue;
+        };
+        let (Some(saved), Some(now)) = (
+            record.value().get("value"),
+            live.get(&path).and_then(|node| node.value.as_ref()),
+        ) else {
+            continue;
+        };
+        if !voidx_client::values_equivalent(saved, now) {
+            return Err(format!(
+                "the loaded preset {active} has unsaved changes ({path} is {now}, saved as \
+                 {saved}); save or discard them on the pedal first"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Clear slots a run of this probe made and did not get to clear, such as
-/// after a crash, so each run starts from the backup's slot names.
+/// after a crash. A slot counts as one only if it has a probe name and is
+/// empty in the backup, so a player's own preset is never touched.
 fn clear_leftovers(
     device: &mut Device<voidx_client::SerialLink>,
+    bundle: &backup::VerifiedBundle,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for path in backup::LIBRARY_PATHS {
+        let saved = bundle
+            .list(path)
+            .ok_or_else(|| format!("backup omits {path}"))?;
         let list = device.list_info(NodePath::new(path)?)?;
-        for (index, name) in list.occupied() {
-            if name.starts_with("__tp_") || name.starts_with("__tonepush_probe_") {
-                println!("{path}: clearing leftover {name:?} in slot {}", index + 1);
-                device.clear_slot(&list, index)?;
-            }
+        let leftovers: Vec<(usize, String)> = list
+            .occupied()
+            .filter(|(index, name)| {
+                (name.starts_with("__tp_") || name.starts_with("__tonepush_probe_"))
+                    && saved
+                        .slots
+                        .get(*index)
+                        .is_some_and(|slot| slot.name.is_none())
+            })
+            .map(|(index, name)| (index, name.to_owned()))
+            .collect();
+        for (index, name) in leftovers {
+            println!("{path}: clearing leftover {name:?} in slot {}", index + 1);
+            device.clear_slot(&list, index)?;
         }
     }
     Ok(())
@@ -184,26 +246,45 @@ fn probe_stereo_ir(
         .position(|pair| pair[0].is_none() && pair[1].is_none())
         .ok_or("stereo IR probe needs two consecutive empty IR slots")?;
     let mut occupied = list.occupied().map(|(index, _)| index);
-    let (Some(first), Some(second)) = (occupied.next(), occupied.next()) else {
-        return Err("stereo IR probe needs two occupied IR slots as a source".into());
-    };
+    let first = occupied
+        .next()
+        .ok_or("stereo IR probe needs an occupied IR slot as a source")?;
+    let second = occupied.next();
     let left = bundle
         .blob(PATH, first)
         .ok_or("backup omits the first source IR")?;
-    let right = bundle
-        .blob(PATH, second)
-        .ok_or("backup omits the second source IR")?;
-    let stereo =
-        voidx_client::ir::Wav::from_device_blobs(&[left, right], voidx_client::ir::SAMPLE_RATE)?
-            .encode()?;
+    // With a single source IR the right side is the left one inverted, so the
+    // two sides still differ and a swapped pair would not read back alike.
+    let wav = match second {
+        Some(second) => {
+            let right = bundle
+                .blob(PATH, second)
+                .ok_or("backup omits the second source IR")?;
+            voidx_client::ir::Wav::from_device_blobs(&[left, right], voidx_client::ir::SAMPLE_RATE)?
+        }
+        None => {
+            let mut wav =
+                voidx_client::ir::Wav::from_device_blobs(&[left], voidx_client::ir::SAMPLE_RATE)?;
+            let inverted = wav.channels[0].iter().map(|sample| -sample).collect();
+            wav.channels.push(inverted);
+            wav
+        }
+    };
+    if wav.channels[0] == wav.channels[1] {
+        return Err("stereo IR probe needs two sides that differ".into());
+    }
+    let stereo = wav.encode()?;
     let blobs = voidx_client::ir::Wav::parse(&stereo)?.device_blobs(list.size)?;
     if blobs.len() != 2 {
         return Err("stereo WAV did not split into two device slots".into());
     }
+    let right_source = second.map_or_else(
+        || format!("slot {} inverted", first + 1),
+        |second| format!("slot {}", second + 1),
+    );
     println!(
-        "{PATH}: stereo pair from slots {} and {} into empty slots {} and {}",
+        "{PATH}: stereo pair from slot {} and {right_source} into empty slots {} and {}",
         first + 1,
-        second + 1,
         empty + 1,
         empty + 2
     );
@@ -268,12 +349,24 @@ fn probe_save(
         .iter()
         .position(|name| name.as_deref() == active_before.as_str())
         .ok_or("the active preset is not named in the preset list")?;
+    let gain = NodePath::new("root\\app\\amp\\gain")?;
+    let gain_description = device
+        .browse(gain.clone())?
+        .get(&gain)
+        .cloned()
+        .ok_or("amp gain browse omitted its own node")?;
     println!("root\\presets: save probe in empty slot {}", empty + 1);
 
-    device.write_blob(&presets, empty, SCRATCH, source, |_| {})?;
+    let mut created_slot = None;
     let operation = (|| -> Result<(), Box<dyn std::error::Error>> {
+        device.write_blob(&presets, empty, SCRATCH, source, |_| {})?;
         device.select_preset(empty)?;
 
+        // Change a knob first, so the stored preset shows the save took the
+        // live state rather than leaving the slot as uploaded.
+        let loaded = device.read_value(gain.clone())?;
+        let edited = nudged(&gain_description, &loaded)?;
+        device.write_node(gain.clone(), &gain_description, edited.clone())?;
         device.save_preset(SCRATCH)?;
         let after = device.list_info(presets.path.clone())?;
         let mut expected = presets.names.clone();
@@ -281,8 +374,19 @@ fn probe_save(
         if after.names != expected {
             return Err("saving under the scratch preset's name changed other slots".into());
         }
-        voidx_proto::preset::Preset::parse(&device.read_blob(&after, empty)?)?;
-        println!("save under an existing name replaced it in place");
+        let saved = voidx_proto::preset::Preset::parse(&device.read_blob(&after, empty)?)?;
+        let stored = saved
+            .records()
+            .iter()
+            .find(|record| record.subject() == gain.as_str())
+            .and_then(|record| record.value().get("value"))
+            .ok_or("the saved preset holds no amp gain")?;
+        if !voidx_client::values_equivalent(&edited, stored) {
+            return Err(
+                format!("saving in place stored amp gain {stored}, not the live {edited}").into(),
+            );
+        }
+        println!("save under an existing name replaced it in place with the live edit");
 
         device.save_preset(NEW)?;
         let after = device.list_info(presets.path.clone())?;
@@ -296,6 +400,14 @@ fn probe_save(
         let [created] = created[..] else {
             return Err(format!("saving a new name made {} slots", created.len()).into());
         };
+        created_slot = Some(created);
+        if presets.names[created].is_some() {
+            return Err(format!(
+                "saving a new name replaced the occupied slot {}",
+                created + 1
+            )
+            .into());
+        }
         expected[created] = Some(NEW.to_owned());
         if after.names != expected {
             return Err("saving a new name changed slots other than the new one".into());
@@ -316,33 +428,99 @@ fn probe_save(
         Ok(())
     })();
 
-    // Whatever happened, put the live selection back and clear every slot
-    // the probe made, found by comparing names with those before it.
-    let selected = device.select_preset(original);
-    let now = device.list_info(presets.path.clone())?;
-    let mut cleared = Ok(());
-    for (index, name) in now.names.iter().enumerate() {
-        if name.is_some() && presets.names[index].is_none() {
-            let result = device.clear_slot(&now, index);
-            cleared = cleared.and(result);
+    // Whatever happened, put the live selection back, clear every slot the
+    // probe made, and put back any preset of the player's a save replaced.
+    let mut problems = Vec::new();
+    if let Err(error) = device.select_preset(original) {
+        problems.push(format!("reselecting the original preset failed: {error}"));
+    }
+    match device.list_info(presets.path.clone()) {
+        Ok(now) => {
+            for index in 0..now.count {
+                if now.names[index] == presets.names[index] {
+                    continue;
+                }
+                let result = match &presets.names[index] {
+                    None => device.clear_slot(&now, index).map_err(Into::into),
+                    Some(name) => put_back(device, bundle, &now, index, name),
+                };
+                if let Err(error) = result {
+                    problems.push(format!("cleaning slot {} failed: {error}", index + 1));
+                }
+            }
+        }
+        Err(error) => {
+            problems.push(format!("refreshing the preset list failed: {error}"));
+            for index in [Some(empty), created_slot].into_iter().flatten() {
+                if presets.names[index].is_none() {
+                    if let Err(error) = device.clear_slot(&presets, index) {
+                        problems.push(format!("clearing slot {} failed: {error}", index + 1));
+                    }
+                }
+            }
         }
     }
-    let final_list = device.list_info(presets.path.clone())?;
-    let active_after = device.read_value(active_path)?;
-    if final_list.names != presets.names {
-        return Err("save probe cleanup left the preset names changed".into());
+    match device.list_info(presets.path.clone()) {
+        Ok(final_list) if final_list.names != presets.names => {
+            problems.push("save probe cleanup left the preset names changed".into());
+        }
+        Ok(_) => {}
+        Err(error) => problems.push(format!("rereading the preset list failed: {error}")),
     }
-    selected?;
-    cleared?;
-    if active_after != active_before {
-        return Err(format!(
+    match device.read_value(active_path) {
+        Ok(active_after) if active_after != active_before => problems.push(format!(
             "save probe changed the active preset from {active_before} to {active_after}"
-        )
-        .into());
+        )),
+        Ok(_) => {}
+        Err(error) => problems.push(format!("rereading the active preset failed: {error}")),
     }
-    operation?;
+    if let Err(error) = operation {
+        problems.insert(0, error.to_string());
+    }
+    if !problems.is_empty() {
+        return Err(problems.join("; ").into());
+    }
     println!("root\\presets: save, reload, and cleanup verified");
     Ok(())
+}
+
+/// Write a player's preset back from the backup after a save replaced it.
+fn put_back(
+    device: &mut Device<voidx_client::SerialLink>,
+    bundle: &backup::VerifiedBundle,
+    list: &voidx_client::BlobList,
+    index: usize,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let saved = bundle
+        .list(list.path.as_str())
+        .and_then(|saved| saved.slots.get(index))
+        .ok_or("the backup omits this slot")?;
+    if saved.name.as_deref() != Some(name) {
+        return Err(format!("the backup does not hold {name:?} in this slot").into());
+    }
+    let blob = bundle
+        .blob(list.path.as_str(), index)
+        .ok_or("the backup omits this slot's content")?;
+    device.write_blob(list, index, name, blob, |_| {})?;
+    println!("put {name:?} back in slot {} from the backup", index + 1);
+    Ok(())
+}
+
+/// A value a tenth of the range away from `now`, toward the middle.
+fn nudged(
+    description: &voidx_proto::NodeDescription,
+    now: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let (Some(now), Some(min), Some(max)) = (now.as_f64(), description.min, description.max) else {
+        return Err("amp gain is not a bounded number".into());
+    };
+    let step = (max - min) / 10.0;
+    Ok(serde_json::Value::from(if now - min < max - now {
+        now + step
+    } else {
+        now - step
+    }))
 }
 
 /// Edit the loaded preset the way the editor does, one knob and then the
@@ -358,36 +536,46 @@ fn probe_live_edits(
         .cloned()
         .ok_or("amp gain browse omitted its own node")?;
     let before = device.read_value(knob.clone())?;
-    let (Some(now), Some(min), Some(max)) = (before.as_f64(), description.min, description.max)
-    else {
-        return Err("amp gain is not a bounded number".into());
-    };
-    let step = (max - min) / 10.0;
-    let other = serde_json::Value::from(if now - min < max - now {
-        now + step
-    } else {
-        now - step
-    });
+    let other = nudged(&description, &before)?;
     let change = device.write_node(knob.clone(), &description, other.clone());
     let observed = device.read_value(knob.clone());
     let restore = device.write_node(knob.clone(), &description, before.clone());
-    let restored = device.read_value(knob.clone())?;
-    change?;
-    if !voidx_client::values_equivalent(&other, &observed?) {
-        return Err("amp gain did not read back as written".into());
+    let restored = device.read_value(knob.clone());
+    // Report a failed restore together with a failed change, never instead.
+    let mut problems = Vec::new();
+    match (change, observed) {
+        (Err(error), _) => problems.push(format!("writing amp gain failed: {error}")),
+        (Ok(_), Err(error)) => problems.push(format!("reading amp gain back failed: {error}")),
+        (Ok(_), Ok(observed)) if !voidx_client::values_equivalent(&other, &observed) => {
+            problems.push(format!("amp gain read back as {observed}, not {other}"));
+        }
+        _ => {}
     }
-    restore?;
-    if !voidx_client::values_equivalent(&before, &restored) {
-        return Err(format!("amp gain was not restored: {before} became {restored}").into());
+    if let Err(error) = restore {
+        problems.push(format!("restoring amp gain failed: {error}"));
+    }
+    match restored {
+        Ok(restored) if !voidx_client::values_equivalent(&before, &restored) => {
+            problems.push(format!(
+                "amp gain was not restored: {before} became {restored}"
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => problems.push(format!("rereading amp gain failed: {error}")),
+    }
+    if !problems.is_empty() {
+        return Err(problems.join("; ").into());
     }
     println!("live knob write read back and was restored ({before} to {other} and back)");
 
+    // Firmware 1.5 has no editable chain; skip that step there so the rest
+    // of the probe still runs.
     let router_path = NodePath::new(voidx_proto::router::PATH)?;
-    let description = device
-        .browse(router_path.clone())?
-        .get(&router_path)
-        .cloned()
-        .ok_or("router browse omitted its own node")?;
+    let app = device.browse(NodePath::new("root\\app")?)?;
+    let Some(description) = app.get(&router_path).cloned() else {
+        println!("no {router_path} on this firmware; chain edit skipped");
+        return Ok(());
+    };
     let node = voidx_proto::router::RouterNode::from_description(&description)?;
     let movable: Vec<usize> = (0..node.value.positions())
         .filter(|position| !node.fixed.position(*position))
@@ -405,18 +593,26 @@ fn probe_live_edits(
     let swapped = node.value.swap(&node.fixed, pair.0, pair.1)?;
     let written = device.write_router(&swapped);
     let restored = device.write_router(&node.value);
-    let written = written?;
-    if written != swapped {
-        return Err(format!(
+    let mut problems = Vec::new();
+    match written {
+        Ok(written) if written != swapped => problems.push(format!(
             "the pedal kept {:?} after positions {} and {} were exchanged",
             written.to_value(),
             pair.0 + 1,
             pair.1 + 1
-        )
-        .into());
+        )),
+        Ok(_) => {}
+        Err(error) => problems.push(format!("exchanging chain positions failed: {error}")),
     }
-    if restored? != node.value {
-        return Err("the chain was not restored".into());
+    match restored {
+        Ok(restored) if restored != node.value => {
+            problems.push("the chain was not restored".into());
+        }
+        Ok(_) => {}
+        Err(error) => problems.push(format!("restoring the chain failed: {error}")),
+    }
+    if !problems.is_empty() {
+        return Err(problems.join("; ").into());
     }
     println!(
         "live chain edit exchanged positions {} and {}, read back, and was restored",
