@@ -957,7 +957,7 @@ fn validate_slot(list: &BlobList, index: usize) -> Result<()> {
     }
 }
 
-fn validate_slot_name(name: &str) -> Result<()> {
+pub(crate) fn validate_slot_name(name: &str) -> Result<()> {
     if name.is_empty()
         || name.len() > 63
         || name

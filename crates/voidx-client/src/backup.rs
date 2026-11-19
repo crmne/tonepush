@@ -441,6 +441,11 @@ fn restore_preflighted<L: Link>(
     force_current: bool,
     mut progress: impl FnMut(RestoreStep),
 ) -> Result<RestoreReport> {
+    for current in &current_lists {
+        if let Some(wanted) = source.list(current.path.as_str()) {
+            check_restore_names(wanted)?;
+        }
+    }
     let settings = prepare_settings_restore(source, rollback, device, force_current)?;
     let mut report = RestoreReport::default();
     for current in current_lists {
@@ -550,6 +555,25 @@ fn restore_preflighted<L: Link>(
     }
     progress(RestoreStep::Done);
     Ok(report)
+}
+
+/// Refuses a library whose names the pedal could not take, before a restore
+/// clears or writes anything: every name must be one the pedal accepts, and no
+/// two slots may want the same name, since the pedal ignores an upload under a
+/// name another slot holds. Empty slots may repeat.
+fn check_restore_names(list: &ListRecord) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for slot in &list.slots {
+        let Some(name) = &slot.name else { continue };
+        crate::device::validate_slot_name(name)?;
+        if !seen.insert(name.as_str()) {
+            return Err(Error::Backup(format!(
+                "{} holds the name {name:?} in more than one slot; the pedal cannot restore that",
+                list.path
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Slots to empty before a restore writes the others. The pedal ignores an
@@ -1728,6 +1752,68 @@ mod tests {
         let error = bundle.preflight(&mut device).unwrap_err().to_string();
         assert!(error.contains("root\\pnam_list"), "{error}");
         assert!(error.contains("does not have"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn restore_names_the_pedal_cannot_take_are_refused_up_front() {
+        let list = |names: &[Option<&str>]| ListRecord {
+            path: "root\\ir_list".into(),
+            description: None,
+            size: 64,
+            count: names.len(),
+            chunk_size: 64,
+            group: None,
+            gzip: false,
+            movable: true,
+            item_type: None,
+            slots: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| SlotRecord {
+                    index,
+                    name: name.map(str::to_owned),
+                    blob: None,
+                })
+                .collect(),
+        };
+        assert!(check_restore_names(&list(&[Some("A"), None, None, Some("B")])).is_ok());
+        let error = check_restore_names(&list(&[Some("B"), Some("B"), Some("A")]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("more than one slot"), "{error}");
+        let long = "x".repeat(64);
+        assert!(matches!(
+            check_restore_names(&list(&[Some(&long)])),
+            Err(Error::InvalidSlotName(_))
+        ));
+        assert!(matches!(
+            check_restore_names(&list(&[Some("bad\nname")])),
+            Err(Error::InvalidSlotName(_))
+        ));
+    }
+
+    #[test]
+    fn a_restore_with_an_impossible_name_touches_nothing() {
+        let dir = scratch("long-name");
+        fixture(&dir);
+        let mut bundle = open_verified(&dir).unwrap();
+        bundle.manifest.lists[0].slots[0].name = Some("x".repeat(64));
+        // The device has no replies scripted: any clear, write or read the
+        // restore attempted would fail on the empty link instead.
+        let mut device = device_replying("");
+        let result = restore_preflighted(
+            &bundle,
+            &bundle,
+            &mut device,
+            vec![preset_list(64, 64)],
+            true,
+            |_| {},
+        );
+        assert!(
+            matches!(result, Err(Error::InvalidSlotName(_))),
+            "{result:?}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
