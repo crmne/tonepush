@@ -15,19 +15,25 @@ A click on the pedal's card opens its own pages: its backups, NAM and IR
 libraries, settings and firmware.
 
 TonePush support is hardware-tested with a StompStation PRO running firmware
-1.5.12, 2.0.10 and 2.2.6: every write it makes was read back on each. Patch
-releases are treated alike, so a pedal on 1.5.10 or 2.0.8 saves too. On
-firmware TonePush does not know yet, it opens the pedal read only: browsing,
-export, backups, picking presets and turning knobs work, and nothing is
-written to the pedal's memory. On 2.0.x, NAM models cannot be reordered,
-because that firmware keeps playing the old model after a move until it
-restarts.
+1.5.12, 2.0.10, 2.2.6 and 2.4.4: every write it makes was read back on each.
+Patch releases are treated alike, so a pedal on 1.5.10 or 2.0.8 saves too. On
+firmware TonePush does not know yet (2.3, for one), it opens the pedal read
+only: browsing, export, backups, picking presets and turning knobs work, and
+nothing is written to the pedal's memory. On 2.0.x, NAM models cannot be
+reordered, because that firmware keeps playing the old model after a move
+until it restarts.
+
+Firmware 2.4 adds Parametric NAM amps and drives and VxAmp models, each in a
+library of its own. TonePush backs them up, checks them and restores them with
+the other libraries, as exact bytes, but it cannot list, import or export them
+yet. Those libraries were empty on the pedal the 2.4.4 checks ran on, so
+restoring a model into one is not hardware-verified.
 
 Firmware 2.2 stops answering over USB once the computer has used the pedal
 as a sound card (PipeWire and Windows do so on their own), unless requests
 stay small and the link goes quiet between replies. TonePush paces itself
-on 2.2 the way VoidX Control does, so a full backup takes about six minutes
-instead of two and a half. The protocol
+on 2.2 and later the way VoidX Control does, so a full backup takes about six
+minutes instead of two and a half. The protocol
 implementation is independent and based on the vendor's
 [public VoidX protocol documentation](https://www.voidxdevteam.com/voidx-control/voidx-protocol/)
 plus traffic captured from our own pedal.
@@ -204,7 +210,8 @@ pedal instead, and **Back up to a file…** there puts one where you choose. A
 bundle contains:
 
 - exact fixed-size bytes for all occupied presets, IRs, NAM amps, and NAM
-  drives;
+  drives, and on firmware that has them (2.4) the Parametric NAM amps and
+  drives and the VxAmp models;
 - every empty slot and library constraint;
 - the device schema and safe global settings;
 - a SHA-256, size, and manifest record for every file.
@@ -212,10 +219,13 @@ bundle contains:
 The completed directory is published atomically and with private filesystem
 permissions. Load it as the current rollback once; persistent actions become
 available only after identity, firmware, live names, slot contents, and safe
-settings agree. A backup goes into a new folder or replaces an earlier bundle;
-TonePush refuses a folder that already holds anything else rather than replace
-it. Restore preflights the source before its first write and keeps
-the original armed rollback available if the transport fails.
+settings agree. A bundle has to hold every library the pedal has, so one that
+lacks a library the pedal now has, such as a backup made before an update added
+Parametric NAM, is not accepted as a rollback: take a new backup. A backup goes
+into a new folder or replaces an earlier bundle; TonePush refuses a folder that
+already holds anything else rather than replace it. Restore preflights the
+source before its first write and keeps the original armed rollback available
+if the transport fails.
 
 ## Command line
 
