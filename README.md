@@ -64,10 +64,12 @@ model-shelf and pedal-knob design instead of reproducing VoidX Control's UI:
   firmware 2.x the chain is drawn as the pedal routes it, with free positions,
   fixed blocks and parallel banks, and blocks can be added, moved, replaced,
   removed and run in parallel.
-- **All device libraries.** Select, save, rename, reorder, import, export and
-  clear presets; manage NAM amp and drive models; import/export mono IRs or
-  pair two slots as a stereo WAV. Uploads are acknowledged chunk by chunk and
-  read back in full before success is reported.
+- **Preset, IR and NAM libraries.** Select, save, rename, reorder, import,
+  export and clear presets; manage NAM amp and drive models; import/export mono
+  IRs or pair two slots as a stereo WAV. Uploads are acknowledged chunk by
+  chunk and read back in full before success is reported. The Parametric NAM
+  and VxAmp libraries of firmware 2.4 are backed up and restored, but cannot
+  be managed yet.
 - **Verified backup and restore.** A private `.vxbundle` holds exact padded
   bytes for presets, both IR channels and every NAM slot plus safe global
   settings. Every size and SHA-256 is checked before use. Persistent GUI edits
