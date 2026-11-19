@@ -1,3 +1,9 @@
+//! Reversible write checks for a maintainer verifying StompStation PRO
+//! firmware. Run it with the operator present on an idle pedal: nobody uses
+//! the pedal or VoidX Control until it ends. Cleanup puts back what it can
+//! prove the probe changed and reports anything else; it does not recover
+//! from every combination of failed reads, so keep the backup at hand.
+
 use std::path::PathBuf;
 
 use voidx_client::backup;
@@ -179,6 +185,7 @@ fn refuse_unsaved_edits(
         .ok_or("the active preset is not named in the preset list")?;
     let stored = voidx_proto::preset::Preset::parse(&device.read_blob(presets, index)?)?;
     let live = device.browse(NodePath::new("root\\app")?)?;
+    let mut libraries = std::collections::HashMap::<String, Vec<Option<String>>>::new();
     for record in stored.records() {
         if record
             .subject()
@@ -203,12 +210,57 @@ fn refuse_unsaved_edits(
                 format!("cannot read {path} to check for unsaved changes: {error}")
             })?,
         };
+        // A saved model the library no longer holds cannot be loaded; the
+        // pedal shows another one, and nothing the player made is at stake.
+        if let (Some(library), Some(model)) = (&node.reference, saved.as_str()) {
+            if !libraries.contains_key(library) {
+                let names = device.list_info(NodePath::new(library)?)?.names;
+                libraries.insert(library.clone(), names);
+            }
+            if !libraries[library]
+                .iter()
+                .any(|name| name.as_deref() == Some(model))
+            {
+                continue;
+            }
+        }
         if !voidx_client::values_equivalent(saved, &now) {
             return Err(format!(
                 "the loaded preset {active} has unsaved changes ({path} is {now}, saved as \
                  {saved}); save or discard them on the pedal first"
             )
             .into());
+        }
+    }
+    // A preset saved without a chain loads the router's default chain, so
+    // the live chain must still be that default; without a default to
+    // compare against, an unsaved chain edit cannot be ruled out.
+    let router = NodePath::new(voidx_proto::router::PATH)?;
+    let saves_chain = stored
+        .records()
+        .iter()
+        .any(|record| record.subject() == voidx_proto::router::PATH);
+    if let (Some(node), false) = (live.get(&router), saves_chain) {
+        let now = match &node.value {
+            Some(now) => now.clone(),
+            None => device.read_value(router.clone())?,
+        };
+        match &node.default {
+            Some(default) if *default == now => {}
+            Some(_) => {
+                return Err(format!(
+                    "the loaded preset {active} has an unsaved chain edit; save or \
+                     discard it on the pedal first"
+                )
+                .into())
+            }
+            None => {
+                return Err(format!(
+                    "the loaded preset {active} saves no chain and the firmware names \
+                     no default, so unsaved chain edits cannot be ruled out"
+                )
+                .into())
+            }
         }
     }
     Ok(())
@@ -249,9 +301,12 @@ fn refuse_leftovers(
         return Ok(());
     }
     Err(format!(
-        "{}; if these are left from an interrupted probe run, clear them with \
-         `tonepush pro clear <library> <slot> --rollback <fresh backup> --yes`, \
-         then take a new backup",
+        "{}; if these are left from an interrupted probe run, clear them one at \
+         a time with `tonepush pro clear <library> <slot> --rollback <backup> --yes`, \
+         taking a new backup before each clear, since a clear makes the previous \
+         backup stale, and one more after the last; if a backup cannot be taken \
+         because such a slot holds data it rejects, clear that slot in VoidX \
+         Control instead",
         found.join(", ")
     )
     .into())
@@ -396,6 +451,7 @@ fn probe_save(
 
     let mut created_slot = None;
     let mut left_original = false;
+    let mut save_attempted = false;
     let operation = (|| -> Result<(), Box<dyn std::error::Error>> {
         device.write_blob(&presets, empty, SCRATCH, source, |_| {})?;
         // Check again just before loading another preset: the player may
@@ -409,6 +465,7 @@ fn probe_save(
         let loaded = device.read_value(gain.clone())?;
         let edited = nudged(&gain_description, &loaded)?;
         device.write_node(gain.clone(), &gain_description, edited.clone())?;
+        save_attempted = true;
         device.save_preset(SCRATCH)?;
         let after = device.list_info(presets.path.clone())?;
         let mut expected = presets.names.clone();
@@ -501,6 +558,15 @@ fn probe_save(
         Ok(now) => {
             for index in 0..now.count {
                 if now.names[index] == presets.names[index] && displaced != Some(index) {
+                    continue;
+                }
+                // Before any save, only the scratch upload can be the
+                // probe's; another change is the player's and stays.
+                if !save_attempted && index != empty {
+                    problems.push(format!(
+                        "slot {} changed during the probe and was left as it is",
+                        index + 1
+                    ));
                     continue;
                 }
                 let result = match &presets.names[index] {
