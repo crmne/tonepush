@@ -33,7 +33,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     refuse_unsaved_edits(&mut device, &presets)?;
     device.enable_writes()?;
     clear_leftovers(&mut device, &bundle)?;
-    let presets = device.list_info(presets.path.clone())?;
+    // With scratch gone, every slot must hold what the backup holds, so a
+    // preset the probe has to put back is the player's current one.
+    let presets = bundle
+        .verify_current_state(&mut device)?
+        .into_iter()
+        .find(|list| list.path.as_str() == "root\\presets")
+        .ok_or("backup check did not return the preset list")?;
+    println!("every slot matches the backup");
     let empty = presets
         .names
         .windows(2)
@@ -184,13 +191,19 @@ fn refuse_unsaved_edits(
         let Ok(path) = NodePath::new(record.subject()) else {
             continue;
         };
-        let (Some(saved), Some(now)) = (
-            record.value().get("value"),
-            live.get(&path).and_then(|node| node.value.as_ref()),
-        ) else {
+        // A stored value with a live node to hold it must be compared: read
+        // the node directly when the browse left its value out. A node this
+        // firmware does not have holds nothing that could be lost.
+        let (Some(saved), Some(node)) = (record.value().get("value"), live.get(&path)) else {
             continue;
         };
-        if !voidx_client::values_equivalent(saved, now) {
+        let now = match &node.value {
+            Some(now) => now.clone(),
+            None => device.read_value(path.clone()).map_err(|error| {
+                format!("cannot read {path} to check for unsaved changes: {error}")
+            })?,
+        };
+        if !voidx_client::values_equivalent(saved, &now) {
             return Err(format!(
                 "the loaded preset {active} has unsaved changes ({path} is {now}, saved as \
                  {saved}); save or discard them on the pedal first"
@@ -253,35 +266,47 @@ fn probe_stereo_ir(
     let left = bundle
         .blob(PATH, first)
         .ok_or("backup omits the first source IR")?;
-    // With a single source IR the right side is the left one inverted, so the
-    // two sides still differ and a swapped pair would not read back alike.
-    let wav = match second {
+    // The two sides must differ so a swapped pair would not read back alike.
+    // Without a second, different IR the right side is the left one
+    // inverted, or for a silent IR a square wave that every sample format
+    // holds exactly.
+    let mut wav = voidx_client::ir::Wav::from_device_blobs(&[left], voidx_client::ir::SAMPLE_RATE)?;
+    let other = match second {
         Some(second) => {
             let right = bundle
                 .blob(PATH, second)
                 .ok_or("backup omits the second source IR")?;
-            voidx_client::ir::Wav::from_device_blobs(&[left, right], voidx_client::ir::SAMPLE_RATE)?
+            voidx_client::ir::Wav::from_device_blobs(&[right], voidx_client::ir::SAMPLE_RATE)?
+                .channels
+                .pop()
+                .filter(|right| *right != wav.channels[0])
+                .map(|right| (second, right))
         }
-        None => {
-            let mut wav =
-                voidx_client::ir::Wav::from_device_blobs(&[left], voidx_client::ir::SAMPLE_RATE)?;
+        None => None,
+    };
+    let right_source = match other {
+        Some((second, right)) => {
+            wav.channels.push(right);
+            format!("slot {}", second + 1)
+        }
+        _ if wav.channels[0].iter().any(|sample| *sample != 0.0) => {
             let inverted = wav.channels[0].iter().map(|sample| -sample).collect();
             wav.channels.push(inverted);
-            wav
+            format!("slot {} inverted", first + 1)
+        }
+        _ => {
+            let square = (0..wav.channels[0].len())
+                .map(|frame| if frame % 2 == 0 { 0.5 } else { -0.5 })
+                .collect();
+            wav.channels.push(square);
+            "a square wave".to_owned()
         }
     };
-    if wav.channels[0] == wav.channels[1] {
-        return Err("stereo IR probe needs two sides that differ".into());
-    }
     let stereo = wav.encode()?;
     let blobs = voidx_client::ir::Wav::parse(&stereo)?.device_blobs(list.size)?;
     if blobs.len() != 2 {
         return Err("stereo WAV did not split into two device slots".into());
     }
-    let right_source = second.map_or_else(
-        || format!("slot {} inverted", first + 1),
-        |second| format!("slot {}", second + 1),
-    );
     println!(
         "{PATH}: stereo pair from slot {} and {right_source} into empty slots {} and {}",
         first + 1,
@@ -358,8 +383,13 @@ fn probe_save(
     println!("root\\presets: save probe in empty slot {}", empty + 1);
 
     let mut created_slot = None;
+    let mut left_original = false;
     let operation = (|| -> Result<(), Box<dyn std::error::Error>> {
         device.write_blob(&presets, empty, SCRATCH, source, |_| {})?;
+        // Check again just before loading another preset: the player may
+        // have turned a knob while the earlier probes ran.
+        refuse_unsaved_edits(device, &presets)?;
+        left_original = true;
         device.select_preset(empty)?;
 
         // Change a knob first, so the stored preset shows the save took the
@@ -388,6 +418,18 @@ fn probe_save(
         }
         println!("save under an existing name replaced it in place with the live edit");
 
+        if let Some(taken) = device
+            .list_info(presets.path.clone())?
+            .names
+            .iter()
+            .position(|name| name.as_deref() == Some(NEW))
+        {
+            return Err(format!(
+                "slot {} already holds {NEW:?}; saving would replace it",
+                taken + 1
+            )
+            .into());
+        }
         device.save_preset(NEW)?;
         let after = device.list_info(presets.path.clone())?;
         let created: Vec<usize> = after
@@ -430,19 +472,32 @@ fn probe_save(
 
     // Whatever happened, put the live selection back, clear every slot the
     // probe made, and put back any preset of the player's a save replaced.
+    // If the probe never loaded another preset, the player's live edits are
+    // still there and selecting would drop them, so it stays put.
     let mut problems = Vec::new();
-    if let Err(error) = device.select_preset(original) {
-        problems.push(format!("reselecting the original preset failed: {error}"));
+    if left_original {
+        if let Err(error) = device.select_preset(original) {
+            problems.push(format!("reselecting the original preset failed: {error}"));
+        }
     }
+    // A player's preset a save landed on is written back from the backup
+    // even if its name came out the same.
+    let displaced = created_slot.filter(|index| presets.names[*index].is_some());
+    let mut put_back_any = false;
+    let mut restored_displaced = false;
     match device.list_info(presets.path.clone()) {
         Ok(now) => {
             for index in 0..now.count {
-                if now.names[index] == presets.names[index] {
+                if now.names[index] == presets.names[index] && displaced != Some(index) {
                     continue;
                 }
                 let result = match &presets.names[index] {
                     None => device.clear_slot(&now, index).map_err(Into::into),
-                    Some(name) => put_back(device, bundle, &now, index, name),
+                    Some(name) => {
+                        put_back_any = true;
+                        restored_displaced |= displaced == Some(index);
+                        put_back(device, bundle, &now, index, name)
+                    }
                 };
                 if let Err(error) = result {
                     problems.push(format!("cleaning slot {} failed: {error}", index + 1));
@@ -458,6 +513,25 @@ fn probe_save(
                     }
                 }
             }
+        }
+    }
+    if let (Some(index), false) = (displaced, restored_displaced) {
+        put_back_any = true;
+        let result = device
+            .list_info(presets.path.clone())
+            .map_err(Into::into)
+            .and_then(|now| {
+                let name = presets.names[index].clone().unwrap_or_default();
+                put_back(device, bundle, &now, index, &name)
+            });
+        if let Err(error) = result {
+            problems.push(format!("putting slot {} back failed: {error}", index + 1));
+        }
+    }
+    // Load the original again from its restored contents.
+    if put_back_any && left_original {
+        if let Err(error) = device.select_preset(original) {
+            problems.push(format!("reselecting the original preset failed: {error}"));
         }
     }
     match device.list_info(presets.path.clone()) {
