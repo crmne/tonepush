@@ -31,16 +31,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .find(|list| list.path.as_str() == "root\\presets")
         .ok_or("backup preflight did not return the preset list")?;
     refuse_unsaved_edits(&mut device, &presets)?;
-    device.enable_writes()?;
-    clear_leftovers(&mut device, &bundle)?;
-    // With scratch gone, every slot must hold what the backup holds, so a
-    // preset the probe has to put back is the player's current one.
+    refuse_leftovers(&mut device, &bundle)?;
+    // Every slot must hold what the backup holds, so a preset the probe has
+    // to put back is the player's current one.
     let presets = bundle
         .verify_current_state(&mut device)?
         .into_iter()
         .find(|list| list.path.as_str() == "root\\presets")
         .ok_or("backup check did not return the preset list")?;
     println!("every slot matches the backup");
+    device.enable_writes()?;
     let empty = presets
         .names
         .windows(2)
@@ -214,14 +214,18 @@ fn refuse_unsaved_edits(
     Ok(())
 }
 
-/// Clear slots a run of this probe made and did not get to clear, such as
-/// after a crash. A slot counts as one only if it has a probe name and is
-/// empty in the backup, so a player's own preset is never touched.
-fn clear_leftovers(
+/// Refuse to run while a slot looks like a leftover of an interrupted run:
+/// a probe name in a slot the backup has empty. A name alone cannot prove
+/// the probe made it, so the operator checks and clears such a slot.
+fn refuse_leftovers(
     device: &mut Device<voidx_client::SerialLink>,
     bundle: &backup::VerifiedBundle,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for path in backup::LIBRARY_PATHS {
+    let mut found = Vec::new();
+    for (path, library) in backup::LIBRARY_PATHS
+        .into_iter()
+        .zip(["presets", "irs", "amps", "drives"])
+    {
         let saved = bundle
             .list(path)
             .ok_or_else(|| format!("backup omits {path}"))?;
@@ -238,11 +242,19 @@ fn clear_leftovers(
             .map(|(index, name)| (index, name.to_owned()))
             .collect();
         for (index, name) in leftovers {
-            println!("{path}: clearing leftover {name:?} in slot {}", index + 1);
-            device.clear_slot(&list, index)?;
+            found.push(format!("{library} slot {} holds {name:?}", index + 1));
         }
     }
-    Ok(())
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}; if these are left from an interrupted probe run, clear them with \
+         `tonepush pro clear <library> <slot> --rollback <fresh backup> --yes`, \
+         then take a new backup",
+        found.join(", ")
+    )
+    .into())
 }
 
 /// Write a stereo impulse response as the pair of slots `import-stereo-ir`
@@ -643,12 +655,16 @@ fn probe_live_edits(
     println!("live knob write read back and was restored ({before} to {other} and back)");
 
     // Firmware 1.5 has no editable chain; skip that step there so the rest
-    // of the probe still runs.
+    // of the probe still runs. Later firmware must describe its router.
     let router_path = NodePath::new(voidx_proto::router::PATH)?;
     let app = device.browse(NodePath::new("root\\app")?)?;
     let Some(description) = app.get(&router_path).cloned() else {
-        println!("no {router_path} on this firmware; chain edit skipped");
-        return Ok(());
+        let version = &device.identity().version;
+        if version.starts_with("1.5.") {
+            println!("no {router_path} on firmware {version}; chain edit skipped");
+            return Ok(());
+        }
+        return Err(format!("firmware {version} did not describe {router_path}").into());
     };
     let node = voidx_proto::router::RouterNode::from_description(&description)?;
     let movable: Vec<usize> = (0..node.value.positions())
