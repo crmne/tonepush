@@ -43,6 +43,10 @@ const OFFICIAL: &[(&str, &str)] = &[
         "2.4.4",
         "6fbe7aee2658686057b6a0ab51165950ed5d9f7a534e165d24d68acb5c936fa9",
     ),
+    (
+        "2.5.3",
+        "42a4f5fa1793f36640dc284f8cfe4539416204b9c6331b7c85316643b3f57531",
+    ),
 ];
 
 /// Images are a few megabytes; anything far outside that is not one.
