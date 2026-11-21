@@ -37,6 +37,8 @@ echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0e41", MODE="0666", TAG+="uaccess"' \
   | sudo tee /etc/udev/rules.d/70-line6-hx.rules
 echo 'SUBSYSTEM=="tty", ATTRS{manufacturer}=="SONULAB", ATTRS{product}=="StompStation PRO", MODE="0660", TAG+="uaccess"' \
   | sudo tee -a /etc/udev/rules.d/70-line6-hx.rules
+echo 'SUBSYSTEM=="tty", ATTRS{manufacturer}=="SONULAB", ATTRS{serial}=="STOMPPRO-*", MODE="0660", TAG+="uaccess"' \
+  | sudo tee -a /etc/udev/rules.d/70-line6-hx.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
