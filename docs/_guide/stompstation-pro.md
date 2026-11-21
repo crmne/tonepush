@@ -15,8 +15,9 @@ A click on the pedal's card opens its own pages: its backups, NAM and IR
 libraries, settings and firmware.
 
 TonePush support is hardware-tested with a StompStation PRO running firmware
-1.5.12, 2.0.10, 2.2.6 and 2.4.4: every write it makes was read back on each.
-Patch releases are treated alike, so a pedal on 1.5.10 or 2.0.8 saves too. On
+1.5.12, 2.0.10, 2.2.6, 2.4.4 and 2.5.3: every write it makes was read back on
+each. Patch releases are treated alike, so a pedal on 1.5.10 or 2.0.8 saves
+too. On
 firmware TonePush does not know yet (2.3, for one), it opens the pedal read
 only: browsing, export, backups, picking presets and turning knobs work, and
 nothing is written to the pedal's memory. On 2.0.x, NAM models cannot be
@@ -26,8 +27,8 @@ until it restarts.
 Firmware 2.4 adds Parametric NAM amps and drives and VxAmp models, each in a
 library of its own. TonePush backs them up, checks them and restores them with
 the other libraries, as exact bytes, but it cannot list, import or export them
-yet. Those libraries were empty on the pedal the 2.4.4 checks ran on, so
-restoring a model into one is not hardware-verified.
+yet. Those libraries were empty on the pedal the 2.4.4 and 2.5.3 checks ran
+on, so restoring a model into one is not hardware-verified.
 
 Firmware 2.2 stops answering over USB once the computer has used the pedal
 as a sound card (PipeWire and Windows do so on their own), unless requests

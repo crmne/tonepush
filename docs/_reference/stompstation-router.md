@@ -11,9 +11,10 @@ how parallel branches mix) and from a 2.0.10 pedal's schema. On a pedal at
 2.0.10, writes covering every rule below (fixed positions, moves, two- and
 three-way banks, connector normalisation, duplicates, unknown paths, malformed
 values, both chain actions and a preset reload) read back exactly as described.
-A 2.4.4 pedal describes the same router (one row of 14 positions, with the amp,
-delay and reverb fixed); on it one exchange of two movable positions was written,
-read back exactly and restored, and the other rules were not rechecked.
+Pedals on 2.4.4 and 2.5.3 describe the same router (one row of 14 positions,
+with the amp, delay and reverb fixed); on each, one exchange of two movable
+positions was written, read back exactly and restored, and the other rules were
+not rechecked.
 Facts not yet checked on hardware are marked *(unconfirmed)*.
 
 ## The value

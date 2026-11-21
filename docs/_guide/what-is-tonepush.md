@@ -45,7 +45,7 @@ The common workflow is the same whichever supported pedal is connected:
 This is a young project, and it says so:
 
 - Hardware verification covers an HX Stomp on firmware 3.80 and a StompStation
-  PRO on firmware 1.5.12, 2.0.10, 2.2.6 and 2.4.4. A contributor tested a Helix
+  PRO on firmware 1.5.12, 2.0.10, 2.2.6, 2.4.4 and 2.5.3. A contributor tested a Helix
   Floor on firmware 3.80: reading, backing up, editing and saving. Helix LT
   and Helix Rack parse and render (two DSP paths, four lanes), but they have
   not met real hardware yet.
