@@ -1110,6 +1110,7 @@ fn dream_pop_chain(app: &mut App) {
     app.switches = vec![
         hx_usb::Switch {
             switch: 1,
+            action: None,
             momentary: false,
             label: None,
             colour: None,
@@ -1117,6 +1118,7 @@ fn dream_pop_chain(app: &mut App) {
         },
         hx_usb::Switch {
             switch: 2,
+            action: None,
             momentary: false,
             label: None,
             colour: None,
@@ -1124,6 +1126,7 @@ fn dream_pop_chain(app: &mut App) {
         },
         hx_usb::Switch {
             switch: 3,
+            action: None,
             momentary: false,
             label: None,
             colour: None,
@@ -2624,6 +2627,7 @@ fn hx_stomp(app: &mut App) {
     app.switches = vec![
         hx_usb::Switch {
             switch: 1,
+            action: None,
             momentary: false,
             label: None,
             colour: None,
@@ -2631,6 +2635,7 @@ fn hx_stomp(app: &mut App) {
         },
         hx_usb::Switch {
             switch: 2,
+            action: None,
             momentary: false,
             label: Some("LEAD".to_owned()),
             colour: led("Green"),
@@ -2641,6 +2646,7 @@ fn hx_stomp(app: &mut App) {
         },
         hx_usb::Switch {
             switch: 3,
+            action: None,
             momentary: false,
             label: None,
             colour: led("Turquoise"),
