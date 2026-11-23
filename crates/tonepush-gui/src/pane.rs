@@ -748,7 +748,15 @@ fn control_cell(
                 .min_width(width)
                 .show(&mut child)
                 .on_hover_text(format!("{}: choose", param.name));
-            let chosen = current.round().max(0.0) as usize;
+            // The first label is the parameter's lowest value: Note Sync
+            // counts from 1, a pitch interval from below zero. The IR slot
+            // list keeps counting from zero, as it did.
+            let first = if param.display.as_deref() == Some("ir_select") {
+                0.0
+            } else {
+                param.min
+            };
+            let chosen = (current - first).round().max(0.0) as usize;
             // Its own id: the button's default one is the right-click
             // assignment menu's too, which closes on a click and so shut the
             // list in the frame it opened.
@@ -766,7 +774,7 @@ fn control_cell(
                                     .clicked()
                                     && !on
                                 {
-                                    current = n as f32;
+                                    current = n as f32 + first;
                                     changed = true;
                                 }
                             }
