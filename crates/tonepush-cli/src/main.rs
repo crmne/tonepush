@@ -1204,6 +1204,15 @@ fn restore(session: &mut hx_usb::Session, file: &std::path::Path) -> Result<()> 
 
 fn watch(session: &mut hx_usb::Session) -> Result<()> {
     println!("watching for device notifications; ctrl-c to stop");
+    // A session opened too soon after another one can find the events
+    // channel never answers its handshake (PROTOCOL.md). Nothing is retried
+    // here; saying so beats a watch that stays silent without a reason.
+    if !session.events_answered() {
+        eprintln!(
+            "the device did not answer on its events channel, so this session may report \
+             nothing; if it stays silent, wait half a minute and run watch again"
+        );
+    }
     loop {
         for (event, args) in session.poll_notifications()? {
             println!("event {event}: {args:?}");
