@@ -1603,11 +1603,16 @@ pub(crate) fn sentence_case(text: &str) -> String {
 // The frame, for the app
 
 impl App {
-    /// How the connected HX numbers what can drive a parameter.
-    pub(crate) fn controls(&self) -> hx_proto::rpc::ControlLayout {
+    /// The connected HX's profile, by the name it reported.
+    pub(crate) fn profile(&self) -> Option<&'static hx_proto::DeviceProfile> {
         hx_proto::PROFILES
             .iter()
             .find(|profile| profile.name == self.device.trim())
+    }
+
+    /// How the connected HX numbers what can drive a parameter.
+    pub(crate) fn controls(&self) -> hx_proto::rpc::ControlLayout {
+        self.profile()
             .map_or(hx_proto::rpc::ControlLayout::Stomp, |profile| {
                 profile.controls
             })
