@@ -1613,6 +1613,23 @@ impl App {
         self.pending_select = None;
     }
 
+    /// Show a control turned at the pedal.
+    ///
+    /// An Amp+Cab is left as it is: the pedal numbers the cab's controls
+    /// from zero like the amp's, and the announcement does not say which
+    /// half it means, so writing it into either could show a wrong value.
+    fn pedal_turned(&mut self, block: i64, index: usize, value: f32) {
+        let Some(slot) = self.chain.iter_mut().find(|b| b.position == block) else {
+            return;
+        };
+        if slot.paired.is_some() {
+            return;
+        }
+        if let Some(held) = slot.values.get_mut(index) {
+            *held = value;
+        }
+    }
+
     fn drain_events(&mut self) {
         loop {
             match self.from_device.try_recv() {
@@ -1887,6 +1904,20 @@ impl App {
                 Ok(Evt::CapturedSetlist(slots)) => self.keep_setlist(slots, "hxpreset"),
                 Ok(Evt::Switches(switches)) => self.switches = switches,
                 Ok(Evt::Activity(line)) => self.note(line),
+                Ok(Evt::PedalEnabled { block, enabled }) => {
+                    if let Some(slot) = self.chain.iter_mut().find(|b| b.position == block) {
+                        slot.enabled = enabled;
+                    }
+                    self.dirty = true;
+                }
+                Ok(Evt::PedalParam {
+                    block,
+                    index,
+                    value,
+                }) => {
+                    self.pedal_turned(block, index, value);
+                    self.dirty = true;
+                }
                 Ok(Evt::Failed(e)) => {
                     self.status = if self.connection == Connection::Connecting {
                         "No supported pedal found. Check USB and close any other pedal editor."

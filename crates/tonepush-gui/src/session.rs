@@ -437,6 +437,19 @@ pub enum Evt {
     /// than silently shortening.
     CapturedSetlist(Vec<(String, Option<Vec<u8>>)>),
     Activity(String),
+    /// A block was switched on or off at the pedal: a footswitch, or a
+    /// snapshot taking its bypass along.
+    PedalEnabled {
+        block: i64,
+        enabled: bool,
+    },
+    /// A control was turned at the pedal. The value is the parameter's
+    /// native one, as a preset document holds it.
+    PedalParam {
+        block: i64,
+        index: usize,
+        value: f32,
+    },
     Failed(String),
 }
 
@@ -592,6 +605,15 @@ struct Worker {
     /// Whether the pedal declined, after an announcement, to say which
     /// preset it has loaded, so the next poll asks again.
     recheck: bool,
+    /// The values the editor itself wrote a moment ago, by block and, for a
+    /// control, its index. The pedal announces a change the same way whoever
+    /// made it, so an announcement of a value written here is taken for the
+    /// echo of that write. Any other value came from the pedal.
+    written: std::collections::HashMap<Control, Vec<(f32, Instant)>>,
+    /// When the pedal last said it was recalling a snapshot and has not yet
+    /// said it finished. The bypasses it announces in between are the
+    /// snapshot's, not edits.
+    recalling: Option<Instant>,
     /// Everything an audition temporarily displaces. Histories are moved here
     /// rather than copied: while a cloud Tone is sounding it is not an edit
     /// somebody can accidentally fold into their existing undo stack.
@@ -649,6 +671,8 @@ impl Worker {
                 snapshot: None,
             },
             recheck: false,
+            written: std::collections::HashMap::new(),
+            recalling: None,
             audition: None,
             trial: None,
         }
@@ -801,12 +825,16 @@ impl Worker {
                 kind,
             } => {
                 self.snapshot();
+                if let Some(native) = native(&kind.wire(value)) {
+                    self.wrote((block, Some(index)), native);
+                }
                 if self.run_on_device(|d| d.set_param(block, index, kind.wire(value))) {
                     self.dirty = true;
                 }
             }
             Cmd::SetEnabled { block, enabled } => {
                 self.snapshot();
+                self.wrote((block, None), f32::from(u8::from(enabled)));
                 if self.run_on_device(|d| d.set_enabled(block, enabled)) {
                     self.dirty = true;
                 }
@@ -2332,13 +2360,53 @@ impl Worker {
         };
         let polled = device.poll_notifications();
         let mut snapshot = None;
+        // What was turned or switched at the pedal: before the last preset
+        // load it announced, and since.
+        let mut earlier = Vec::new();
+        let mut turned = Vec::new();
         if let Ok(events) = &polled {
             for (event, args) in events {
-                self.events
-                    .send(Evt::Activity(format!("event {event}: {args:?}")));
+                let line = format!("event {event}: {args:?}");
+                self.events.send(Evt::Activity(line));
+                // A snapshot being recalled announces the bypasses it
+                // changes between these two; they are its state, not edits.
+                match *event {
+                    SNAPSHOT_RECALLING => self.recalling = Some(Instant::now()),
+                    SNAPSHOT_RECALLED => self.recalling = None,
+                    _ => {}
+                }
                 match notice(*event, args) {
-                    Notice::Preset | Notice::Unknown => look = true,
+                    Notice::Preset => {
+                        look = true;
+                        earlier.append(&mut turned);
+                    }
+                    Notice::Unknown => look = true,
                     Notice::Snapshot(index) => snapshot = Some(index),
+                    Notice::Enabled { block, enabled } => {
+                        let recalling = self
+                            .recalling
+                            .is_some_and(|since| since.elapsed() < Self::RECALL);
+                        if !recalling {
+                            turned.push((
+                                (block, None),
+                                f32::from(u8::from(enabled)),
+                                Evt::PedalEnabled { block, enabled },
+                            ));
+                        }
+                    }
+                    Notice::Param {
+                        block,
+                        index,
+                        value,
+                    } => turned.push((
+                        (block, i64::try_from(index).ok()),
+                        value,
+                        Evt::PedalParam {
+                            block,
+                            index,
+                            value,
+                        },
+                    )),
                     Notice::Chatter => {}
                 }
             }
@@ -2351,12 +2419,66 @@ impl Worker {
             return self.let_go();
         }
         let reloaded = look && self.follow_preset();
+        if !reloaded {
+            // No other preset after all: what came before the announcement
+            // belongs to this one too.
+            earlier.append(&mut turned);
+            turned = earlier;
+        }
+        // After a reload only what followed the load is shown. The document
+        // just read holds those values already, but it arrived as a preset
+        // with nothing to save, and it has something now.
+        self.show_pedal_edits(turned);
         if !reloaded && snapshot.is_some_and(|index| self.shown.snapshot != Some(index)) {
             // Another snapshot is the same preset in another state: the
             // chain is read again, and the history and unsaved changes stay.
             self.reload();
         }
     }
+
+    /// Show what was turned or switched at the pedal itself.
+    ///
+    /// The editor used to drop these as the echo of its own edits, which
+    /// they usually are, so a stomp or a knob at the pedal left the screen
+    /// showing what was no longer true. An announcement of a value the
+    /// editor wrote to that control within [`Self::ECHO`] is still dropped:
+    /// mid-drag the echo of an earlier step would otherwise pull the control
+    /// back. Any other value changed the edit buffer without us, so the
+    /// preset has changes to save.
+    fn show_pedal_edits(&mut self, turned: Vec<(Control, f32, Evt)>) {
+        self.written.retain(|_, values| {
+            values.retain(|(_, at)| at.elapsed() < Self::ECHO);
+            !values.is_empty()
+        });
+        for (what, value, evt) in turned {
+            let echo = self
+                .written
+                .get(&what)
+                .is_some_and(|values| values.iter().any(|(wrote, _)| same_value(*wrote, value)));
+            if echo {
+                continue;
+            }
+            self.dirty = true;
+            self.send(evt);
+        }
+    }
+
+    /// Remember a value the editor is about to write, to know its echo.
+    fn wrote(&mut self, what: Control, value: f32) {
+        self.written
+            .entry(what)
+            .or_default()
+            .push((value, Instant::now()));
+    }
+
+    /// How long after one of the editor's own writes an announcement of the
+    /// same value is taken for its echo. Echoes arrive within a poll or two.
+    const ECHO: Duration = Duration::from_millis(1500);
+
+    /// How long a snapshot recall may go unfinished before the bypasses the
+    /// pedal announces count as edits again. A recall is over within one
+    /// poll; this only keeps a lost ending from hiding stomps for good.
+    const RECALL: Duration = Duration::from_secs(2);
 
     /// Catch up with a preset the pedal loaded by itself.
     ///
@@ -2456,6 +2578,28 @@ impl Worker {
     }
 }
 
+/// A block's bypass, or one of its controls by index.
+type Control = (i64, Option<i64>);
+
+/// The events that open and close a snapshot recall
+/// (docs/_reference/opcodes.md, section 3).
+const SNAPSHOT_RECALLING: i64 = 42;
+const SNAPSHOT_RECALLED: i64 = 46;
+
+/// A parameter's wire value as the number a document holds for it.
+fn native(value: &hx_proto::msgpack::Value) -> Option<f32> {
+    match value {
+        hx_proto::msgpack::Value::Bool(on) => Some(f32::from(u8::from(*on))),
+        value => value.as_f32(),
+    }
+}
+
+/// Whether an announced value is one the editor wrote, allowing for the
+/// rounding of a float sent and sent back.
+fn same_value(wrote: f32, announced: f32) -> bool {
+    (wrote - announced).abs() <= 1e-4 * wrote.abs().max(1.0)
+}
+
 /// What a notification from the pedal means for the editor.
 #[derive(Debug, PartialEq)]
 enum Notice {
@@ -2464,6 +2608,14 @@ enum Notice {
     Preset,
     /// A snapshot was selected, by its zero-based index.
     Snapshot(usize),
+    /// A block was switched on or off.
+    Enabled { block: i64, enabled: bool },
+    /// A control took a new value, in its native units.
+    Param {
+        block: i64,
+        index: usize,
+        value: f32,
+    },
     /// Nothing to follow: completions, the steady tick, edits echoed back.
     Chatter,
     /// An event never seen in a capture, which could be any of the above.
@@ -2480,6 +2632,12 @@ enum Notice {
 /// all captured from switches HX Edit asked for; a footswitch has not been
 /// captured, so an event that is not known to be chatter is treated as
 /// possibly a switch, which costs one question to the device.
+///
+/// Since then an HX Stomp at 3.80 has been watched while its own controls
+/// were used. A preset footswitch announces 8, 22 and 4 as above, a snapshot
+/// 42 and 46. A stomp switch announces 41 for the press and the release and
+/// 49 with the block and its new state; a turned knob announces 30 with the
+/// block, the parameter index and the value, once per step.
 fn notice(event: i64, args: &hx_proto::msgpack::Value) -> Notice {
     use hx_proto::msgpack::Value;
     use hx_proto::rpc::key;
@@ -2489,6 +2647,11 @@ fn notice(event: i64, args: &hx_proto::msgpack::Value) -> Notice {
     let inner = args.get(key::EVENT_ARGS).unwrap_or(args);
     let number = |k| inner.get(k).and_then(Value::as_i64);
     const LOADED_SLOT: i64 = 28;
+    // Event 49 is three messages, told apart by key 121 beside the
+    // arguments: 17 is a bypass (docs/_reference/opcodes.md, section 3).
+    const METHOD: i64 = 121;
+    const BYPASS: i64 = 17;
+    let number_at = |k| args.get(k).and_then(Value::as_i64);
     match event {
         4 | 8 => Notice::Preset,
         22 if number(key::OBJECT_ID) == Some(LOADED_SLOT) => Notice::Preset,
@@ -2496,7 +2659,28 @@ fn notice(event: i64, args: &hx_proto::msgpack::Value) -> Notice {
             Some(index) => Notice::Snapshot(index),
             None => Notice::Unknown,
         },
-        1 | 6 | 20 | 21 | 22 | 23 | 30 | 31 | 33 | 34 | 37 | 39 | 49 | 56 | 59 | 60 => {
+        30 => {
+            let value = inner.get(key::VALUE).and_then(native);
+            let index = number(key::PARAM_INDEX).and_then(|n| usize::try_from(n).ok());
+            match (number(key::BLOCK), index, value) {
+                (Some(block), Some(index), Some(value)) => Notice::Param {
+                    block,
+                    index,
+                    value,
+                },
+                _ => Notice::Chatter,
+            }
+        }
+        49 if number_at(METHOD) == Some(BYPASS) => {
+            match (
+                number(key::BLOCK),
+                inner.get(key::ENABLED).and_then(Value::as_bool),
+            ) {
+                (Some(block), Some(enabled)) => Notice::Enabled { block, enabled },
+                _ => Notice::Chatter,
+            }
+        }
+        1 | 6 | 20 | 21 | 22 | 23 | 31 | 33 | 34 | 37 | 39 | 41 | 49 | 56 | 59 | 60 => {
             Notice::Chatter
         }
         _ => Notice::Unknown,
@@ -3513,6 +3697,234 @@ mod tests {
             Notice::Chatter
         );
         assert_eq!(notice(77, &Value::Nil), Notice::Unknown);
+
+        // As an HX Stomp at 3.80 announced its own stomp switch and knob.
+        let stomped = hx_proto::msgmap! { 98 => Value::Int(5), 59 => Value::Bool(true) };
+        assert_eq!(
+            notice(49, &state_change([0, 5, 17], stomped)),
+            Notice::Enabled {
+                block: 5,
+                enabled: true
+            }
+        );
+        let rebuilt = hx_proto::msgmap! { 98 => Value::Int(5) };
+        assert_eq!(
+            notice(49, &state_change([0, 5, 10], rebuilt)),
+            Notice::Chatter
+        );
+        assert_eq!(
+            notice(30, &state_change([0, 6, 20], knob(6, 1, Value::F32(0.5)))),
+            Notice::Param {
+                block: 6,
+                index: 1,
+                value: 0.5
+            }
+        );
+        assert_eq!(
+            notice(30, &state_change([0, 6, 20], knob(6, 2, Value::Bool(true)))),
+            Notice::Param {
+                block: 6,
+                index: 2,
+                value: 1.0
+            }
+        );
+        let pressed = hx_proto::msgmap! { 70 => Value::Int(0), 63 => Value::Bool(true) };
+        assert_eq!(notice(41, &pressed), Notice::Chatter);
+    }
+
+    /// The arguments of event 30: a control and the value it took.
+    fn knob(block: i64, index: i64, value: Value) -> Value {
+        hx_proto::msgmap! {
+            98 => Value::Int(block),
+            29 => Value::Bool(true),
+            26 => Value::Int(0),
+            28 => Value::Int(index),
+            119 => value,
+        }
+    }
+
+    /// A stomp switch or a knob on the pedal has to reach the screen. Both
+    /// were dropped as the echo of the editor's own edits, so the chain went
+    /// on showing a block bypassed that was sounding.
+    #[test]
+    fn a_stomp_or_a_knob_on_the_pedal_is_shown() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        let _ = events.try_iter().count();
+        assert!(!worker.dirty);
+
+        {
+            let mut pedal = pedal.lock().unwrap();
+            let stomped = hx_proto::msgmap! { 98 => Value::Int(2), 59 => Value::Bool(false) };
+            pedal.notify(49, state_change([0, 5, 17], stomped));
+            pedal.notify(30, state_change([0, 6, 20], knob(2, 1, Value::F32(0.25))));
+        }
+        worker.poll();
+
+        let said: Vec<Evt> = events.try_iter().collect();
+        assert!(said.iter().any(|e| matches!(
+            e,
+            Evt::PedalEnabled {
+                block: 2,
+                enabled: false
+            }
+        )));
+        assert!(said.iter().any(|e| matches!(
+            e,
+            Evt::PedalParam { block: 2, index: 1, value } if *value == 0.25
+        )));
+        assert!(worker.dirty, "the edit buffer changed without us");
+    }
+
+    /// The bypass of block `block`, as event 49 announces it.
+    fn stomp(block: i64, enabled: bool) -> Value {
+        let args = hx_proto::msgmap! { 98 => Value::Int(block), 59 => Value::Bool(enabled) };
+        state_change([0, 5, 17], args)
+    }
+
+    fn pedal_edits(events: &Receiver<Evt>) -> Vec<Evt> {
+        events
+            .try_iter()
+            .filter(|e| matches!(e, Evt::PedalEnabled { .. } | Evt::PedalParam { .. }))
+            .collect()
+    }
+
+    /// A block engaged in the editor and stomped off on the pedal straight
+    /// after is off. Dropping every announcement about a control written a
+    /// moment ago left it shown engaged.
+    #[test]
+    fn a_stomp_right_after_the_editors_own_edit_is_shown() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::SetEnabled {
+            block: 2,
+            enabled: true,
+        });
+        let _ = events.try_iter().count();
+
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.notify(49, stomp(2, true));
+            pedal.notify(49, stomp(2, false));
+        }
+        worker.poll();
+
+        assert!(matches!(
+            pedal_edits(&events).as_slice(),
+            [Evt::PedalEnabled {
+                block: 2,
+                enabled: false
+            }]
+        ));
+    }
+
+    /// A snapshot recalled on the pedal announces the bypasses it changes.
+    /// They are the snapshot's state: counted as edits, picking a snapshot
+    /// on a clean preset left it asking to be saved.
+    #[test]
+    fn a_snapshot_recalled_on_the_pedal_is_not_an_edit() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        let _ = events.try_iter().count();
+
+        {
+            let mut pedal = pedal.lock().unwrap();
+            let picked = hx_proto::msgmap! { 92 => Value::Int(0) };
+            pedal.notify(42, picked.clone());
+            pedal.notify(49, stomp(2, true));
+            pedal.notify(46, picked);
+        }
+        worker.poll();
+
+        assert!(pedal_edits(&events).is_empty());
+        assert!(!worker.dirty);
+
+        // A stomp once the recall is over is an edit again.
+        pedal.lock().unwrap().notify(49, stomp(2, false));
+        worker.poll();
+        assert_eq!(pedal_edits(&events).len(), 1);
+        assert!(worker.dirty);
+    }
+
+    /// A knob turned just after a preset footswitch can arrive in the same
+    /// poll as the load. It is an edit to the new preset; one turned before
+    /// the load went with the old preset.
+    #[test]
+    fn a_knob_turned_after_a_load_on_the_pedal_marks_the_new_preset() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        let _ = events.try_iter().count();
+
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.notify(30, state_change([0, 6, 20], knob(2, 1, Value::F32(0.1))));
+            pedal.switch_to(5);
+        }
+        worker.poll();
+        assert!(!worker.dirty, "the old preset's edit went with it");
+        assert!(pedal_edits(&events).is_empty());
+
+        {
+            let mut pedal = pedal.lock().unwrap();
+            pedal.switch_to(2);
+            pedal.notify(30, state_change([0, 6, 20], knob(2, 1, Value::F32(0.2))));
+        }
+        worker.poll();
+        assert!(worker.dirty, "the new preset has an edit to save");
+        let said: Vec<Evt> = events.try_iter().collect();
+        let loaded = said
+            .iter()
+            .position(|e| matches!(e, Evt::Loaded { index: 2, .. }));
+        let turned = said
+            .iter()
+            .position(|e| matches!(e, Evt::PedalParam { .. }));
+        assert!(
+            loaded.is_some() && loaded < turned,
+            "the edit follows the load"
+        );
+    }
+
+    /// The pedal announces the editor's own writes the same way. Shown, the
+    /// echo of an earlier step of a drag pulled the control back under the
+    /// pointer.
+    #[test]
+    fn the_echo_of_the_editors_own_edit_is_not_shown() {
+        let pedal = Pedal::new();
+        let (mut worker, events) = worker(&pedal);
+        worker.handle(Cmd::SetEnabled {
+            block: 2,
+            enabled: true,
+        });
+        worker.handle(Cmd::SetParam {
+            block: 2,
+            index: 1,
+            value: 0.75,
+            kind: hx_catalog::Kind::Continuous,
+        });
+        let _ = events.try_iter().count();
+
+        {
+            let mut pedal = pedal.lock().unwrap();
+            let echoed = hx_proto::msgmap! { 98 => Value::Int(2), 59 => Value::Bool(true) };
+            pedal.notify(49, state_change([0, 5, 17], echoed));
+            pedal.notify(30, state_change([0, 6, 20], knob(2, 1, Value::F32(0.75))));
+            // Another control of the same block was not written here.
+            pedal.notify(30, state_change([0, 6, 20], knob(2, 3, Value::F32(0.1))));
+        }
+        worker.poll();
+
+        let shown: Vec<Evt> = events
+            .try_iter()
+            .filter(|e| matches!(e, Evt::PedalEnabled { .. } | Evt::PedalParam { .. }))
+            .collect();
+        assert!(matches!(
+            shown.as_slice(),
+            [Evt::PedalParam {
+                block: 2,
+                index: 3,
+                ..
+            }]
+        ));
     }
 
     #[test]
