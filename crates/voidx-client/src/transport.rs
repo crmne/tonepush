@@ -96,16 +96,22 @@ fn may_be_stompstation_pro(found: &Found) -> bool {
         && !is_stompstation_pro(found)
 }
 
+/// Firmware up to 2.4 names the pedal "StompStation PRO". From 2.5.3 it says
+/// only "StompStation", and the PRO is told apart by its serial number,
+/// `STOMPPRO-<id>-ACM`.
 fn is_stompstation_pro(found: &Found) -> bool {
     let maker = found
         .manufacturer
         .as_deref()
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("SONULAB"));
-    let product = found
-        .product
-        .as_deref()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("StompStation PRO"));
-    maker && product
+    let product = found.product.as_deref().map(str::trim);
+    let named_pro = product.is_some_and(|value| value.eq_ignore_ascii_case("StompStation PRO"));
+    let pro_serial = product.is_some_and(|value| value.eq_ignore_ascii_case("StompStation"))
+        && found
+            .serial_number
+            .as_deref()
+            .is_some_and(|value| value.trim().to_ascii_uppercase().starts_with("STOMPPRO-"));
+    maker && (named_pro || pro_serial)
 }
 
 #[cfg(target_os = "linux")]
@@ -241,5 +247,23 @@ mod id_tests {
             0x0e41,
             0x4246
         )));
+    }
+
+    #[test]
+    fn a_pro_is_named_by_its_product_or_from_2_5_by_its_serial() {
+        assert!(is_stompstation_pro(&port(
+            Some("SONULAB"),
+            Some("StompStation PRO"),
+            0x1d6b,
+            0x0104
+        )));
+        let mut pro_2_5 = port(Some("SONULAB"), Some("StompStation"), 0x1d6b, 0x0104);
+        assert!(!is_stompstation_pro(&pro_2_5));
+        pro_2_5.serial_number = Some("STOMPPRO-10000000ce9f6e74-ACM".into());
+        assert!(is_stompstation_pro(&pro_2_5));
+        assert!(!may_be_stompstation_pro(&pro_2_5));
+        let mut other = port(Some("SONULAB"), Some("StompStation"), 0x1d6b, 0x0104);
+        other.serial_number = Some("STOMP-10000000ce9f6e74-ACM".into());
+        assert!(!is_stompstation_pro(&other));
     }
 }

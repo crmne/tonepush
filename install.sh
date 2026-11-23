@@ -148,8 +148,9 @@ PLIST
 # bug in this program, so it is worth doing at install time.
 install_udev_rule() {
     # A rule from before StompStation PRO support grants nothing on its serial
-    # port, so it is replaced rather than taken as done.
-    if grep -qs SONULAB "$UDEV_RULE"; then
+    # port, and one from before firmware 2.5.3 misses the pedal once it calls
+    # itself "StompStation", so either is replaced rather than taken as done.
+    if grep -qs STOMPPRO "$UDEV_RULE"; then
         say "udev rule already present"
         return
     fi
@@ -160,7 +161,8 @@ install_udev_rule() {
         rule="$(grep -v '^#' packaging/udev/70-line6-hx.rules)"
     else
         rule="SUBSYSTEM==\"usb\", ATTR{idVendor}==\"$LINE6_VENDOR\", MODE=\"0666\", TAG+=\"uaccess\"
-SUBSYSTEM==\"tty\", ATTRS{manufacturer}==\"SONULAB\", ATTRS{product}==\"StompStation PRO\", MODE=\"0660\", TAG+=\"uaccess\""
+SUBSYSTEM==\"tty\", ATTRS{manufacturer}==\"SONULAB\", ATTRS{product}==\"StompStation PRO\", MODE=\"0660\", TAG+=\"uaccess\"
+SUBSYSTEM==\"tty\", ATTRS{manufacturer}==\"SONULAB\", ATTRS{serial}==\"STOMPPRO-*\", MODE=\"0660\", TAG+=\"uaccess\""
     fi
 
     if [ "$(id -u)" = 0 ]; then
