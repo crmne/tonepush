@@ -45,8 +45,11 @@ added once the faithful converter exists. We already **read** `.hxb`
 The fast read changed this. A full capture is **~4 s** and never moves the
 loaded preset, so it runs **on every connect** - one automatic bundle, kept at
 `~/.local/share/tonepush/backups/automatic.hxbundle`. Every **save** then
-refreshes just the preset it changed, which is milliseconds and silent. On top
-of that, **Back up…** and **Restore…** on the preset list do it on demand.
+refreshes just the preset it changed, which is milliseconds and silent, and
+putting presets in slots - a copy, a move over another, a setlist - refreshes
+just the slots it wrote, after setting the bundle as it was aside in the
+history. On top of that, **Back up…** and **Restore…** on the preset list do
+it on demand.
 
 So the copy on disk is never older than the last thing you did, and nothing
 ever interrupts playing.
