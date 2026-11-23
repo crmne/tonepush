@@ -1,5 +1,48 @@
 //! `tonepush`, the command-line editor for supported guitar processors.
 
+thread_local! {
+    static OUTPUT: std::cell::RefCell<Option<CommandOutput>> = const { std::cell::RefCell::new(None) };
+}
+
+#[derive(Default)]
+struct CommandOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn emit(args: std::fmt::Arguments<'_>, stderr: bool) {
+    OUTPUT.with(|output| {
+        if let Some(buffer) = output.borrow_mut().as_mut() {
+            let stream = if stderr {
+                &mut buffer.stderr
+            } else {
+                &mut buffer.stdout
+            };
+            let _ = stream.write_fmt(args);
+        } else if stderr {
+            let _ = std::io::stderr().write_fmt(args);
+        } else {
+            let _ = std::io::stdout().write_fmt(args);
+        }
+    });
+}
+
+macro_rules! print {
+    ($($arg:tt)*) => { $crate::emit(format_args!($($arg)*), false) };
+}
+macro_rules! println {
+    () => { print!("\n") };
+    ($($arg:tt)*) => { print!("{}\n", format_args!($($arg)*)) };
+}
+macro_rules! eprintln {
+    ($($arg:tt)*) => { $crate::emit(format_args!("{}\n", format_args!($($arg)*)), true) };
+}
+
+// After the macros above: a module only sees the ones defined before it, and
+// what the bridge reports has to land in the reply, not on the editor's own
+// standard error.
+#[cfg(unix)]
+pub mod bridge;
 mod hlx;
 mod voidx;
 mod wav;
@@ -494,7 +537,7 @@ enum Cmd {
     },
 }
 
-fn main() -> Result<()> {
+pub fn main() -> Result<()> {
     // Before anything looks for the extracted resources, which a machine that
     // knew this program under its old name has filed under that name. Either
     // binary may be the first to run after an upgrade, so both do this.
@@ -526,7 +569,13 @@ fn main() -> Result<()> {
         {
             bail!("{index:?} is not a preset; use a label like 03B or an index like 7")
         }
-        cmd => on_device(cmd),
+        cmd => {
+            #[cfg(unix)]
+            if let Some(socket) = std::env::var_os(bridge::ENV) {
+                return bridge::forward(&socket, std::env::args_os().skip(1).collect());
+            }
+            on_device(cmd)
+        }
     }
 }
 
@@ -667,6 +716,11 @@ fn run_batch(file: Option<&std::path::Path>) -> Result<()> {
     let steps = parse_batch(&text)?;
     if steps.is_empty() {
         return Ok(());
+    }
+
+    #[cfg(unix)]
+    if let Some(socket) = std::env::var_os(bridge::ENV) {
+        return bridge::forward_batch(&socket, &text);
     }
 
     let mut session = open_session()?;
@@ -1092,6 +1146,9 @@ fn show_info(session: &mut hx_usb::Session) -> Result<()> {
             println!("firmware:  {}", p.firmware().unwrap_or_else(|| "?".into()));
             println!("build:     {}", p.build().unwrap_or("?"));
         }
+        // A preset that cannot be read is worth a note. A transport that has
+        // gone quiet is not something to carry on from.
+        Err(e) if e.loses_session() => return Err(e.into()),
         Err(e) => println!("(could not read preset for firmware: {e})"),
     }
     Ok(())
@@ -1109,6 +1166,7 @@ fn show_preset(session: &mut hx_usb::Session, raw: bool) -> Result<()> {
             session.profile.slot_label(index),
             name
         ),
+        Err(e) if e.loses_session() => return Err(e.into()),
         Err(e) => println!("preset:   (metadata unavailable: {e})"),
     }
     println!(
@@ -2343,7 +2401,7 @@ mod tests {
 
     /// A pedal that answers every request with an empty success and keeps
     /// what it was asked, for seeing which block a command addresses.
-    mod pedal {
+    pub(crate) mod pedal {
         use std::collections::{BTreeMap, VecDeque};
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
@@ -2359,6 +2417,30 @@ mod tests {
             outbox: VecDeque<Vec<u8>>,
             inbox: BTreeMap<u16, StreamReader>,
             seq: BTreeMap<u16, u16>,
+        }
+
+        impl Pedal {
+            /// Say something unasked, on the events channel.
+            pub fn notify(&mut self, event: i64, args: Value) {
+                let node = ChannelId::EVENTS.device;
+                let body = Encoder::encode(&Message::Notification { event, args }.to_value());
+                let seq = self.seq.entry(node).or_insert(0);
+                let mut payload = Vec::new();
+                ChannelHeader {
+                    seq: *seq,
+                    msg_type: MSG_DATA,
+                    ack: 0x1000,
+                }
+                .encode_into(&mut payload);
+                *seq = seq.wrapping_add(1);
+                payload.extend_from_slice(&[0, 0, 0, 0]);
+                payload.extend_from_slice(&(body.len() as u32).to_le_bytes());
+                payload.extend_from_slice(&body);
+                let frame = Frame::new(ChannelId::EVENTS.host, node, payload)
+                    .encode()
+                    .unwrap();
+                self.outbox.push_back(frame);
+            }
         }
 
         pub struct Cable(pub Arc<Mutex<Pedal>>);
