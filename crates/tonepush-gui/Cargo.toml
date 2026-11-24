@@ -65,7 +65,7 @@ sha2 = "0.11"
 # flushed, so a crash cannot turn the last good index into half a JSON file.
 atomic-write-file = "0.3.1"
 # Human-readable, sortable timestamps in the local library index.
-jiff = "0.2"
+jiff = "1.0"
 
 [dev-dependencies]
 # Renders the editor offscreen on the GPU for the design screenshots (see
